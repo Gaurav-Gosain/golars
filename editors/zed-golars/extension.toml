@@ -11,5 +11,10 @@ name = "golars Language Server"
 languages = ["golars"]
 
 [grammars.golars]
-repository = "https://github.com/nkapila6/tree-sitter-golars"
-commit = "ab6cc9593842cac51a4465a9a0d71f3cafd5afd4"
+# Grammar lives in-tree so the extension and command-set can never
+# drift. Zed's extension host clones `repository` at `rev` and then
+# runs `tree-sitter build` inside `path`; that keeps the distribution
+# single-source without a mirror repo.
+repository = "https://github.com/Gaurav-Gosain/golars"
+rev = "main"
+path = "editors/tree-sitter-golars"

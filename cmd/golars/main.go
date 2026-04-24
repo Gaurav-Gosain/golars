@@ -294,6 +294,8 @@ func (s *state) handle(line string) error {
 		return s.cmdSize()
 	case ".unique":
 		return s.cmdUnique()
+	case ".with":
+		return s.cmdWith(strings.TrimSpace(strings.TrimPrefix(line, parts[0])))
 	case ".unnest":
 		return s.cmdUnnest(args)
 	case ".explode":
@@ -456,6 +458,7 @@ func (s *state) cmdHelp() error {
 		{".sample <N> [seed]", "sample N rows without replacement"},
 		{".shuffle [seed]", "shuffle rows in place (materialises)"},
 		{".unique", "drop duplicate rows over all columns"},
+		{".with <name> = <expr>", "append a derived column (arithmetic + string + agg + rolling)"},
 		{".unnest <col>", "project struct fields as top-level columns"},
 		{".explode <col>", "fan out list elements into individual rows"},
 		{".upsample <col> <every>", "interpolate sorted timestamps at a regular interval"},

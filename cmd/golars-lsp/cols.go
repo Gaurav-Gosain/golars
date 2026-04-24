@@ -235,6 +235,13 @@ func applyStmt(st *frameState, dir, stmt string) {
 		}
 	case "select":
 		st.focus.cols = commaList(stmt, parts)
+	case "with":
+		// `with NAME = EXPR` appends a single column. The new name
+		// is the first token after `with`, up to the `=`. Row count
+		// stays constant; the schema grows by one.
+		if len(parts) >= 2 {
+			st.focus.cols = append(append([]string(nil), st.focus.cols...), parts[1])
+		}
 	case "drop":
 		st.focus.cols = dropFromList(st.focus.cols, commaList(stmt, parts))
 	case "groupby":

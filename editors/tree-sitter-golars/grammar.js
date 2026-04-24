@@ -37,6 +37,8 @@ module.exports = grammar({
     // identifier so user-defined Executor hosts still parse cleanly.
     command: $ => choice(
       'load', 'save', 'use', 'stash', 'frames', 'drop_frame',
+      'with', 'unnest', 'explode', 'upsample',
+      'tree', 'graph', 'show_graph', 'mermaid', 'explain_tree',
       'select', 'drop', 'filter', 'sort', 'limit',
       'head', 'tail', 'show', 'schema', 'describe',
       'groupby', 'join',

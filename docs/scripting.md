@@ -147,6 +147,7 @@ typo.glr:3: unknown script command .filtet (did you mean `.filter`?)
 | `corr COL1 COL2` / `cov COL1 COL2`     | Pair-wise Pearson corr / sample cov. |
 | `pivot INDEX ON VALUES [AGG]`          | Long-to-wide pivot. AGG: first/sum/mean/min/max/count. |
 | `pwd` / `ls [PATH]` / `cd [PATH]`      | Working-directory helpers. |
+| `with NAME = EXPR`                     | Append a derived column. EXPR is a real expression: arithmetic, comparisons, logical ops, string methods, aggregates, rolling windows. See [Expression grammar](#expression-grammar). |
 | `unnest COL`                           | Project fields of a struct-typed column as top-level columns. |
 | `explode COL`                          | Fan out each element of a list-typed column into its own row. |
 | `upsample COL EVERY`                   | Interpolate a sorted timestamp column at `ns`/`us`/`ms`/`s`/`m`/`h`/`d`/`w` intervals. |

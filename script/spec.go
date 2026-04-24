@@ -299,6 +299,21 @@ var Commands = []CommandSpec{
 		Category: "inspect",
 	},
 	{
+		Name: "with", Signature: "with <name> = <expression>",
+		Summary: "Append a derived column. Expression grammar covers arithmetic, comparisons, logical ops, str.* methods, aggregates, rolling windows, casts, and top-level col/lit/coalesce.",
+		LongDoc: "Examples:\n" +
+			"  with bulk = salary > 100000\n" +
+			"  with uname = name.str.upper()\n" +
+			"  with revenue = price * qty\n" +
+			"  with trend = amount.rolling_mean(7, 1)\n" +
+			"  with masked = coalesce(primary, backup).str.trim()\n\n" +
+			"Supported str methods: upper/lower/trim/reverse/title/len_bytes/len_chars/contains/starts_with/ends_with/like/not_like/contains_regex/replace/replace_all/strip_prefix/strip_suffix/slice/head/tail/count_matches/find/split_exact.\n" +
+			"Supported aggregates: sum/mean/min/max/count/null_count/first/last/median/std/var/quantile/skew/kurtosis/n_unique/approx_n_unique.\n" +
+			"Supported shape ops: abs/neg/not/round/floor/ceil/sqrt/exp/log/log2/log10/sign/reverse/head/tail/shift/diff/cum_sum/cum_min/cum_max/fill_null/alias/cast/between/forward_fill/backward_fill.\n" +
+			"Supported windows: rolling_sum/mean/min/max/std/var, ewm_mean/std/var, over(keys...).",
+		Category: "pipeline",
+	},
+	{
 		Name: "unnest", Signature: "unnest <col>",
 		Summary: "Project the fields of a struct-typed column as top-level columns.",
 		LongDoc: "Requires COL to have a Struct dtype. Each struct field becomes a" +

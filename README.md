@@ -33,6 +33,9 @@ brew install Gaurav-Gosain/tap/golars
 
 # Arch Linux (AUR)
 yay -S golars-bin
+
+# One-shot curl installer (macOS / Linux, amd64 + arm64)
+curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/golars/main/install.sh | bash
 ```
 
 ### From source
