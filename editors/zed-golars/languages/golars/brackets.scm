@@ -1,0 +1,3 @@
+(string
+  "\"" @open
+  "\"" @close)

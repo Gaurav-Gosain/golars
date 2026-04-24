@@ -1,20 +1,32 @@
 id = "golars"
 name = "golars"
-description = "golars .glr scripting language support: syntax highlighting, LSP, and editor features."
-version = "0.1.0"
+version = "0.2.0"
 schema_version = 1
-authors = ["Gaurav Gosain <itsgauravgosain@gmail.com>"]
+description = "golars .glr scripting language support: syntax highlighting, LSP, and editor features."
 repository = "https://github.com/Gaurav-Gosain/golars"
+authors = ["Gaurav Gosain <itsgauravgosain@gmail.com>"]
+themes = []
+icon_themes = []
+languages = ["languages/golars"]
+capabilities = []
 
-[language_servers.golars-lsp]
-name = "golars Language Server"
-languages = ["golars"]
+[lib]
+kind = "Rust"
+version = "0.7.0"
 
 [grammars.golars]
-# Grammar lives in-tree so the extension and command-set can never
-# drift. Zed's extension host clones `repository` at `rev` and then
-# runs `tree-sitter build` inside `path`; that keeps the distribution
-# single-source without a mirror repo.
 repository = "https://github.com/Gaurav-Gosain/golars"
 rev = "main"
-path = "editors/tree-sitter-golars"
+
+[language_servers.golars-lsp]
+language = "golars"
+languages = ["golars"]
+
+[language_servers.golars-lsp.language_ids]
+golars = "golars"
+
+[context_servers]
+
+[agent_servers]
+
+[slash_commands]
