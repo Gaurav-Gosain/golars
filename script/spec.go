@@ -23,6 +23,11 @@ type CommandSpec struct {
 	// editors can offer the right completion after the command. One
 	// of: "none", "path", "frame", "column", "count".
 	ArgKind string
+	// Examples is a list of runnable `.glr` snippets that demonstrate
+	// typical uses. Rendered as a fenced code block in LSP hover so a
+	// dev can see exactly how to invoke the command. Leave empty if
+	// the Signature alone is self-documenting.
+	Examples []string
 }
 
 // Commands is the authoritative list. Order matches the REPL .help
@@ -35,9 +40,14 @@ var Commands = []CommandSpec{
 		LongDoc: "Loads a file by path and makes it the new focused pipeline." +
 			" When `as NAME` is appended, the frame is staged in the named-frame registry" +
 			" instead of replacing the focus: useful for multi-source scripts.\n\n" +
-			"Supported extensions: .csv .tsv .parquet .pq .arrow .ipc",
+			"Supported extensions: .csv .tsv .parquet .pq .arrow .ipc. Empty CSV fields" +
+			" become nulls (matches polars).",
 		Category: "io",
 		ArgKind:  "path",
+		Examples: []string{
+			"load data/people.csv",
+			"load data/salaries.parquet as salaries",
+		},
 	},
 	{
 		Name: "use", Signature: "use <NAME>", Summary: "Switch focus to a clone of a named frame.",
@@ -82,9 +92,17 @@ var Commands = []CommandSpec{
 		Name: "filter", Signature: "filter <col> <op> <value> [and|or ...]",
 		Summary: "Filter rows by a predicate (lazy).",
 		LongDoc: "Accepts `col op value` clauses combined with `and`/`or` (left-to-right, no parens)." +
-			" Ops: `==`, `!=`, `<`, `<=`, `>`, `>=`, `is_null`, `is_not_null`." +
-			" Values: integers, floats, \"double-quoted strings\", `true`, `false`.",
+			" Ops: `==`, `!=`, `<`, `<=`, `>`, `>=`, `is_null`, `is_not_null`," +
+			" `contains`, `starts_with`, `ends_with`, `like`, `not_like`." +
+			" Values: integers, floats, \"double-quoted strings\", `true`, `false`." +
+			" A bare boolean column name is also a valid predicate: `filter active`.",
 		Category: "pipeline", ArgKind: "column",
+		Examples: []string{
+			"filter age > 25",
+			"filter salary >= 100000 and dept == \"eng\"",
+			"filter name like \"a%\"",
+			"filter discount is_not_null",
+		},
 	},
 	{Name: "sort", Signature: "sort <col> [asc|desc]", Summary: "Sort by one column (lazy).", Category: "pipeline", ArgKind: "column"},
 	{Name: "limit", Signature: "limit <N>", Summary: "Keep the first N rows (lazy).", Category: "pipeline", ArgKind: "count"},
@@ -93,11 +111,20 @@ var Commands = []CommandSpec{
 		Summary:  "Group by KEYS, aggregate via col:op[:alias].",
 		LongDoc:  "Ops: `sum`, `mean`/`avg`, `min`, `max`, `count`, `null_count`, `first`, `last`.",
 		Category: "pipeline", ArgKind: "column",
+		Examples: []string{
+			"groupby dept amount:sum:total amount:mean:avg",
+			"groupby region,product qty:sum:units price:max:peak",
+		},
 	},
 	{
 		Name: "join", Signature: "join <path|NAME> on <key> [inner|left|cross]",
 		Summary:  "Join focus with a file or named frame on KEY.",
 		Category: "pipeline", ArgKind: "frame",
+		Examples: []string{
+			"load people.csv as people",
+			"load salaries.csv",
+			"join people on name inner",
+		},
 	},
 	{Name: "explain", Signature: "explain", Summary: "Print logical plan, optimiser trace, optimised plan.", Category: "pipeline"},
 	{Name: "explain_tree", Signature: "explain_tree", Summary: "Explain rendered as a box-drawn tree.", Category: "pipeline"},
@@ -300,18 +327,34 @@ var Commands = []CommandSpec{
 	},
 	{
 		Name: "with", Signature: "with <name> = <expression>",
-		Summary: "Append a derived column. Expression grammar covers arithmetic, comparisons, logical ops, str.* methods, aggregates, rolling windows, casts, and top-level col/lit/coalesce.",
-		LongDoc: "Examples:\n" +
-			"  with bulk = salary > 100000\n" +
-			"  with uname = name.str.upper()\n" +
-			"  with revenue = price * qty\n" +
-			"  with trend = amount.rolling_mean(7, 1)\n" +
-			"  with masked = coalesce(primary, backup).str.trim()\n\n" +
-			"Supported str methods: upper/lower/trim/reverse/title/len_bytes/len_chars/contains/starts_with/ends_with/like/not_like/contains_regex/replace/replace_all/strip_prefix/strip_suffix/slice/head/tail/count_matches/find/split_exact.\n" +
-			"Supported aggregates: sum/mean/min/max/count/null_count/first/last/median/std/var/quantile/skew/kurtosis/n_unique/approx_n_unique.\n" +
-			"Supported shape ops: abs/neg/not/round/floor/ceil/sqrt/exp/log/log2/log10/sign/reverse/head/tail/shift/diff/cum_sum/cum_min/cum_max/fill_null/alias/cast/between/forward_fill/backward_fill.\n" +
-			"Supported windows: rolling_sum/mean/min/max/std/var, ewm_mean/std/var, over(keys...).",
+		Summary: "Append a derived column via the expression DSL.",
+		LongDoc: "Expression grammar covers arithmetic, comparisons, logical ops," +
+			" `str.*` methods, aggregates, rolling/EWM windows, casts, and top-level" +
+			" `col` / `lit` / `coalesce`. Result appended as a new column; originals untouched.\n\n" +
+			"**Supported `str.*` methods**\n" +
+			"`upper`, `lower`, `trim`, `reverse`, `title`, `len_bytes`, `len_chars`, `contains`," +
+			" `starts_with`, `ends_with`, `like`, `not_like`, `contains_regex`, `replace`," +
+			" `replace_all`, `strip_prefix`, `strip_suffix`, `slice`, `head`, `tail`," +
+			" `count_matches`, `find`, `split_exact`.\n\n" +
+			"**Aggregates**\n" +
+			"`sum`, `mean`, `min`, `max`, `count`, `null_count`, `first`, `last`," +
+			" `median`, `std`, `var`, `quantile`, `skew`, `kurtosis`, `n_unique`, `approx_n_unique`.\n\n" +
+			"**Shape ops**\n" +
+			"`abs`, `neg`, `not`, `round`, `floor`, `ceil`, `sqrt`, `exp`, `log`, `log2`, `log10`," +
+			" `sign`, `reverse`, `head`, `tail`, `shift`, `diff`, `cum_sum`, `cum_min`, `cum_max`," +
+			" `fill_null`, `alias`, `cast`, `between`, `forward_fill`, `backward_fill`.\n\n" +
+			"**Windows**\n" +
+			"`rolling_sum`, `rolling_mean`, `rolling_min`, `rolling_max`, `rolling_std`," +
+			" `rolling_var`, `ewm_mean`, `ewm_std`, `ewm_var`, `over(keys...)`.",
 		Category: "pipeline",
+		Examples: []string{
+			"with bulk = salary > 100000",
+			"with uname = name.str.upper()",
+			"with revenue = price * qty",
+			"with trend = amount.rolling_mean(7, 1)",
+			"with smooth = amount.ewm_mean(0.3)",
+			"with filled = coalesce(primary, backup).str.trim()",
+		},
 	},
 	{
 		Name: "unnest", Signature: "unnest <col>",

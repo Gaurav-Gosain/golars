@@ -1,11 +1,11 @@
-package main
+package predparse
 
 import (
 	"strings"
 	"testing"
 )
 
-func TestParsePredicateSimple(t *testing.T) {
+func TestParseSimple(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		input string
@@ -26,11 +26,12 @@ func TestParsePredicateSimple(t *testing.T) {
 		{`sku starts_with "A"`, `col("sku").str.starts_with(A)`},
 		{`comment not_like "%URGENT%" and qty > 0`,
 			`(col("comment").str.not_like(%URGENT%) and (col("qty") > 0))`},
+		{"matches_vowel", `col("matches_vowel")`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
 			t.Parallel()
-			got, err := parsePredicate(tc.input)
+			got, err := Parse(tc.input)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
@@ -41,17 +42,16 @@ func TestParsePredicateSimple(t *testing.T) {
 	}
 }
 
-func TestParsePredicateErrors(t *testing.T) {
+func TestParseErrors(t *testing.T) {
 	t.Parallel()
 	bad := []string{
-		"a = 5",   // single equals
-		"a > ",    // no rhs
-		"a",       // no op
-		"a ? 5",   // unknown op
-		`"x > 5"`, // string literal with stray quote content
+		"a = 5",
+		"a > ",
+		"a ? 5",
+		`"x > 5"`,
 	}
 	for _, input := range bad {
-		if _, err := parsePredicate(input); err == nil {
+		if _, err := Parse(input); err == nil {
 			t.Errorf("expected error for %q", input)
 		}
 	}
@@ -63,7 +63,6 @@ func TestTokenizeEdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tokenize: %v", err)
 	}
-	// Expected: foo >= 1.5 and bar == "hi there"
 	got := make([]string, len(toks))
 	for i, tk := range toks {
 		got[i] = tk.lex

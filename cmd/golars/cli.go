@@ -78,6 +78,7 @@ With no subcommand, runs the interactive REPL. Use a subcommand
 		newConvertCmd(),
 		newCatCmd(),
 		newReplCmd(),
+		newTranspileCmd(),
 		newVersionCmd(),
 	)
 

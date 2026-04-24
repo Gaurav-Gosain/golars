@@ -1,15 +1,8 @@
-package main
-
-import (
-	"fmt"
-	"strconv"
-	"strings"
-	"unicode"
-
-	"github.com/Gaurav-Gosain/golars/expr"
-)
-
-// parsePredicate builds an expr.Expr from a simple predicate grammar:
+// Package predparse parses the `.filter` predicate DSL used by the
+// golars REPL, the script runner, and the glr-to-Go transpiler into
+// an [expr.Expr] tree.
+//
+// Grammar:
 //
 //	pred   := term (('and'|'or') term)*
 //	term   := operand op operand
@@ -23,16 +16,28 @@ import (
 //	op     := '==' | '!=' | '<' | '<=' | '>' | '>='
 //	operand := identifier | integer | float | string | 'true' | 'false'
 //
-// Combining is left-associative; we do not support parentheses.
-// Identifiers are treated as column references. The string-op forms
-// desugar to expr.Col(x).Str().<op>(s) so the optimiser and evaluator
-// see a regular FunctionNode.
-func parsePredicate(input string) (expr.Expr, error) {
+// Combining is left-associative; parentheses are not supported.
+// Identifiers become column references. The string-op forms desugar
+// to Col(x).Str().<op>(s) so the optimiser and evaluator see a
+// regular FunctionNode.
+package predparse
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"unicode"
+
+	"github.com/Gaurav-Gosain/golars/expr"
+)
+
+// Parse builds an expr.Expr from a filter predicate string.
+func Parse(input string) (expr.Expr, error) {
 	tokens, err := tokenize(input)
 	if err != nil {
 		return expr.Expr{}, err
 	}
-	p := &predParser{tokens: tokens}
+	p := &parser{tokens: tokens}
 	e, err := p.parseOr()
 	if err != nil {
 		return expr.Expr{}, err
@@ -56,15 +61,14 @@ const (
 )
 
 type token struct {
-	kind tokKind
-	lex  string
-	// typed fields populated for literals
+	kind    tokKind
+	lex     string
 	intVal  int64
 	fltVal  float64
 	boolVal bool
 }
 
-type predParser struct {
+type parser struct {
 	tokens []token
 	pos    int
 }
@@ -162,7 +166,7 @@ func tokenize(in string) ([]token, error) {
 	return out, nil
 }
 
-func (p *predParser) parseOr() (expr.Expr, error) {
+func (p *parser) parseOr() (expr.Expr, error) {
 	left, err := p.parseAnd()
 	if err != nil {
 		return expr.Expr{}, err
@@ -178,7 +182,7 @@ func (p *predParser) parseOr() (expr.Expr, error) {
 	return left, nil
 }
 
-func (p *predParser) parseAnd() (expr.Expr, error) {
+func (p *parser) parseAnd() (expr.Expr, error) {
 	left, err := p.parseTerm()
 	if err != nil {
 		return expr.Expr{}, err
@@ -194,15 +198,15 @@ func (p *predParser) parseAnd() (expr.Expr, error) {
 	return left, nil
 }
 
-func (p *predParser) parseTerm() (expr.Expr, error) {
+func (p *parser) parseTerm() (expr.Expr, error) {
 	if p.pos >= len(p.tokens) {
 		return expr.Expr{}, fmt.Errorf("unexpected end of input")
 	}
+	startKind := p.tokens[p.pos].kind
 	left, err := p.parseOperand()
 	if err != nil {
 		return expr.Expr{}, err
 	}
-	// trailing is_null / is_not_null?
 	if p.peekKeyword("is_null") {
 		p.pos++
 		return left.IsNull(), nil
@@ -211,7 +215,6 @@ func (p *predParser) parseTerm() (expr.Expr, error) {
 		p.pos++
 		return left.IsNotNull(), nil
 	}
-	// String ops take a literal-string RHS.
 	for _, op := range []string{"contains", "starts_with", "ends_with", "like", "not_like"} {
 		if p.peekKeyword(op) {
 			p.pos++
@@ -222,11 +225,20 @@ func (p *predParser) parseTerm() (expr.Expr, error) {
 			return applyStrOp(left, op, s), nil
 		}
 	}
+	// A bare column reference (e.g. `filter matches_vowel`) is valid:
+	// the boolean column itself is the predicate. Anything else must
+	// have an operator follow so the predicate is actually a test.
 	if p.pos >= len(p.tokens) {
+		if startKind == tkIdent {
+			return left, nil
+		}
 		return expr.Expr{}, fmt.Errorf("expected operator after %q", p.tokens[p.pos-1].lex)
 	}
 	op := p.tokens[p.pos]
 	if op.kind != tkOp {
+		if startKind == tkIdent {
+			return left, nil
+		}
 		return expr.Expr{}, fmt.Errorf("expected operator, got %q", op.lex)
 	}
 	p.pos++
@@ -237,7 +249,7 @@ func (p *predParser) parseTerm() (expr.Expr, error) {
 	return applyBinaryOp(left, op.lex, right)
 }
 
-func (p *predParser) parseOperand() (expr.Expr, error) {
+func (p *parser) parseOperand() (expr.Expr, error) {
 	if p.pos >= len(p.tokens) {
 		return expr.Expr{}, fmt.Errorf("unexpected end of input")
 	}
@@ -258,7 +270,7 @@ func (p *predParser) parseOperand() (expr.Expr, error) {
 	return expr.Expr{}, fmt.Errorf("expected operand, got %q", t.lex)
 }
 
-func (p *predParser) peekKeyword(s string) bool {
+func (p *parser) peekKeyword(s string) bool {
 	if p.pos >= len(p.tokens) {
 		return false
 	}
@@ -266,10 +278,7 @@ func (p *predParser) peekKeyword(s string) bool {
 	return t.kind == tkKeyword && t.lex == s
 }
 
-// parseStringArg consumes the next token and requires it to be a
-// string literal. Used for the RHS of contains/like/starts_with/etc,
-// which don't accept column refs or numbers (polars is the same here).
-func (p *predParser) parseStringArg(op string) (string, error) {
+func (p *parser) parseStringArg(op string) (string, error) {
 	if p.pos >= len(p.tokens) {
 		return "", fmt.Errorf("%s: expected string argument", op)
 	}
@@ -281,8 +290,6 @@ func (p *predParser) parseStringArg(op string) (string, error) {
 	return t.lex, nil
 }
 
-// applyStrOp desugars a keyword-style string op into the canonical
-// Col(x).Str().<op>(s) Expr tree.
 func applyStrOp(left expr.Expr, op, arg string) expr.Expr {
 	s := left.Str()
 	switch op {
@@ -297,7 +304,6 @@ func applyStrOp(left expr.Expr, op, arg string) expr.Expr {
 	case "not_like":
 		return s.NotLike(arg)
 	}
-	// parseTerm only calls us with known ops; fall through defensively.
 	return left.Eq(expr.LitString(arg))
 }
 

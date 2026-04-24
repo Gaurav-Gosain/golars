@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -847,10 +848,7 @@ func (s *server) handleHover(msg *rawMessage) {
 		s.reply(msg, nil)
 		return
 	}
-	body := "**" + spec.Signature + "**\n\n" + spec.Summary
-	if spec.LongDoc != "" {
-		body += "\n\n" + spec.LongDoc
-	}
+	body := renderCommandHover(spec)
 	s.reply(msg, hoverResult{
 		Contents: markup{Kind: "markdown", Value: body},
 		Range: &lspRange{
@@ -858,6 +856,38 @@ func (s *server) handleHover(msg *rawMessage) {
 			End:   position{Line: p.Position.Line, Character: uint32(end)},
 		},
 	})
+}
+
+// renderCommandHover formats a CommandSpec into dev-friendly hover
+// markdown: title with the command name + category pill, a fenced
+// `glr` signature block, summary paragraph, long-form docs rendered
+// verbatim (the spec author is responsible for markdown there), and
+// a fenced `glr` block with runnable examples when available.
+func renderCommandHover(spec *script.CommandSpec) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "### `%s`", spec.Name)
+	if spec.Category != "" {
+		fmt.Fprintf(&b, "  _%s_", spec.Category)
+	}
+	b.WriteString("\n\n")
+	fmt.Fprintf(&b, "```glr\n%s\n```\n\n", spec.Signature)
+	if spec.Summary != "" {
+		b.WriteString(spec.Summary)
+		b.WriteString("\n\n")
+	}
+	if spec.LongDoc != "" {
+		b.WriteString(spec.LongDoc)
+		b.WriteString("\n\n")
+	}
+	if len(spec.Examples) > 0 {
+		b.WriteString("**Examples**\n\n```glr\n")
+		for _, ex := range spec.Examples {
+			b.WriteString(ex)
+			b.WriteString("\n")
+		}
+		b.WriteString("```\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // tokenAt returns the whitespace-delimited token containing byte

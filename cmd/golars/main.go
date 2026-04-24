@@ -28,6 +28,7 @@ import (
 	"github.com/Gaurav-Gosain/golars/lazy"
 	"github.com/Gaurav-Gosain/golars/repl"
 	"github.com/Gaurav-Gosain/golars/script"
+	"github.com/Gaurav-Gosain/golars/script/predparse"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -521,7 +522,7 @@ func (s *state) load(path string) error {
 	)
 	switch ext {
 	case ".csv", ".tsv":
-		opts := []iocsv.Option{}
+		opts := []iocsv.Option{iocsv.WithNullValues("")}
 		if ext == ".tsv" {
 			opts = append(opts, iocsv.WithDelimiter('\t'))
 		}
@@ -695,7 +696,7 @@ func (s *state) cmdFilter(predicate string) error {
 	if predicate == "" {
 		return fmt.Errorf(".filter requires a predicate")
 	}
-	e, err := parsePredicate(predicate)
+	e, err := predparse.Parse(predicate)
 	if err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
@@ -972,7 +973,7 @@ func (s *state) loadFile(path string) (*dataframe.DataFrame, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".csv", ".tsv":
-		opts := []iocsv.Option{}
+		opts := []iocsv.Option{iocsv.WithNullValues("")}
 		if ext == ".tsv" {
 			opts = append(opts, iocsv.WithDelimiter('\t'))
 		}

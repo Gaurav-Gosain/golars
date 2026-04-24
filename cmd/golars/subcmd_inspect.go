@@ -25,7 +25,7 @@ func loadByExt(ctx context.Context, path string) (*dataframe.DataFrame, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".csv", ".tsv":
-		opts := []iocsv.Option{}
+		opts := []iocsv.Option{iocsv.WithNullValues("")}
 		if ext == ".tsv" {
 			opts = append(opts, iocsv.WithDelimiter('\t'))
 		}
