@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Gaurav-Gosain/golars/script"
 )
@@ -557,11 +560,17 @@ type inlayHintParams struct {
 }
 
 type inlayHint struct {
-	Position     position `json:"position"`
-	Label        string   `json:"label"`
-	Kind         int      `json:"kind,omitempty"` // 1 = Type, 2 = Parameter
-	PaddingLeft  bool     `json:"paddingLeft,omitempty"`
-	PaddingRight bool     `json:"paddingRight,omitempty"`
+	Position     position        `json:"position"`
+	Label        string          `json:"label"`
+	Kind         int             `json:"kind,omitempty"` // 1 = Type, 2 = Parameter
+	PaddingLeft  bool            `json:"paddingLeft,omitempty"`
+	PaddingRight bool            `json:"paddingRight,omitempty"`
+	Tooltip      *markupContent  `json:"tooltip,omitempty"`
+}
+
+type markupContent struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
 }
 
 const inlayHintKindType = 1
@@ -623,12 +632,23 @@ func collectInlayHints(d *document, rng lspRange) []inlayHint {
 					if col < 0 {
 						col = len(raw)
 					}
-					hints = append(hints, inlayHint{
+					hint := inlayHint{
 						Position:    position{Line: uint32(li), Character: uint32(col + len("^?"))},
 						Label:       label,
 						Kind:        inlayHintKindType,
 						PaddingLeft: true,
-					})
+					}
+					// Spawn `golars --preview` on the prefix so the
+					// hover tooltip shows the actual table. Clients
+					// that render inlay tooltips (Zed, VS Code) get
+					// the full preview without a dedicated probe
+					// plugin. Skip silently when the binary is absent
+					// or the preview fails: the single-line label
+					// remains useful on its own.
+					if tip := renderProbeTooltip(d, li); tip != "" {
+						hint.Tooltip = &markupContent{Kind: "markdown", Value: tip}
+					}
+					hints = append(hints, hint)
 				}
 			}
 			continue
@@ -845,3 +865,65 @@ func tokenAt(line string, col int) (tok string, start, end int) {
 }
 
 func isSpace(b byte) bool { return b == ' ' || b == '\t' }
+
+// renderProbeTooltip returns a markdown-formatted table preview for
+// a `# ^?` probe at line `probeLine`. Writes the script prefix
+// (lines 0..probeLine-1) to a tempfile, invokes the golars CLI in
+// --preview mode, and wraps the captured table in a fenced code
+// block so inlay-hint tooltips render it with a monospace font.
+//
+// Returns "" when golars is not on PATH, the invocation fails, or
+// the output is empty. Callers treat that as "no tooltip" so the
+// inline label remains the only signal.
+func renderProbeTooltip(d *document, probeLine int) string {
+	bin := findGolarsBin(d)
+	if bin == "" {
+		return ""
+	}
+	prefix := strings.Join(d.lines[:probeLine], "\n")
+	if prefix == "" {
+		return ""
+	}
+	f, err := os.CreateTemp("", "golars-probe-*.glr")
+	if err != nil {
+		return ""
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(prefix); err != nil {
+		f.Close()
+		return ""
+	}
+	f.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--preview", f.Name())
+	out, err := cmd.CombinedOutput()
+	if err != nil || len(out) == 0 {
+		return ""
+	}
+	return "```\n" + strings.TrimRight(string(out), "\n") + "\n```"
+}
+
+// findGolarsBin resolves the golars CLI used to render probe
+// tooltips. Checks the workspace's PATH first (what the user would
+// hit from a terminal); falls back to the directory the LSP was
+// launched from so a bundled release is discoverable even when
+// PATH is minimal.
+func findGolarsBin(d *document) string {
+	if p, err := exec.LookPath("golars"); err == nil {
+		return p
+	}
+	// Derive from the LSP binary's own directory.
+	if self, err := os.Executable(); err == nil {
+		guess := filepath.Join(filepath.Dir(self), "golars")
+		if runtime.GOOS == "windows" {
+			guess += ".exe"
+		}
+		if _, err := os.Stat(guess); err == nil {
+			return guess
+		}
+	}
+	_ = d
+	return ""
+}
