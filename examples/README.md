@@ -62,7 +62,7 @@ identical; only the caller syntax differs. Run with
 |-----------|---------------|
 | `sql` | **Nested module.** Read a query result into a DataFrame via `modernc.org/sqlite` (pure-Go). Run with `cd examples/sql && go run .`. |
 | `sql_session` | `sql.Session` Register + Query to run SQL directly against in-memory DataFrames. |
-| `script` | `.glr` script samples plus a host program driving `script.Runner`. |
+| `script` | `.glr` script samples (agg, branching, derived, join, multisource, nulls, pipeline, regex, rolling) plus a host program driving `script.Runner`. `script/transpiled/` has the same scripts lowered to Go via `golars transpile`. |
 | `profiler` | `lazy.NewProfiler()` + `lazy.WithProfiler(p)` for per-node timings. |
 
 ## Notes

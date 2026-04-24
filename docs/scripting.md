@@ -176,6 +176,62 @@ via `.select`, `.with_column`, or in aggregations):
 `str.head(n)`, `str.tail(n)`, `str.slice(start, length)`,
 `str.contains_regex(pat)`.
 
+### Expression grammar (for `with`)
+
+`with NAME = EXPR` accepts a full expression tree, not just the
+filter DSL. The grammar:
+
+```
+expr    := orExpr
+orExpr  := andExpr ("or" andExpr)*
+andExpr := notExpr ("and" notExpr)*
+notExpr := "not" notExpr | cmpExpr
+cmpExpr := addExpr ((== | != | < | <= | > | >=) addExpr)?
+addExpr := mulExpr ((+ | -) mulExpr)*
+mulExpr := unary ((* | /) unary)*
+unary   := "-" unary | primary
+primary := literal | "(" expr ")" | call
+call    := ident "(" argList? ")" | ident ("." method "(" argList? ")")*
+literal := number | "quoted string" | true | false | null
+```
+
+Bare identifiers are column references. String methods hang off
+`.str.` and cover `upper`, `lower`, `trim`, `reverse`, `contains`,
+`contains_regex`, `starts_with`, `ends_with`, `like`, `not_like`,
+`replace`, `replace_all`, `strip_prefix`, `strip_suffix`,
+`len_bytes`, `len_chars`, `slice`, `head`, `tail`, `find`,
+`count_matches`, `split_exact`.
+
+Aggregates: `.sum()`, `.mean()`, `.min()`, `.max()`, `.count()`,
+`.null_count()`, `.first()`, `.last()`, `.median()`, `.std()`,
+`.var()`, `.quantile(p)`, `.skew()`, `.kurtosis()`, `.n_unique()`,
+`.approx_n_unique()`.
+
+Rolling / EWM: `.rolling_sum(w, mp)`, `.rolling_mean(w, mp)`,
+`.rolling_min`, `.rolling_max`, `.rolling_std`, `.rolling_var`,
+`.ewm_mean(alpha)`, `.ewm_std(alpha)`, `.ewm_var(alpha)`.
+
+Shape ops: `.abs()`, `.neg()`, `.not()`, `.round(n)`, `.floor()`,
+`.ceil()`, `.sqrt()`, `.exp()`, `.log()`, `.log2()`, `.log10()`,
+`.sign()`, `.reverse()`, `.shift(n)`, `.diff(n)`, `.cum_sum()`,
+`.cum_min()`, `.cum_max()`, `.fill_null(v)`, `.alias(n)`,
+`.cast(type)`, `.between(lo, hi)`, `.forward_fill(limit)`,
+`.backward_fill(limit)`.
+
+Top-level: `col("x")`, `lit(v)`, `sum("x")` / `mean(...)` / ...,
+`coalesce(a, b, ...)`, `abs(e)` / `sqrt(e)` / ...
+
+Examples:
+
+```glr
+with bulk       = amount > 1000
+with name_upper = name.str.upper()
+with revenue    = price * qty
+with trend      = amount.rolling_mean(7, 1)
+with score      = coalesce(primary, backup).str.trim()
+with ewm        = value.ewm_mean(0.3)
+```
+
 ### Predicate grammar
 
 For `filter`:
@@ -268,6 +324,46 @@ show
 No registry, no juggling: just pipe.
 
 ---
+
+## Transpile to Go
+
+`golars transpile SCRIPT.glr [-o OUT.go] [--package NAME]` emits a
+standalone Go program that reproduces the pipeline through the lazy
+API. The generated source is piped through `go/format` and has its
+imports pruned by `go/ast`, so the output is always gofmt'd and free
+of unused imports.
+
+```sh
+golars transpile examples/script/pipeline.glr -o main.go --package main
+go run main.go
+```
+
+Mapping:
+
+| `.glr`                                     | Go                                                       |
+| ------------------------------------------ | -------------------------------------------------------- |
+| `load PATH`                                | `golars.ReadCSV(PATH, csv.WithNullValues(""))`           |
+| `load PATH as NAME`                        | stashes the LazyFrame in an internal map for later `use` |
+| `use NAME`                                 | retargets `focus` onto the stashed frame                 |
+| `filter EXPR`                              | `.Filter(EXPR)`                                          |
+| `with NAME = EXPR`                         | `.WithColumns(EXPR.Alias("NAME"))`                       |
+| `groupby KEY COL:OP[:ALIAS] ...`           | `.GroupBy(KEY).Agg(...)`                                 |
+| `sort COL [desc]`                          | `.Sort(COL, desc)`                                       |
+| `limit N`                                  | `.Limit(N)`                                              |
+| `head N`                                   | `.Limit(N)` + `.Collect` + `fmt.Println`                 |
+| `join NAME on KEY [inner\|left\|cross]`    | `.Join(other, []string{KEY}, dataframe.InnerJoin)`       |
+| `show`                                     | `.Head(10).Collect` + `fmt.Println`                      |
+| `save PATH`                                | `golars.WriteCSV(df, PATH)` (or matching writer)         |
+
+Commands without a direct lazy equivalent (`.tree`, `.graph`,
+`.mermaid`, `.reset`, `.frames`) emit a `TODO(glr):` comment so the
+file still compiles. If no `show` / `head` / `collect` / `save`
+appears in the script, transpile adds an implicit final `Collect` +
+`fmt.Println` so the generated binary prints something instead of
+exiting silently.
+
+See [`examples/script/transpiled/`](../examples/script/transpiled/)
+for a transpiled copy of every bundled `.glr` example.
 
 ## Interop with code
 

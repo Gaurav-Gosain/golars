@@ -181,10 +181,23 @@ CSV, TSV, Parquet, Arrow/IPC, JSON, NDJSON. All pairs work.
 ```glr
 # vhs/fixtures/pipeline.glr
 load vhs/fixtures/people.csv
+with monthly = salary / 12                 # derive columns via `with`
 filter salary > 100000
 groupby dept salary:sum:total salary:mean:avg tenure_years:max:max_tenure
 sort total desc
 head 5
+```
+
+`with NAME = EXPR` supports arithmetic, comparisons, string methods
+(`col.str.upper()`, `contains_regex`, `like`, ...), aggregates,
+rolling/EWM windows, casts, and `coalesce`. See [`docs/scripting.md`](docs/scripting.md)
+for the full expression grammar.
+
+Convert a `.glr` script to a standalone Go program:
+
+```sh
+golars transpile my-pipeline.glr -o main.go --package main
+go run main.go
 ```
 
 <p align="center"><img src="vhs/out/profile.gif" alt="golars explain --profile"></p>
@@ -201,15 +214,38 @@ golars explain --trace trace.json my-pipeline.glr    # chrome://tracing
 `golars-lsp` is a stdio Language Server for `.glr` files. Inlay hints
 display the frame shape after every statement, completion covers
 commands / frames / column names, hover shows signatures + long-form
-docs, and diagnostics flag unknown commands and missing files.
-Tree-sitter grammar + Neovim plugin live under
-[`editors/`](editors/). VS Code extension at
-[`editors/vscode-golars`](editors/vscode-golars/).
+docs, and diagnostics flag unknown commands and missing files. Hover
+on a `# ^?` probe line returns a GitHub-flavoured markdown table of
+the frame at that point.
 
-**Zed**: Install via curl:
+**Neovim** (lazy.nvim, remote):
+
+```lua
+{
+  url = "https://github.com/Gaurav-Gosain/golars",
+  name = "nvim-golars",
+  ft = "glr",
+  init = function() vim.filetype.add({ extension = { glr = "glr" } }) end,
+  config = function()
+    local root = vim.fn.stdpath("data") .. "/lazy/nvim-golars/editors/nvim-golars"
+    vim.opt.rtp:prepend(root)
+    vim.cmd("runtime! ftdetect/*.lua ftdetect/*.vim syntax/*.vim")
+    require("golars").setup({})
+  end,
+}
+```
+
+See [`editors/nvim-golars`](editors/nvim-golars/) for tree-sitter
+integration, per-option config, and a local-checkout variant.
+
+**Zed**: grammar + LSP client ship as a Zed extension. Install via
+curl:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/golars/main/install-zed-extension.sh | bash
 ```
+
+**VS Code**: grammar + LSP client at
+[`editors/vscode-golars`](editors/vscode-golars/).
 
 ### Model Context Protocol server
 
@@ -282,7 +318,7 @@ method-level status table.
 
 | Binary / path                                               | What it is                                                                                                                                                   |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`cmd/golars`](cmd/golars/)                                 | REPL + `run` / `sql` / `fmt` / `lint` / `browse` / `schema` / `stats` / `peek` / `diff` / `convert` / `cat` / `explain` / `doctor` / `completion` / `sample` |
+| [`cmd/golars`](cmd/golars/)                                 | REPL + `run` / `sql` / `transpile` / `fmt` / `lint` / `browse` / `schema` / `stats` / `peek` / `diff` / `convert` / `cat` / `explain` / `doctor` / `completion` / `sample` |
 | [`cmd/golars-lsp`](cmd/golars-lsp/)                         | stdio Language Server for `.glr` files                                                                                                                       |
 | [`cmd/golars-mcp`](cmd/golars-mcp/)                         | Model Context Protocol server                                                                                                                                |
 | [`cmd/bench`](cmd/bench/)                                   | polars-compare bench harness                                                                                                                                 |

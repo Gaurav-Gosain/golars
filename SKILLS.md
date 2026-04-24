@@ -44,6 +44,7 @@ the canonical reference with every flag lives in
 | Skill | Purpose |
 |---|---|
 | `golars run SCRIPT.glr` | Execute a `.glr` pipeline end-to-end |
+| `golars transpile SCRIPT.glr [-o OUT.go] [--package NAME]` | Emit a standalone Go program that reproduces the pipeline via the lazy API |
 | `golars fmt [-w] FILE.glr` | Canonicalize a `.glr` script |
 | `golars lint FILE.glr` | Report common mistakes without running |
 | `golars explain SCRIPT.glr` | Print the lazy plan (indented form) |
