@@ -100,7 +100,7 @@ func tokenize(s string) []token {
 			}
 			toks = append(toks, token{tokString, lit, i})
 			i = end
-		case isDigit(c) || (c == '-' && i+1 < len(s) && isDigit(s[i+1]) && (len(toks) == 0 || lastIsOperand(toks) == false)):
+		case isDigit(c) || (c == '-' && i+1 < len(s) && isDigit(s[i+1]) && (len(toks) == 0 || !lastIsOperand(toks))):
 			end, lit := readNumber(s, i)
 			toks = append(toks, token{tokNumber, lit, i})
 			i = end
