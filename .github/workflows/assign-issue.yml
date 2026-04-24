@@ -1,0 +1,73 @@
+name: Handle Issue Claims
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: read-all
+
+jobs:
+  handle-issue:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Process issue commands
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue   = context.payload.issue;
+            const comment = context.payload.comment.body.trim();
+            const user    = context.payload.comment.user.login;
+
+            // Ignore comments on pull requests
+            if (issue.pull_request) {
+              console.log("Comment is on a PR, ignoring.");
+              return;
+            }
+
+            // Handle `.take`
+            if (comment === ".take") {
+              if (issue.assignees?.length) {
+                const currentAssignee = issue.assignees[0].login;
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `@${user} this issue is already assigned to a contributor.`
+                });
+
+                console.log(`Issue #${issue.number} already assigned to ${currentAssignee}, ignoring .take from ${user}`);
+                return;
+              }
+
+              await github.rest.issues.addAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                assignees: [user]
+              });
+
+              console.log(`${user} assigned to issue #${issue.number}`);
+            }
+
+            // Handle `.release`
+            if (comment === ".release") {
+              const isAssignee = issue.assignees.some(a => a.login === user);
+
+              if (!isAssignee) {
+                console.log(`${user} is not an assignee, ignoring.`);
+                return;
+              }
+
+              await github.rest.issues.removeAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                assignees: [user]
+              });
+
+              console.log(`${user} released issue #${issue.number}`);
+            }
