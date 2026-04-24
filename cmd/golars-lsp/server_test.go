@@ -6,10 +6,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+// fileURI turns a local filesystem path into a `file:///` URI that
+// the LSP's url.Parse understands on every OS. Windows paths use
+// backslashes and need `file:///C:/...` form; POSIX paths are
+// already absolute and produce `file:///tmp/...`. Keeps per-test
+// setup free of platform branching.
+func fileURI(p string) string {
+	slashed := filepath.ToSlash(p)
+	if strings.HasPrefix(slashed, "/") {
+		return "file://" + slashed
+	}
+	return "file:///" + slashed
+}
 
 // framedPipe is a duplex io.Reader/Writer used to drive the server
 // end-to-end in-process. Requests written by the test land on the
@@ -240,11 +254,11 @@ func TestLSPDiagnosticsUnknownCommand(t *testing.T) {
 // it via `load`, and ask for completions on a subsequent `filter`.
 func TestLSPColumnCompletionFromCSV(t *testing.T) {
 	dir := t.TempDir()
-	csvPath := dir + "/people.csv"
+	csvPath := filepath.Join(dir, "people.csv")
 	if err := os.WriteFile(csvPath, []byte("name,age,region\nada,27,EU\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	docURI := "file://" + dir + "/x.glr"
+	docURI := fileURI(filepath.Join(dir, "x.glr"))
 	text := "load people.csv\nfilter "
 
 	p := newFramedPipe()
@@ -288,7 +302,7 @@ func TestLSPColumnCompletionResolvesViaAncestor(t *testing.T) {
 	if err := os.WriteFile(scriptDir+"/data.csv", []byte("alpha,beta\n1,2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	docURI := "file://" + scriptDir + "/foo.glr"
+	docURI := fileURI(filepath.Join(scriptDir, "foo.glr"))
 	text := "load examples/script/data.csv\nfilter "
 
 	p := newFramedPipe()
@@ -328,7 +342,7 @@ func TestLSPColumnCompletionFollowsUseFocus(t *testing.T) {
 	if err := os.WriteFile(dir+"/b.csv", []byte("gamma,delta\n3,4\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	docURI := "file://" + dir + "/m.glr"
+	docURI := fileURI(filepath.Join(dir, "m.glr"))
 	text := "load a.csv as a\nload b.csv as b\nuse b\nfilter "
 
 	p := newFramedPipe()
@@ -406,7 +420,7 @@ func TestLSPInlayHintsThroughFullPipeline(t *testing.T) {
 	if err := os.WriteFile(dir+"/s.csv", []byte("name,amount\nada,10\nben,20\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	docURI := "file://" + dir + "/x.glr"
+	docURI := fileURI(filepath.Join(dir, "x.glr"))
 	text := `load p.csv as people
 load s.csv as salaries
 use people
@@ -476,7 +490,7 @@ func TestLSPInlayHintProbe(t *testing.T) {
 	if err := os.WriteFile(dir+"/p.csv", []byte("name,age,city\nada,1,NYC\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	docURI := "file://" + dir + "/x.glr"
+	docURI := fileURI(filepath.Join(dir, "x.glr"))
 	text := "load p.csv\n# ^?\n"
 
 	p := newFramedPipe()
@@ -521,11 +535,11 @@ func TestLSPInlayHintProbe(t *testing.T) {
 // source file's shape (rows × cols) read from disk.
 func TestLSPInlayHintsForLoad(t *testing.T) {
 	dir := t.TempDir()
-	csvPath := dir + "/d.csv"
+	csvPath := filepath.Join(dir, "d.csv")
 	if err := os.WriteFile(csvPath, []byte("a,b,c\n1,2,3\n4,5,6\n7,8,9\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	docURI := "file://" + dir + "/x.glr"
+	docURI := fileURI(filepath.Join(dir, "x.glr"))
 	text := "load d.csv\n"
 
 	p := newFramedPipe()
@@ -713,7 +727,7 @@ func TestLSPNewCommandsInCompletion(t *testing.T) {
 // filter/select statements, matching behaviour for eager load.
 func TestLSPInlayHintsAfterScan(t *testing.T) {
 	dir := t.TempDir()
-	csv := dir + "/s.csv"
+	csv := filepath.Join(dir, "s.csv")
 	if err := os.WriteFile(csv, []byte("id,name,amount\n1,a,10\n2,b,20\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
