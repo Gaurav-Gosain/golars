@@ -1,0 +1,25 @@
+# Derived columns via `with NAME = EXPR`.
+#
+# Shows every major branch of the expression grammar: string methods,
+# arithmetic, comparisons, and coalesce over multiple cols.
+#
+# Run: golars run examples/script/derived.glr
+
+load examples/script/data/salaries.csv
+
+# String-method chain: uppercase + prefix check via str.starts_with.
+with upper_name = name.str.upper()
+with starts_a   = upper_name.str.starts_with("A")
+
+# Arithmetic on numeric columns; result carries i64 dtype.
+with yearly     = amount
+with monthly    = amount / 12
+
+# Comparison yields a boolean column usable in later filters.
+with big_earner = amount > 100000
+
+# `with` ops compose; each step sees the columns appended above it.
+with tag = upper_name.str.head(3)
+
+head 20
+# ^?

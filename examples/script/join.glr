@@ -1,8 +1,8 @@
-load examples/script/salaries.csv as salaries
+load examples/script/data/salaries.csv as salaries
 use salaries
 # ^?
 
-load examples/script/people.csv
+load examples/script/data/people.csv
 # ^?
 
 join salaries on name inner

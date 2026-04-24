@@ -4,8 +4,8 @@
 # Each line is a command applied to the current pipeline, same as
 # typing it at the REPL. The leading "." is optional.
 
-# Build a small frame from the bundled CSV (see examples/script/people.csv).
-load examples/script/people.csv
+# Build a small frame from the bundled CSV (see examples/script/data/people.csv).
+load examples/script/data/people.csv
 
 # Inspect.
 schema

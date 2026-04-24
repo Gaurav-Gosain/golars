@@ -1,0 +1,24 @@
+# Null handling: fill gaps with a default, or drop rows that have
+# any missing values in a specific column.
+#
+# Run: golars run examples/script/nulls.glr
+
+load examples/script/data/orders.csv
+
+# `with fill_null` emits a new column instead of mutating in place, so
+# the original stays usable for later steps that might branch on the
+# null-vs-present distinction.
+with discount_filled = discount.fill_null(0.0)
+
+# Net revenue using the discount-filled column. Without fill_null the
+# multiplication would propagate nulls into revenue.
+with revenue = unit_price * (1 - discount_filled)
+show
+
+reset
+
+# Alternate path: drop every row that has no discount recorded.
+load examples/script/data/orders.csv
+filter discount is_not_null
+show
+# ^?

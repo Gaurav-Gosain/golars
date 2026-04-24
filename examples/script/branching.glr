@@ -6,7 +6,7 @@
 #
 # Run with: ./golars run examples/script/branching.glr
 
-load examples/script/salaries.csv
+load examples/script/data/salaries.csv
 
 # Establish a shared base: every branch starts from the same filtered
 # set of high earners.

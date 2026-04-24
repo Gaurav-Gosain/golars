@@ -1,0 +1,31 @@
+# Regex + Like predicates in `.glr`.
+#
+# Run: golars run examples/script/regex.glr
+
+load examples/script/data/people.csv
+
+# Add a derived column via the Str namespace.
+with name_caps  = name.str.upper()
+with first_two  = name.str.head(2)
+
+# Filter with the SQL-flavoured Like keyword (%: any, _: one, \ escape).
+filter name like "a%"
+show
+
+reset
+
+# Filter with plain substring matching.
+load examples/script/data/people.csv
+filter name contains "a"
+show
+
+reset
+
+# Regex membership: works because str.contains_regex ultimately runs
+# through the same expr pathway as all other with/filter ops.
+load examples/script/data/people.csv
+with matches_vowel = name.str.contains_regex("[aeiou]")
+# `filter <col>` treats a bare boolean column as the predicate,
+# avoiding a literal comparison between the column and `true`.
+filter matches_vowel
+show

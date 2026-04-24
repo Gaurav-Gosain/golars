@@ -1,0 +1,22 @@
+# Rolling / EWM windows via `with`.
+#
+# The salary dataset is tiny (5 rows), so the rolling window acts as
+# a smoothing filter that follows the raw values closely. Swap in a
+# larger time-series file to see the difference.
+#
+# Run: golars run examples/script/rolling.glr
+
+load examples/script/data/salaries.csv
+
+# 3-row rolling statistics. The second arg is `min_periods`; 1 means
+# emit a value as soon as at least one observation exists in the
+# window.
+with ma3     = amount.rolling_mean(3, 1)
+with vol3    = amount.rolling_std(3, 2)
+with max3    = amount.rolling_max(3, 1)
+
+# Exponentially-weighted mean: pick alpha close to 1.0 for fast
+# reaction, close to 0.0 for heavy smoothing.
+with ewm     = amount.ewm_mean(0.5)
+
+head 10

@@ -1,0 +1,11 @@
+order_id,region,product,unit_price,discount
+1,us,cable,4.50,0.05
+2,eu,cable,5.20,0.10
+3,us,adapter,9.99,
+4,eu,adapter,9.99,0.05
+5,us,cable,4.50,0.20
+6,apac,adapter,11.50,
+7,us,cable,4.50,
+8,eu,dock,120.00,
+9,apac,cable,4.80,0.05
+10,us,dock,120.00,0.10

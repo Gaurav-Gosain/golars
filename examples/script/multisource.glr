@@ -4,8 +4,8 @@
 # or from the REPL:  .source examples/script/multisource.glr
 
 # Stage two sources without touching the focused pipeline.
-load examples/script/people.csv     as people
-load examples/script/salaries.csv   as salaries
+load examples/script/data/people.csv     as people
+load examples/script/data/salaries.csv   as salaries
 
 # List what we have so far - `focused` is still empty at this point.
 frames

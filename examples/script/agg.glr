@@ -1,0 +1,18 @@
+# Group-by aggregation + derived ratios.
+#
+# Run: golars run examples/script/agg.glr
+
+load examples/script/data/salaries.csv
+
+# Add a bucket column so we can group by tier.
+with tier = amount
+filter amount > 50000
+
+# Add a bucket-style column derived from the raw amount. The
+# comparison evaluates per row and returns a boolean Series.
+with high_earner = amount > 100000
+
+groupby high_earner amount:sum:total_pay amount:mean:avg_pay amount:count:n
+sort total_pay desc
+show
+# ^?

@@ -1,0 +1,26 @@
+# End-to-end pipeline. Load, derive a column, filter, group, sort,
+# and write the result. Same script works for `golars run` and for
+# `golars transpile` which emits a standalone Go program.
+#
+# Run interactively:   golars run examples/script/pipeline.glr
+# Emit Go source:      golars transpile examples/script/pipeline.glr
+# Run the Go source:   golars transpile examples/script/pipeline.glr -o /tmp/p.go && go run /tmp/p.go
+#
+# Input: orders.csv with order_id, region, product, unit_price, discount.
+# Output: per-region revenue summary, sorted by revenue desc.
+
+load examples/script/data/orders.csv
+
+# Fill missing discounts with 0, then compute net revenue per row.
+with discount_filled = discount.fill_null(0.0)
+with revenue         = unit_price * (1 - discount_filled)
+
+# Keep only the lines that actually contributed revenue.
+filter revenue > 0
+
+# Aggregate per region.
+groupby region revenue:sum:total_revenue revenue:count:line_count
+
+# Biggest spenders on top.
+sort total_revenue desc
+show
