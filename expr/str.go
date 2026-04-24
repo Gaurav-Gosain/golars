@@ -12,7 +12,23 @@ package expr
 // namespaced op, not a global function.
 type StrOps struct{ e Expr }
 
-// Str returns a string-ops view over e. Cheap - no allocation.
+// Str returns a string-ops view over e. This mirrors polars'
+// `col("x").str.*` namespace: every method returns a new [Expr]
+// that plugs back into the normal expression algebra.
+//
+// Allocation-free wrapper; the actual work happens inside the
+// kernel that evaluates the returned [Expr].
+//
+// # Examples
+//
+//	// Case fold:
+//	expr.Col("name").Str().ToUpper()
+//
+//	// Regex predicate:
+//	expr.Col("email").Str().ContainsRegex(`@example\.com$`)
+//
+//	// Chain with the list namespace:
+//	expr.Col("csv").Str().SplitExact(",").List().Len()
 func (e Expr) Str() StrOps { return StrOps{e: e} }
 
 // SplitExact splits each cell by sep and returns a list column
@@ -24,34 +40,64 @@ func (o StrOps) SplitExact(sep string) Expr {
 
 // ---- predicates ----
 
-// Contains is a literal-substring predicate; for regex behaviour use
-// ContainsRegex. Empty needle matches every non-null row.
+// Contains tests each row for a literal substring needle. Empty
+// needle matches every non-null row; use [StrOps.ContainsRegex] for
+// regex behaviour.
+//
+// # Examples
+//
+//	// "foo" anywhere in the value:
+//	expr.Col("msg").Str().Contains("foo")
 func (o StrOps) Contains(needle string) Expr {
 	return fn1p("str.contains", o.e, needle)
 }
 
-// ContainsRegex runs a compiled regex per row.
+// ContainsRegex runs a compiled [regexp] against each row and
+// returns a boolean [Expr].
+//
+// # Examples
+//
+//	// Email addresses on example.com:
+//	expr.Col("email").Str().ContainsRegex(`@example\.com$`)
 func (o StrOps) ContainsRegex(pattern string) Expr {
 	return fn1p("str.contains_regex", o.e, pattern)
 }
 
-// StartsWith is a byte-prefix predicate.
+// StartsWith is a byte-prefix predicate. Compare the row's raw
+// bytes against prefix; nulls stay null.
+//
+// # Examples
+//
+//	expr.Col("sku").Str().StartsWith("US-")
 func (o StrOps) StartsWith(prefix string) Expr {
 	return fn1p("str.starts_with", o.e, prefix)
 }
 
-// EndsWith is a byte-suffix predicate.
+// EndsWith is a byte-suffix predicate. See [StrOps.StartsWith].
 func (o StrOps) EndsWith(suffix string) Expr {
 	return fn1p("str.ends_with", o.e, suffix)
 }
 
-// Like is a SQL-style wildcard predicate: % any chars, _ one char,
-// \ escape.
+// Like is a SQL-style wildcard predicate.
+//
+// # Wildcards
+//
+//   - `%` matches any sequence of characters (including empty)
+//   - `_` matches exactly one character
+//   - `\` escapes the following character literal
+//
+// # Examples
+//
+//	// Names starting with "a" followed by anything:
+//	expr.Col("name").Str().Like("a%")
+//
+//	// Three-letter codes starting with "F":
+//	expr.Col("code").Str().Like("F__")
 func (o StrOps) Like(pattern string) Expr {
 	return fn1p("str.like", o.e, pattern)
 }
 
-// NotLike is the logical negation of Like.
+// NotLike is the logical negation of [StrOps.Like].
 func (o StrOps) NotLike(pattern string) Expr {
 	return fn1p("str.not_like", o.e, pattern)
 }

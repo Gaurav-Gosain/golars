@@ -179,18 +179,46 @@ func Zeros(n int) Expr { return expr.Zeros(n) }
 
 // ----- I/O shortcuts -----
 
-// ReadCSV reads a CSV file by path. Uses context.Background: use
-// the sub-package directly when you need to pass a context.
+// ReadCSV reads a CSV file into a [DataFrame].
+//
+// Inference runs on the header + first rows: numeric columns become
+// i64/f64, text becomes utf8. Pass [iocsv.WithNullValues] to treat
+// specific tokens as nulls (empty string is a common choice to
+// match polars defaults).
+//
+// Uses [context.Background]; for cancellable reads call
+// [iocsv.ReadFile] directly.
+//
+// Example:
+//
+//	df, err := golars.ReadCSV("people.csv",
+//	    iocsv.WithNullValues(""),          // empty field -> null
+//	    iocsv.WithDelimiter(';'),          // European CSV
+//	)
+//	if err != nil { log.Fatal(err) }
+//	defer df.Release()
+//	fmt.Println(df.Schema())
 func ReadCSV(path string, opts ...iocsv.Option) (*DataFrame, error) {
 	return iocsv.ReadFile(context.Background(), path, opts...)
 }
 
-// ReadCSVReader reads a CSV stream from an io.Reader.
+// ReadCSVReader reads a CSV stream from an [io.Reader]. Useful for
+// http bodies, stdin, or embedded fixtures via [strings.NewReader].
+//
+// Example:
+//
+//	resp, _ := http.Get("https://example.com/data.csv")
+//	defer resp.Body.Close()
+//	df, err := golars.ReadCSVReader(resp.Body)
 func ReadCSVReader(r io.Reader, opts ...iocsv.Option) (*DataFrame, error) {
 	return iocsv.Read(context.Background(), r, opts...)
 }
 
-// WriteCSV writes a DataFrame to a CSV file.
+// WriteCSV serialises a [DataFrame] to a CSV file at path.
+//
+// Default writer emits a header row and quotes only fields that
+// contain the delimiter, a quote, or a newline. Pass
+// [iocsv.WithDelimiter] to use TSV (`'\t'`) or regional separators.
 func WriteCSV(df *DataFrame, path string, opts ...iocsv.Option) error {
 	return iocsv.WriteFile(context.Background(), path, df, opts...)
 }

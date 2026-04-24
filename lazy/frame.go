@@ -16,33 +16,116 @@ type LazyFrame struct {
 	plan Node
 }
 
-// FromDataFrame wraps an in-memory DataFrame as a LazyFrame source.
+// FromDataFrame wraps an in-memory [dataframe.DataFrame] as the
+// source of a [LazyFrame] pipeline.
+//
+// The wrapped frame is held by pointer; all downstream ops defer
+// until [LazyFrame.Collect] runs, so building the pipeline does no
+// work and allocates only plan nodes.
+//
+// # Parameters
+//
+//   - df: source DataFrame.
+//
+// # Returns
+//
+// A [LazyFrame] whose logical plan is a single DataFrameScan over df.
+//
+// # Examples
+//
+//	df, _ := golars.ReadCSV("data.csv")
+//	defer df.Release()
+//
+//	lf := lazy.FromDataFrame(df).
+//	    Filter(expr.Col("age").Gt(expr.LitInt64(18))).
+//	    GroupBy("dept").
+//	    Agg(expr.Col("salary").Mean().Alias("avg"))
+//
+//	out, err := lf.Collect(context.Background())
+//	if err != nil { log.Fatal(err) }
+//	defer out.Release()
 func FromDataFrame(df *dataframe.DataFrame) LazyFrame {
 	return LazyFrame{plan: DataFrameScan{Source: df, Length: -1}}
 }
 
-// Plan returns the current (unoptimized) logical plan.
+// Plan returns the current (unoptimised) logical plan as a [Node]
+// tree. Useful for introspection; optimiser passes run inside
+// [LazyFrame.Collect] and leave the stored plan untouched.
 func (lf LazyFrame) Plan() Node { return lf.plan }
 
-// Schema returns the best-effort output schema without executing the plan.
+// Schema returns the best-effort output schema of lf without
+// executing the plan. Errors if the plan references columns that
+// can't be resolved statically.
 func (lf LazyFrame) Schema() (*schema.Schema, error) { return lf.plan.Schema() }
 
-// Select returns a LazyFrame whose output is the listed expressions.
+// Select projects lf down to exactly the listed expressions,
+// dropping every column not named. Use [LazyFrame.WithColumns] to
+// append instead of replace.
+//
+// # Examples
+//
+//	lf.Select(expr.Col("name"), expr.Col("salary").Alias("pay"))
 func (lf LazyFrame) Select(exprs ...expr.Expr) LazyFrame {
 	return LazyFrame{plan: Projection{Input: lf.plan, Exprs: exprs}}
 }
 
-// WithColumns returns a LazyFrame extended with the given computed columns.
+// WithColumns appends computed columns to lf.
+//
+// Each expression runs against the input schema; to reference a
+// column added in the same call, split into two WithColumns calls.
+// Existing columns of the same name are overwritten.
+//
+// # Parameters
+//
+//   - exprs: one or more [expr.Expr] values; use [expr.Expr.Alias]
+//     to set the output column name.
+//
+// # Examples
+//
+//	lf.WithColumns(
+//	    expr.Col("price").Mul(expr.Col("qty")).Alias("revenue"),
+//	    expr.Col("name").Str().ToUpper().Alias("name_upper"),
+//	)
 func (lf LazyFrame) WithColumns(exprs ...expr.Expr) LazyFrame {
 	return LazyFrame{plan: WithColumns{Input: lf.plan, Exprs: exprs}}
 }
 
-// Filter returns a LazyFrame restricted to rows where pred is true.
+// Filter returns a [LazyFrame] restricted to rows where pred
+// evaluates to true. Null-valued predicates drop the row (mirrors
+// polars).
+//
+// # Parameters
+//
+//   - pred: boolean [expr.Expr].
+//
+// # Examples
+//
+//	// Adults in engineering:
+//	lf.Filter(
+//	    expr.Col("age").Ge(expr.LitInt64(18)).And(
+//	        expr.Col("dept").Eq(expr.LitString("eng")),
+//	    ),
+//	)
+//
+// The optimiser pushes compatible filters down to scan nodes
+// automatically.
 func (lf LazyFrame) Filter(pred expr.Expr) LazyFrame {
 	return LazyFrame{plan: Filter{Input: lf.plan, Predicate: pred}}
 }
 
-// Sort sorts by one column.
+// Sort sorts lf by one column.
+//
+// # Parameters
+//
+//   - by: column name.
+//   - desc: true for descending order.
+//
+// For multi-key sorts or per-column options (nulls_first, stable)
+// use [LazyFrame.SortBy].
+//
+// # Examples
+//
+//	lf.Sort("salary", true)   // biggest salary first
 func (lf LazyFrame) Sort(by string, desc bool) LazyFrame {
 	return LazyFrame{plan: Sort{
 		Input:   lf.plan,
@@ -84,7 +167,27 @@ type LazyGroupBy struct {
 	keys  []string
 }
 
-// GroupBy starts a group-by on the given keys.
+// GroupBy starts a group-by on lf. Close it with
+// [LazyGroupBy.Agg] to produce a [LazyFrame].
+//
+// # Parameters
+//
+//   - keys: one or more column names to group by; order matters
+//     only for the output row order of unsorted group-bys.
+//
+// # Examples
+//
+//	// Per-department salary stats:
+//	lf.GroupBy("dept").Agg(
+//	    expr.Col("salary").Sum().Alias("total"),
+//	    expr.Col("salary").Mean().Alias("avg"),
+//	    expr.Col("salary").Count().Alias("headcount"),
+//	)
+//
+//	// Multi-key group:
+//	lf.GroupBy("region", "product").Agg(
+//	    expr.Col("qty").Sum().Alias("units"),
+//	)
 func (lf LazyFrame) GroupBy(keys ...string) LazyGroupBy {
 	return LazyGroupBy{input: lf.plan, keys: keys}
 }
@@ -196,8 +299,31 @@ func rebuildAgg(op expr.AggOp, inner expr.Expr) (expr.Expr, bool) {
 	return expr.Expr{}, false
 }
 
-// Join returns a LazyFrame that joins this frame with other on the given
-// key columns.
+// Join merges lf with other on a set of key columns.
+//
+// # Parameters
+//
+//   - other: right-hand side [LazyFrame].
+//   - on: shared key column names (must exist in both frames).
+//   - how: one of [dataframe.InnerJoin], [dataframe.LeftJoin],
+//     [dataframe.CrossJoin]. Inner drops rows with no match on
+//     either side; left keeps all rows from lf; cross produces the
+//     Cartesian product (ignores `on`).
+//
+// # Returns
+//
+// A [LazyFrame] whose output has the union of both schemas; key
+// columns appear once, collisions on non-key columns surface as an
+// error at execute time.
+//
+// # Examples
+//
+//	// Merge salaries onto people by name:
+//	people := lazy.FromDataFrame(peopleDF)
+//	salaries := lazy.FromDataFrame(salariesDF)
+//	out, _ := people.Join(salaries, []string{"name"}, dataframe.InnerJoin).
+//	    Filter(expr.Col("salary").Gt(expr.LitFloat64(50_000))).
+//	    Collect(ctx)
 func (lf LazyFrame) Join(other LazyFrame, on []string, how dataframe.JoinType) LazyFrame {
 	return LazyFrame{plan: Join{Left: lf.plan, Right: other.plan, On: on, How: how}}
 }
@@ -205,14 +331,41 @@ func (lf LazyFrame) Join(other LazyFrame, on []string, how dataframe.JoinType) L
 // keep dataframe import referenced via JoinType.
 var _ dataframe.JoinType
 
-// Collect runs the optimizer and executor and returns the resulting
-// DataFrame. The returned DataFrame owns its buffers; the caller must
-// Release.
+// Collect materialises lf into an in-memory [dataframe.DataFrame].
 //
-// With the WithStreaming option, streaming-friendly prefixes of the plan
-// run through the morsel-driven executor; pipeline breakers (Sort,
-// Aggregate, Join) evaluate their upstream via streaming and then fall
-// back to eager kernels.
+// Runs the optimiser (predicate pushdown, projection pushdown, CSE,
+// constant folding, ...) then the executor. The returned DataFrame
+// owns its Arrow buffers: callers must call
+// [dataframe.DataFrame.Release] when done.
+//
+// # Parameters
+//
+//   - ctx: cancellation / deadline; the executor checks between
+//     pipeline stages and between morsels in streaming mode.
+//   - opts: optional [ExecOption] values. [WithStreaming] pushes
+//     scan+filter+projection+with_columns through the morsel-driven
+//     executor; pipeline breakers ([Sort], [Aggregate], [Join]) still
+//     evaluate their upstream via streaming and then fall back to
+//     eager kernels.
+//
+// # Returns
+//
+// A materialised [dataframe.DataFrame] and any execution error.
+//
+// # Examples
+//
+// Eager execution:
+//
+//	out, err := lf.Collect(context.Background())
+//	if err != nil { log.Fatal(err) }
+//	defer out.Release()
+//
+// Streaming execution:
+//
+//	out, err := lf.Collect(ctx, lazy.WithStreaming())
+//
+// Use [LazyFrame.CollectUnoptimized] to bypass the optimiser when
+// debugging a plan.
 func (lf LazyFrame) Collect(ctx context.Context, opts ...ExecOption) (*dataframe.DataFrame, error) {
 	optimized, _, err := DefaultOptimizer().Optimize(lf.plan)
 	if err != nil {
