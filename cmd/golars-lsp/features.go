@@ -810,6 +810,21 @@ func (s *server) handleHover(msg *rawMessage) {
 		s.reply(msg, nil)
 		return
 	}
+	// Hovering a `# ^?` probe line returns the preview table as
+	// markdown. Works in every LSP client without extra UX: inlay
+	// tooltips are unreliable across editors, hover is not.
+	if isProbeDirective(line) {
+		if body := renderProbeTooltip(doc, int(p.Position.Line)); body != "" {
+			s.reply(msg, hoverResult{
+				Contents: markup{Kind: "markdown", Value: body},
+				Range: &lspRange{
+					Start: position{Line: p.Position.Line, Character: 0},
+					End:   position{Line: p.Position.Line, Character: uint32(len(line))},
+				},
+			})
+			return
+		}
+	}
 	col := byteCol(line, int(p.Position.Character))
 	tok, start, end := tokenAt(line, col)
 	if tok == "" {
