@@ -4,6 +4,7 @@
   <a href="https://github.com/Gaurav-Gosain/golars/releases"><img src="https://img.shields.io/github/release/Gaurav-Gosain/golars.svg" alt="Latest Release"></a>
   <a href="https://pkg.go.dev/github.com/Gaurav-Gosain/golars?tab=doc"><img src="https://godoc.org/github.com/Gaurav-Gosain/golars?status.svg" alt="GoDoc"></a>
   <a href="https://github.com/Gaurav-Gosain/golars/actions/workflows/ci.yml"><img src="https://github.com/Gaurav-Gosain/golars/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://deepwiki.com/Gaurav-Gosain/golars"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <br>
   <br>
   <em>Pure-Go DataFrames modeled on polars, built on Apache Arrow. No cgo.</em>
