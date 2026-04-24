@@ -21,10 +21,13 @@ syn keyword glrBoolean      true false
 
 " Core commands: one distinct highlight group keeps the
 " pipeline-opening verb visually prominent.
-syn keyword glrCommand      load save use frames drop_frame
-syn keyword glrCommand      show schema describe head tail
-syn keyword glrCommand      select drop filter sort limit groupby join
-syn keyword glrCommand      explain collect reset source
+syn keyword glrCommand      load save use stash frames drop_frame
+syn keyword glrCommand      show ishow browse schema describe head tail
+syn keyword glrCommand      select drop filter sort limit groupby join rename
+syn keyword glrCommand      with unnest explode upsample reverse sample shuffle unique
+syn keyword glrCommand      explain explain_tree tree graph show_graph mermaid
+syn keyword glrCommand      collect reset source null_count null_count_all
+syn keyword glrCommand      sum_all mean_all min_all max_all std_all var_all median_all
 syn keyword glrCommand      timing info clear help exit quit
 
 " Structural keywords (join types, ordering, logical operators,
