@@ -202,6 +202,11 @@ Tree-sitter grammar + Neovim plugin live under
 [`editors/`](editors/). VS Code extension at
 [`editors/vscode-golars`](editors/vscode-golars/).
 
+**Zed**: Install via curl:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/golars/main/install-zed-extension.sh | bash
+```
+
 ### Model Context Protocol server
 
 <p align="center"><img src="vhs/out/mcp.gif" alt="golars-mcp"></p>
@@ -280,6 +285,7 @@ method-level status table.
 | [`editors/tree-sitter-golars`](editors/tree-sitter-golars/) | `.glr` grammar (Neovim, Helix)                                                                                                                               |
 | [`editors/vscode-golars`](editors/vscode-golars/)           | VS Code extension (grammar + LSP client)                                                                                                                     |
 | [`editors/nvim-golars`](editors/nvim-golars/)               | Neovim plugin                                                                                                                                                |
+| [`editors/zed-golars`](editors/zed-golars/)                 | Zed extension (grammar + LSP client)                                                                                                                         |
 | [`docs-site/`](docs-site/)                                  | Fumadocs-based website, ships `/llms.txt`, `/llms-full.txt`, and `/docs-md/<slug>` raw-markdown routes for LLM ingestion                                     |
 
 ## Documentation

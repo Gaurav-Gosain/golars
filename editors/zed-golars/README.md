@@ -19,7 +19,15 @@ Install the language server binary:
 go install github.com/Gaurav-Gosain/golars/cmd/golars-lsp@latest
 ```
 
-### Dev Extension (for testing)
+### Quick Install (One-liner)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/golars/main/install-zed-extension.sh | bash
+```
+
+This clones the extension directly to Zed's extensions directory. Restart Zed to activate.
+
+### Dev Extension (for local development)
 
 1. Open Zed
 2. Go to Extensions → Install Dev Extension
