@@ -912,12 +912,15 @@ func renderProbeTooltip(d *document, probeLine int) string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "--preview", f.Name())
+	cmd := exec.CommandContext(ctx, bin,
+		"--preview", f.Name(),
+		"--preview-format", "markdown",
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil || len(out) == 0 {
 		return ""
 	}
-	return "```\n" + strings.TrimRight(string(out), "\n") + "\n```"
+	return strings.TrimRight(string(out), "\n")
 }
 
 // findGolarsBin resolves the golars CLI used to render probe

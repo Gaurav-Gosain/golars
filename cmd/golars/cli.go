@@ -92,6 +92,7 @@ func bindReplFlags(cmd *cobra.Command) {
 	cmd.Flags().String("run", "", "run a .glr script and exit")
 	cmd.Flags().String("preview", "", "machine-readable script preview (for editor plugins)")
 	cmd.Flags().Int("preview-rows", 10, "row cap for --preview output")
+	cmd.Flags().String("preview-format", "table", "preview output format: table (default) or markdown")
 	cmd.Flags().Bool("timing", false, "show per-command wall time in the REPL")
 }
 
@@ -103,8 +104,9 @@ func replRunE(_ *cobra.Command) func(*cobra.Command, []string) error {
 		scriptPath, _ := cmd.Flags().GetString("run")
 		previewPath, _ := cmd.Flags().GetString("preview")
 		previewRows, _ := cmd.Flags().GetInt("preview-rows")
+		previewFormat, _ := cmd.Flags().GetString("preview-format")
 		timing, _ := cmd.Flags().GetBool("timing")
-		return runREPL(loadPath, scriptPath, previewPath, previewRows, timing)
+		return runREPL(loadPath, scriptPath, previewPath, previewRows, previewFormat, timing)
 	}
 }
 
@@ -139,7 +141,7 @@ func newVersionCmd() *cobra.Command {
 
 // runREPL is factored out so `golars` with no subcommand and `golars
 // repl` share a single entry point.
-func runREPL(loadPath, scriptPath, previewPath string, previewRows int, timing bool) error {
+func runREPL(loadPath, scriptPath, previewPath string, previewRows int, previewFormat string, timing bool) error {
 	s := newState(timing)
 	if loadPath != "" {
 		if err := s.load(loadPath); err != nil {
@@ -155,7 +157,7 @@ func runREPL(loadPath, scriptPath, previewPath string, previewRows int, timing b
 		return nil
 	}
 	if previewPath != "" {
-		if code := runPreview(s, previewPath, previewRows); code != 0 {
+		if code := runPreview(s, previewPath, previewRows, previewFormat); code != 0 {
 			return errSubcommandFailed
 		}
 		return nil

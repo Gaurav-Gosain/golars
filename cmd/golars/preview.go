@@ -14,11 +14,16 @@ import (
 // probes). Emits no banner, no per-statement trace, no success
 // messages: stdout contains just the table.
 //
+// When format == "markdown" a GitHub-flavored markdown table is
+// produced instead of the box-drawing form, so hosts that render
+// markdown (Zed / VS Code hover popups, Fumadocs) get a native
+// table layout rather than a literal ASCII rectangle.
+//
 // Errors during script execution are written to stderr; the preview
 // output on stdout is whatever partial state existed before the
 // error, which is usually what the user wants when they're still
 // typing the script.
-func runPreview(s *state, path string, n int) int {
+func runPreview(s *state, path string, n int, format string) int {
 	if n <= 0 {
 		n = 10
 	}
@@ -66,6 +71,14 @@ func runPreview(s *state, path string, n int) int {
 		return 1
 	}
 	defer df.Release()
+
+	if format == "markdown" {
+		if err := writeMarkdown(os.Stdout, df); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 
 	// Frame.String() uses the rounded-corner format the REPL prints
 	// via `.show`. Writing it verbatim keeps preview output visually
