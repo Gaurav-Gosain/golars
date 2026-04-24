@@ -1,0 +1,15 @@
+id = "golars"
+name = "golars"
+description = "golars .glr scripting language support: syntax highlighting, LSP, and editor features."
+version = "0.1.0"
+schema_version = 1
+authors = ["Gaurav Gosain <itsgauravgosain@gmail.com>"]
+repository = "https://github.com/Gaurav-Gosain/golars"
+
+[language_servers.golars-lsp]
+name = "golars Language Server"
+languages = ["golars"]
+
+[grammars.golars]
+repository = "https://github.com/nkapila6/tree-sitter-golars"
+commit = "ab6cc9593842cac51a4465a9a0d71f3cafd5afd4"
