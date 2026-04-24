@@ -184,7 +184,9 @@ func writeFrame(ctx context.Context, w io.Writer, df *dataframe.DataFrame, forma
 }
 
 // writeMarkdown emits a GitHub-flavored markdown table. Null cells
-// display as empty to match Jupyter/GitHub rendering.
+// display as empty to match Jupyter/GitHub rendering. Pipe, backslash,
+// and newline characters in header/cell values get escaped so strings
+// like "a|b" don't shatter the table structure.
 func writeMarkdown(w io.Writer, df *dataframe.DataFrame) error {
 	names := df.ColumnNames()
 	rows, err := df.Rows()
@@ -194,7 +196,7 @@ func writeMarkdown(w io.Writer, df *dataframe.DataFrame) error {
 	// Header.
 	fmt.Fprint(w, "|")
 	for _, n := range names {
-		fmt.Fprintf(w, " %s |", n)
+		fmt.Fprintf(w, " %s |", escapeMarkdownCell(n))
 	}
 	fmt.Fprintln(w)
 	fmt.Fprint(w, "|")
@@ -210,11 +212,27 @@ func writeMarkdown(w io.Writer, df *dataframe.DataFrame) error {
 				fmt.Fprint(w, "  |")
 				continue
 			}
-			fmt.Fprintf(w, " %v |", v)
+			fmt.Fprintf(w, " %s |", escapeMarkdownCell(fmt.Sprintf("%v", v)))
 		}
 		fmt.Fprintln(w)
 	}
 	return nil
+}
+
+// escapeMarkdownCell makes s safe to embed between `|` delimiters.
+// GitHub-Flavored Markdown treats `\|` as a literal pipe inside a
+// table cell; newlines inside cells need `<br>` because raw `\n`
+// would terminate the row. Backslash escapes apply first so we don't
+// double-escape later additions.
+func escapeMarkdownCell(s string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`|`, `\|`,
+		"\r\n", "<br>",
+		"\n", "<br>",
+		"\r", "<br>",
+	)
+	return replacer.Replace(s)
 }
 
 // writeParquetStream writes df to a temp file then streams it to w.
