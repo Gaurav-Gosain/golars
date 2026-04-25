@@ -2,6 +2,9 @@
 /target/
 /Cargo.lock
 
+# build-package.sh output (prebuilt extension tarball)
+/dist/
+
 # IDE
 .idea/
 .vscode/

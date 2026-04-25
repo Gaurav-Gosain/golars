@@ -38,3 +38,33 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+
+  zed-extension:
+    name: build + attach Zed extension package
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: install wasm-tools
+        run: cargo install --locked wasm-tools
+
+      - name: install tree-sitter CLI
+        run: cargo install --locked tree-sitter-cli
+
+      - name: build Zed extension package
+        run: ./editors/zed-golars/build-package.sh "${GITHUB_REF_NAME#v}"
+
+      - name: upload tarball to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          tarball="editors/zed-golars/dist/golars-zed-extension_${version}.tar.gz"
+          gh release upload "${GITHUB_REF_NAME}" "$tarball" --clobber

@@ -238,11 +238,17 @@ the frame at that point.
 See [`editors/nvim-golars`](editors/nvim-golars/) for tree-sitter
 integration, per-option config, and a local-checkout variant.
 
-**Zed**: grammar + LSP client ship as a Zed extension. Install via
-curl:
+**Zed**: grammar + LSP client ship as a Zed extension. The installer
+drops a prebuilt extension package (extension.wasm + tree-sitter
+grammar wasm + language assets) into Zed's installed-extensions
+directory, and auto-fetches `golars-lsp` from the same release if
+it's not already on PATH:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/golars/main/install-zed-extension.sh | bash
 ```
+Pin a specific version with a positional arg
+(`... | bash -s -- v0.1.3`). After the install completes, restart
+Zed (or run `zed: reload extensions`) and open any `.glr` file.
 
 **VS Code**: grammar + LSP client at
 [`editors/vscode-golars`](editors/vscode-golars/).
