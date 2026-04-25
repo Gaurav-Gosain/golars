@@ -52,11 +52,32 @@ jobs:
         with:
           targets: wasm32-wasip1
 
-      - name: install wasm-tools
-        run: cargo install --locked wasm-tools
+      # Prebuilt binaries: skips ~7 minutes of `cargo install` per
+      # release. Bump the pins when adopting a newer zed_extension_api
+      # or tree-sitter ABI.
+      - name: install wasm-tools (prebuilt)
+        env:
+          WASM_TOOLS_VERSION: "1.220.0"
+        run: |
+          set -e
+          url="https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" -o "$tmp/wasm-tools.tar.gz"
+          tar -xzf "$tmp/wasm-tools.tar.gz" -C "$tmp"
+          install -Dm755 "$tmp/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux/wasm-tools" /usr/local/bin/wasm-tools
+          wasm-tools --version
 
-      - name: install tree-sitter CLI
-        run: cargo install --locked tree-sitter-cli
+      - name: install tree-sitter CLI (prebuilt)
+        env:
+          TREE_SITTER_VERSION: "0.24.7"
+        run: |
+          set -e
+          url="https://github.com/tree-sitter/tree-sitter/releases/download/v${TREE_SITTER_VERSION}/tree-sitter-linux-x64.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" -o "$tmp/tree-sitter.gz"
+          gunzip "$tmp/tree-sitter.gz"
+          install -Dm755 "$tmp/tree-sitter" /usr/local/bin/tree-sitter
+          tree-sitter --version
 
       - name: build Zed extension package
         run: ./editors/zed-golars/build-package.sh "${GITHUB_REF_NAME#v}"
