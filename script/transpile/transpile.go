@@ -5,8 +5,14 @@
 // a real Go module once the exploration is done. Structural commands
 // (load/select/drop/sort/limit/head/groupby/with/filter/...) map to
 // direct lazy.LazyFrame calls. Commands that have no lazy equivalent
-// (browse, explain, info, etc.) appear as `// TODO(glr):` reminders
-// so nothing is silently dropped.
+// (browse, explain, info, etc.) are skipped silently and listed in a
+// header comment so nothing is invisibly dropped.
+//
+// Runs of pipeline ops between materialisation points are emitted as
+// a single method chain, mirroring how a hand-written program would
+// read. The runtime optimiser (lazy.DefaultOptimizer) still runs on
+// each Collect, so predicate pushdown, slice pushdown, CSE, etc.
+// apply transparently to the generated code.
 package transpile
 
 import (
@@ -19,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,9 +51,8 @@ func Transpile(path string, w io.Writer, pkg string) error {
 		src:     string(raw),
 		imports: map[string]struct{}{},
 		frames:  map[string]string{},
+		varSeqs: map[string]int{},
 	}
-	t.imports["context"] = struct{}{}
-	t.imports["log"] = struct{}{}
 	t.imports["github.com/Gaurav-Gosain/golars/lazy"] = struct{}{}
 	t.imports["github.com/Gaurav-Gosain/golars/expr"] = struct{}{}
 	t.imports["github.com/Gaurav-Gosain/golars"] = struct{}{}
@@ -54,29 +60,32 @@ func Transpile(path string, w io.Writer, pkg string) error {
 	if err := t.walk(); err != nil {
 		return err
 	}
-	return t.emit(w)
+	return t.render(w)
 }
 
-// trans holds the running transpilation state: the source script,
-// accumulated Go statements, import set, and the currently-focused
-// variable name so chained ops can keep building on it.
+// trans holds the running transpilation state. The "chain" model:
+// each pipeline op (Filter, Sort, ...) appends to `pending`. The next
+// materialisation (`show`/`save`/`use`/`stash`) calls `flush()`, which
+// emits one chained Go statement that binds `focus` to
+// `chainOrigin.Op1(...).Op2(...)...`.
 type trans struct {
 	pkg     string
 	src     string
 	imports map[string]struct{}
-	stmts   []string // Go code lines inside func main()
-	focus   string   // name of the Go var holding the focused lazy frame
-	varSeq  int      // monotonic counter for generated variable names
-	// frames maps glr frame names (from `load ... as NAME`) to the Go
-	// variable holding that staged LazyFrame. `use NAME` and
-	// `join NAME on K` look up the Go var here.
-	frames map[string]string
-	// materialised is true once the pipeline has been collected and
-	// printed at least once (via show / head / collect / tail / save).
-	// The walker appends a trailing `fmt.Println` block at end-of-file
-	// only when this stays false, so a silent script like
-	// `load ... ; filter ...` still shows its final frame.
+	stmts   []string
+
+	focus       string   // Go var name for the focused lazy frame
+	chainOrigin string   // Go expression the next chain extends from
+	pending     []string // ".Method(args)" fragments to flush
+
+	frames  map[string]string // glr frame name -> Go var
+	varSeqs map[string]int    // per-prefix counter for fresh names
+
 	materialised bool
+	needsFmt     bool
+	needsCtx     bool
+	needsDisplay bool
+	skipped      []string // REPL-only commands silently dropped
 }
 
 func (t *trans) walk() error {
@@ -87,24 +96,19 @@ func (t *trans) walk() error {
 			continue
 		}
 		if err := t.handle(stmt); err != nil {
-			t.comment("error on line %q: %v", raw, err)
+			return fmt.Errorf("line %q: %w", raw, err)
 		}
 	}
-	// If the script never hit show/head/collect/save, the focused
-	// pipeline was built but never consumed. Emit a trailing display
-	// so the compiled binary prints something, mirroring the REPL's
-	// implicit display of `# ^?` probes and final pipeline state.
-	if !t.materialised && t.focus != "" {
-		t.imports["fmt"] = struct{}{}
-		t.stmts = append(t.stmts,
-			"// Implicit display: no show/head/collect/save in script.",
-			"{",
-			fmt.Sprintf("\tout, err := %s.Collect(ctx)", t.focus),
-			"\tif err != nil { log.Fatal(err) }",
-			"\tdefer out.Release()",
-			"\tfmt.Println(out)",
-			"}",
-		)
+	// Implicit display when the script never materialised: flush any
+	// pending chain into focus, then print.
+	if !t.materialised && (t.focus != "" || len(t.pending) > 0) {
+		t.flush()
+		if t.focus != "" {
+			t.emitComment("Implicit display: no show/head/collect/save in script.")
+			t.emitDisplay(t.focus)
+		}
+	} else {
+		t.flush()
 	}
 	return nil
 }
@@ -124,8 +128,10 @@ func (t *trans) handle(stmt string) error {
 		return t.dropCols(args)
 	case "sort":
 		return t.sort(args)
-	case "limit", "head":
-		return t.limit(args, cmd)
+	case "limit":
+		return t.limit(args)
+	case "head":
+		return t.head(args)
 	case "tail":
 		return t.tail(args)
 	case "filter":
@@ -137,39 +143,40 @@ func (t *trans) handle(stmt string) error {
 	case "rename":
 		return t.rename(args)
 	case "show":
-		t.imports["fmt"] = struct{}{}
-		t.stmts = append(t.stmts,
-			"{",
-			fmt.Sprintf("\tout, err := %s.Head(10).Collect(ctx)", t.focusVar()),
-			"\tif err != nil { log.Fatal(err) }",
-			"\tdefer out.Release()",
-			"\tfmt.Println(out)",
-			"}",
-		)
-		t.materialised = true
-		return nil
+		return t.show()
 	case "use":
 		return t.use(args)
+	case "stash":
+		return t.stash(args)
 	case "join":
 		return t.join(args)
-	case "frames":
-		// Purely informational in the REPL; skip silently.
-		return nil
 	case "save", "write":
 		return t.save(args)
 	case "collect":
-		t.stmts = append(t.stmts,
-			"{",
-			fmt.Sprintf("\tout, err := %s.Collect(ctx)", t.focusVar()),
-			"\tif err != nil { log.Fatal(err) }",
-			"\tdefer out.Release()",
-			"\t_ = out",
-			"}",
-		)
-		t.materialised = true
+		return t.collect()
+	case "reset":
+		// Drop the lazy pipeline; keep nothing focused. Subsequent
+		// `load` will start a fresh chain.
+		t.abandonFocus()
+		t.focus = ""
+		t.chainOrigin = ""
+		t.pending = nil
+		t.materialised = false
+		return nil
+	// REPL-only commands - meaningless in a compiled program. Track
+	// for the header note instead of polluting the body with TODOs.
+	case "frames", "drop_frame", "schema", "describe", "ishow", "browse",
+		"explain", "explain_tree", "tree", "graph", "show_graph", "mermaid",
+		"timing", "info", "clear", "help", "exit", "quit", "source",
+		"null_count", "null_count_all", "size", "glimpse",
+		"sum_all", "mean_all", "min_all", "max_all", "std_all", "var_all", "median_all":
+		t.noteSkipped(cmd)
 		return nil
 	default:
-		t.comment("TODO(glr): command %q has no direct lazy API; port manually", cmd)
+		// Genuine unknown - leave a TODO breadcrumb. The walker keeps
+		// going so the rest of the script still translates.
+		t.flush()
+		t.emitComment("TODO(glr): command %q has no direct lazy API; port manually", cmd)
 		return nil
 	}
 }
@@ -181,36 +188,38 @@ func (t *trans) load(args []string) error {
 		return fmt.Errorf("load requires a path")
 	}
 	path := args[0]
-	name := ""
+	stage := ""
 	if len(args) >= 3 && strings.EqualFold(args[1], "as") {
-		name = args[2]
+		stage = args[2]
 	}
 	reader := readerForExt(path)
 	if reader == "" {
 		return fmt.Errorf("load: unknown file extension for %q", path)
 	}
-	// CSV gets WithNullValues("") to match the REPL/script default
-	// behaviour (empty fields become nulls rather than parse errors).
 	opts := ""
 	if reader == "ReadCSV" {
 		t.imports["github.com/Gaurav-Gosain/golars/io/csv"] = struct{}{}
 		opts = `, csv.WithNullValues("")`
 	}
-	v := t.freshVar("df")
-	t.stmts = append(t.stmts,
-		fmt.Sprintf("%s, err := golars.%s(%q%s)", v, reader, path, opts),
-		"if err != nil { log.Fatal(err) }",
-		fmt.Sprintf("defer %s.Release()", v),
-	)
-	lf := t.freshVar("lf")
-	t.stmts = append(t.stmts, fmt.Sprintf("%s := lazy.FromDataFrame(%s)", lf, v))
-	if name == "" {
+	df := t.freshVar("df")
+	t.emit("%s, err := golars.%s(%q%s)", df, reader, path, opts)
+	t.emit("if err != nil { log.Fatal(err) }")
+	t.emit("defer %s.Release()", df)
+
+	if stage == "" {
+		// Default frame: focus, but defer the lf binding to the next
+		// flush so the chain can fold through.
+		t.abandonFocus()
+		lf := t.freshVar("lf")
 		t.focus = lf
+		t.chainOrigin = fmt.Sprintf("lazy.FromDataFrame(%s)", df)
+		t.pending = nil
 	} else {
-		// Staged frame: stash its Go var under the glr name for later
-		// `use NAME` / `join NAME on KEY` commands to look up.
-		t.frames[name] = lf
-		t.comment("staged frame %q as %s", name, lf)
+		// Staged frame: bind eagerly under the stage var so `use NAME`
+		// can derive from it later.
+		stageVar := goIdent(stage)
+		t.emit("%s := lazy.FromDataFrame(%s)", stageVar, df)
+		t.frames[stage] = stageVar
 	}
 	return nil
 }
@@ -254,53 +263,42 @@ func (t *trans) sort(args []string) error {
 	return nil
 }
 
-func (t *trans) limit(args []string, cmd string) error {
-	n := 10
-	if len(args) >= 1 {
-		if v, err := strconv.Atoi(args[0]); err == nil {
-			n = v
-		}
+func (t *trans) limit(args []string) error {
+	n := parseN(args, 10)
+	t.pipe("Limit", strconv.Itoa(n))
+	return nil
+}
+
+// head N is display-only - prints first N rows without mutating the
+// pipeline, matching REPL behaviour. `limit N` is the mutating version.
+func (t *trans) head(args []string) error {
+	n := parseN(args, 10)
+	t.flush()
+	if t.focus == "" {
+		return fmt.Errorf("head requires a loaded frame")
 	}
-	t.pipe("Limit", fmt.Sprintf("%d", n))
-	// In the REPL, `head` implicitly displays the result. Mirror that
-	// in the transpiled program so the generated binary prints
-	// something instead of exiting silently. Plain `limit` stays a
-	// pure pipeline step.
-	if cmd == "head" {
-		t.imports["fmt"] = struct{}{}
-		t.stmts = append(t.stmts,
-			"{",
-			fmt.Sprintf("\tout, err := %s.Collect(ctx)", t.focusVar()),
-			"\tif err != nil { log.Fatal(err) }",
-			"\tdefer out.Release()",
-			"\tfmt.Println(out)",
-			"}",
-		)
-		t.materialised = true
-	}
+	t.emitDisplay(fmt.Sprintf("%s.Limit(%d)", t.focus, n))
 	return nil
 }
 
 func (t *trans) tail(args []string) error {
-	n := 10
-	if len(args) >= 1 {
-		if v, err := strconv.Atoi(args[0]); err == nil {
-			n = v
-		}
+	n := parseN(args, 10)
+	t.flush()
+	if t.focus == "" {
+		return fmt.Errorf("tail requires a loaded frame")
 	}
-	t.imports["fmt"] = struct{}{}
-	t.comment("tail materialises; no direct lazy API. Falling back to Collect+Tail.")
-	t.stmts = append(t.stmts,
-		"{",
-		fmt.Sprintf("\tout, err := %s.Collect(ctx)", t.focusVar()),
-		"\tif err != nil { log.Fatal(err) }",
-		"\tdefer out.Release()",
-		fmt.Sprintf("\ttailed := out.Tail(%d)", n),
-		"\tdefer tailed.Release()",
-		"\tfmt.Println(tailed)",
-		"}",
-	)
+	t.needsFmt = true
+	t.needsCtx = true
 	t.materialised = true
+	t.emitComment("tail materialises; no direct lazy API. Falling back to Collect+Tail.")
+	t.emit("{")
+	t.emit("\tout, err := %s.Collect(ctx)", t.focus)
+	t.emit("\tif err != nil { log.Fatal(err) }")
+	t.emit("\tdefer out.Release()")
+	t.emit("\ttailed := out.Tail(%d)", n)
+	t.emit("\tdefer tailed.Release()")
+	t.emit("\tfmt.Println(tailed)")
+	t.emit("}")
 	return nil
 }
 
@@ -308,20 +306,14 @@ func (t *trans) filter(rest string) error {
 	if rest == "" {
 		return fmt.Errorf("filter requires a predicate")
 	}
-	// `.filter` grammar is richer than the `with` expression grammar:
-	// it knows `like`, `contains`, `is_null`, `and`/`or`. Try that
-	// first, then fall back to the generic expression parser so
-	// arithmetic-style predicates like `age > 18` still work.
 	e, err := predparse.Parse(rest)
 	if err != nil {
 		e, err = exprparse.Parse(rest)
 	}
 	if err != nil {
-		t.comment("filter: could not parse %q: %v", rest, err)
-		return nil
+		return fmt.Errorf("filter: parse %q: %w", rest, err)
 	}
-	goExpr := renderExpr(e.Node())
-	t.pipe("Filter", goExpr)
+	t.pipe("Filter", renderExpr(e.Node()))
 	return nil
 }
 
@@ -332,8 +324,7 @@ func (t *trans) with(rest string) error {
 	}
 	e, err := exprparse.Parse(exprText)
 	if err != nil {
-		t.comment("with %q: parse error: %v", name, err)
-		return nil
+		return fmt.Errorf("with %q: parse: %w", name, err)
 	}
 	goExpr := renderExpr(e.Node())
 	t.pipe("WithColumns", fmt.Sprintf("%s.Alias(%q)", goExpr, name))
@@ -353,7 +344,7 @@ func (t *trans) groupby(args []string) error {
 	for _, spec := range args[1:] {
 		parts := strings.Split(spec, ":")
 		if len(parts) < 2 {
-			t.comment("skipping invalid agg spec %q", spec)
+			t.emitComment("skipping invalid agg spec %q", spec)
 			continue
 		}
 		col := parts[0]
@@ -362,24 +353,19 @@ func (t *trans) groupby(args []string) error {
 		if len(parts) >= 3 {
 			alias = parts[2]
 		}
-		a := fmt.Sprintf("expr.Col(%q).%s()", col, titleCase(op))
+		a := fmt.Sprintf("expr.Col(%q).%s()", col, aggMethod(op))
 		if alias != "" {
 			a = fmt.Sprintf("%s.Alias(%q)", a, alias)
 		}
 		aggs = append(aggs, a)
 	}
-	t.stmts = append(t.stmts,
-		fmt.Sprintf("%s = %s.GroupBy(%s).Agg(%s)",
-			t.focusVar(), t.focusVar(),
-			strings.Join(quotedKeys, ", "),
-			strings.Join(aggs, ", "),
-		),
-	)
+	// GroupBy.Agg is two methods chained together, but it's still a
+	// single dot-chain link from the focus var's perspective.
+	t.pendingChain(fmt.Sprintf("GroupBy(%s).Agg(%s)",
+		strings.Join(quotedKeys, ", "), strings.Join(aggs, ", ")))
 	return nil
 }
 
-// use NAME promotes a staged frame into focus. We park the previous
-// focus under its own Go var so a later `use X` can bring it back.
 func (t *trans) use(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("use requires a frame name")
@@ -387,24 +373,33 @@ func (t *trans) use(args []string) error {
 	name := args[0]
 	target, ok := t.frames[name]
 	if !ok {
-		return fmt.Errorf("use: unknown frame %q (stage it with `load ... as %s` first)", name, name)
+		return fmt.Errorf("use: unknown frame %q (stage with `load ... as %s` or `stash %s`)", name, name, name)
 	}
-	// Before swapping focus, stash the current pipeline's Go var
-	// under its own name so further `use` cycles can round-trip.
-	if t.focus != "" {
-		for fname, fvar := range t.frames {
-			if fvar == t.focus {
-				// already mapped - keep as-is
-				_ = fname
-			}
-		}
-	}
-	t.focus = target
+	t.abandonFocus()
+	// Allocate a fresh focus var derived from the staged frame so
+	// later mutations don't trash the snapshot.
+	lf := t.freshVar("lf")
+	t.focus = lf
+	t.chainOrigin = target
+	t.pending = nil
 	return nil
 }
 
-// join NAME on KEY [inner|left|cross] joins the focused frame with a
-// staged one looked up by glr frame name.
+func (t *trans) stash(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("stash requires a name")
+	}
+	name := args[0]
+	if t.focus == "" && len(t.pending) == 0 {
+		return fmt.Errorf("stash: no focused frame to snapshot")
+	}
+	t.flush()
+	stageVar := goIdent(name)
+	t.emit("%s := %s", stageVar, t.focus)
+	t.frames[name] = stageVar
+	return nil
+}
+
 func (t *trans) join(args []string) error {
 	if len(args) < 3 || !strings.EqualFold(args[1], "on") {
 		return fmt.Errorf("join: expected NAME on KEY [how]")
@@ -441,6 +436,31 @@ func (t *trans) rename(args []string) error {
 	return nil
 }
 
+func (t *trans) show() error {
+	t.flush()
+	if t.focus == "" {
+		return fmt.Errorf("show requires a loaded frame")
+	}
+	t.emitDisplay(fmt.Sprintf("%s.Limit(10)", t.focus))
+	return nil
+}
+
+func (t *trans) collect() error {
+	t.flush()
+	if t.focus == "" {
+		return fmt.Errorf("collect requires a focused frame")
+	}
+	t.needsCtx = true
+	t.materialised = true
+	t.emit("{")
+	t.emit("\tout, err := %s.Collect(ctx)", t.focus)
+	t.emit("\tif err != nil { log.Fatal(err) }")
+	t.emit("\tdefer out.Release()")
+	t.emit("\t_ = out")
+	t.emit("}")
+	return nil
+}
+
 func (t *trans) save(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("save requires a path")
@@ -450,73 +470,190 @@ func (t *trans) save(args []string) error {
 	if writer == "" {
 		return fmt.Errorf("save: unknown file extension for %q", path)
 	}
-	t.stmts = append(t.stmts,
-		"{",
-		fmt.Sprintf("\tout, err := %s.Collect(ctx)", t.focusVar()),
-		"\tif err != nil { log.Fatal(err) }",
-		"\tdefer out.Release()",
-		fmt.Sprintf("\tif err := golars.%s(out, %q); err != nil { log.Fatal(err) }", writer, path),
-		"}",
-	)
+	t.flush()
+	if t.focus == "" {
+		return fmt.Errorf("save requires a focused frame")
+	}
+	t.needsCtx = true
 	t.materialised = true
+	t.emit("{")
+	t.emit("\tout, err := %s.Collect(ctx)", t.focus)
+	t.emit("\tif err != nil { log.Fatal(err) }")
+	t.emit("\tdefer out.Release()")
+	t.emit("\tif err := golars.%s(out, %q); err != nil { log.Fatal(err) }", writer, path)
+	t.emit("}")
 	return nil
 }
 
-// --- helpers ----------------------------------------------------
+// --- chain plumbing ---------------------------------------------
 
-func (t *trans) focusVar() string {
-	if t.focus == "" {
-		t.focus = t.freshVar("lf")
-		t.stmts = append(t.stmts, fmt.Sprintf("var %s lazy.LazyFrame", t.focus))
-	}
-	return t.focus
-}
-
-func (t *trans) freshVar(prefix string) string {
-	t.varSeq++
-	return fmt.Sprintf("%s%d", prefix, t.varSeq)
-}
-
+// pipe queues a method call onto the pending chain. The fragment is
+// stored without a leading dot so renderChain can choose the right
+// separator (".") and place a line break after it for multi-link
+// chains.
 func (t *trans) pipe(method, args string) {
-	t.stmts = append(t.stmts,
-		fmt.Sprintf("%s = %s.%s(%s)", t.focusVar(), t.focusVar(), method, args),
-	)
+	t.pendingChain(fmt.Sprintf("%s(%s)", method, args))
 }
 
-func (t *trans) comment(format string, a ...any) {
+// pendingChain queues an arbitrary chain fragment (e.g.
+// "GroupBy(...).Agg(...)") onto the pending chain.
+func (t *trans) pendingChain(fragment string) {
+	if t.focus == "" {
+		// Pipeline op before any load - flag and skip rather than
+		// emitting unbound code.
+		t.emitComment("skipped %s: no loaded frame", strings.SplitN(fragment, "(", 2)[0])
+		return
+	}
+	t.pending = append(t.pending, fragment)
+}
+
+// flush binds the focus var to chainOrigin + pending. Used by
+// materialisation handlers (show/head/collect/save/stash) that need
+// the focus var defined in the surrounding scope.
+//
+// Two or more chain links wrap across lines for readability; gofmt
+// applies the standard continuation indent.
+func (t *trans) flush() {
+	if t.focus == "" {
+		return
+	}
+	chain := renderChain(t.pending)
+	t.pending = nil
+	bound := t.chainOrigin == t.focus
+	if bound && chain == "" {
+		return
+	}
+	if bound {
+		t.emit("%s = %s%s", t.focus, t.focus, chain)
+	} else {
+		t.emit("%s := %s%s", t.focus, t.chainOrigin, chain)
+		t.chainOrigin = t.focus
+	}
+}
+
+// renderChain joins pending "Method(args)" fragments into a dot-chain
+// suffix. Single link stays on one line; two or more wrap with
+// dot-at-end-of-line so gofmt applies the standard continuation
+// indent and parsing succeeds (Go forbids leading-dot statements).
+// The first link of a wrapped chain also moves onto its own line so
+// every method aligns at the same column.
+func renderChain(pending []string) string {
+	switch len(pending) {
+	case 0:
+		return ""
+	case 1:
+		return "." + pending[0]
+	}
+	return ".\n\t\t" + strings.Join(pending, ".\n\t\t")
+}
+
+// groupby is the one place a single chain link wraps two methods
+// (GroupBy().Agg()). Stored without leading dot; renderChain prefixes.
+
+// abandonFocus discards the current focus + pending chain ahead of a
+// focus switch (load / use / reset). Per glr semantics, `use NAME`
+// returns to a clone of the named frame and any unstashed work on the
+// previous focus is lost - mirror that by emitting nothing. To keep
+// in-progress work, the user must `stash` first (which calls flush()
+// to bind the chain under a name).
+func (t *trans) abandonFocus() {
+	t.pending = nil
+}
+
+// emitDisplay prints "display(ctx, <expr>)" and marks dependencies.
+func (t *trans) emitDisplay(expr string) {
+	t.needsFmt = true
+	t.needsCtx = true
+	t.needsDisplay = true
+	t.materialised = true
+	t.emit("display(ctx, %s)", expr)
+}
+
+func (t *trans) emit(format string, a ...any) {
+	t.stmts = append(t.stmts, fmt.Sprintf(format, a...))
+}
+
+func (t *trans) emitComment(format string, a ...any) {
 	t.stmts = append(t.stmts, "// "+fmt.Sprintf(format, a...))
 }
 
-// emit builds the full Go source, pipes it through go/format so the
-// output is always gofmt'd, prunes any imports the generated body
-// never references, and writes the final bytes.
-func (t *trans) emit(w io.Writer) error {
-	var buf strings.Builder
-	fmt.Fprintf(&buf, "// Code generated by `golars transpile`. DO NOT EDIT by hand.\n")
-	fmt.Fprintf(&buf, "package %s\n\n", t.pkg)
-	imports := make([]string, 0, len(t.imports))
-	for k := range t.imports {
-		imports = append(imports, k)
+func (t *trans) noteSkipped(cmd string) {
+	if slices.Contains(t.skipped, cmd) {
+		return
 	}
-	sort.Strings(imports)
+	t.skipped = append(t.skipped, cmd)
+}
+
+func (t *trans) freshVar(prefix string) string {
+	t.varSeqs[prefix]++
+	return fmt.Sprintf("%s%d", prefix, t.varSeqs[prefix])
+}
+
+// --- emission ---------------------------------------------------
+
+// render assembles the full Go source: header, imports (stdlib +
+// external groups), main(), optional display() helper. The result is
+// gofmt'd and unused imports pruned via go/ast.
+func (t *trans) render(w io.Writer) error {
+	var buf strings.Builder
+	fmt.Fprintln(&buf, "// Code generated by `golars transpile`. DO NOT EDIT by hand.")
+	if len(t.skipped) > 0 {
+		sort.Strings(t.skipped)
+		fmt.Fprintf(&buf, "// REPL-only commands skipped: %s.\n", strings.Join(t.skipped, ", "))
+	}
+	fmt.Fprintln(&buf, "// Runtime applies lazy.DefaultOptimizer (predicate/slice/projection")
+	fmt.Fprintln(&buf, "// pushdown, CSE, simplify) on each Collect.")
+	fmt.Fprintf(&buf, "package %s\n\n", t.pkg)
+
+	// Always pull in the wrappers main needs. Pruning later removes
+	// any that ended up unused.
+	if t.needsCtx {
+		t.imports["context"] = struct{}{}
+		t.imports["log"] = struct{}{}
+	}
+	if t.needsFmt {
+		t.imports["fmt"] = struct{}{}
+		t.imports["log"] = struct{}{}
+	}
+
+	stdlib, external := splitImports(t.imports)
+	sort.Strings(stdlib)
+	sort.Strings(external)
 	fmt.Fprintln(&buf, "import (")
-	for _, imp := range imports {
+	for _, imp := range stdlib {
+		fmt.Fprintf(&buf, "\t%q\n", imp)
+	}
+	if len(stdlib) > 0 && len(external) > 0 {
+		fmt.Fprintln(&buf)
+	}
+	for _, imp := range external {
 		fmt.Fprintf(&buf, "\t%q\n", imp)
 	}
 	fmt.Fprintln(&buf, ")")
 	fmt.Fprintln(&buf)
+
 	fmt.Fprintln(&buf, "func main() {")
-	fmt.Fprintln(&buf, "\tctx := context.Background()")
-	fmt.Fprintln(&buf, "\t_ = ctx")
+	if t.needsCtx {
+		fmt.Fprintln(&buf, "\tctx := context.Background()")
+	}
 	for _, s := range t.stmts {
 		fmt.Fprintf(&buf, "\t%s\n", s)
 	}
 	fmt.Fprintln(&buf, "}")
 
+	if t.needsDisplay {
+		fmt.Fprintln(&buf)
+		fmt.Fprintln(&buf, "// display collects and prints lf, releasing the result on return.")
+		fmt.Fprintln(&buf, "func display(ctx context.Context, lf lazy.LazyFrame) {")
+		fmt.Fprintln(&buf, "\tout, err := lf.Collect(ctx)")
+		fmt.Fprintln(&buf, "\tif err != nil { log.Fatal(err) }")
+		fmt.Fprintln(&buf, "\tdefer out.Release()")
+		fmt.Fprintln(&buf, "\tfmt.Println(out)")
+		fmt.Fprintln(&buf, "}")
+	}
+
 	cleaned, err := pruneAndFormat(buf.String())
 	if err != nil {
-		// Fall back to the raw bytes so the user can at least inspect
-		// what we produced and fix the syntax error by hand.
 		_, werr := io.WriteString(w, buf.String())
 		if werr != nil {
 			return werr
@@ -528,14 +665,14 @@ func (t *trans) emit(w io.Writer) error {
 }
 
 // pruneAndFormat parses the generated source, drops imports whose
-// package name never appears in the body, and returns gofmt'd bytes.
+// package name never appears in the body, preserves the stdlib /
+// external grouping, and returns gofmt'd bytes.
 func pruneAndFormat(src string) ([]byte, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "transpile.go", src, parser.ParseComments)
 	if err != nil {
 		return nil, err
 	}
-	// Walk the body to see which package names it actually references.
 	used := make(map[string]struct{})
 	ast.Inspect(file, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
@@ -549,8 +686,6 @@ func pruneAndFormat(src string) ([]byte, error) {
 		used[ident.Name] = struct{}{}
 		return true
 	})
-	// Rebuild the import block, keeping only imports whose alias (or
-	// base name, for unaliased paths) is referenced.
 	var kept []ast.Spec
 	for _, spec := range file.Imports {
 		path := strings.Trim(spec.Path.Value, `"`)
@@ -565,7 +700,6 @@ func pruneAndFormat(src string) ([]byte, error) {
 			kept = append(kept, spec)
 		}
 	}
-	// Replace the single GenDecl(Import) with the filtered list.
 	for _, decl := range file.Decls {
 		gd, ok := decl.(*ast.GenDecl)
 		if !ok || gd.Tok != token.IMPORT {
@@ -581,9 +715,22 @@ func pruneAndFormat(src string) ([]byte, error) {
 	return format.Source([]byte(out.String()))
 }
 
-// readerForExt / writerForExt map a filename extension to the
-// top-level golars helper that reads / writes that format. Keep in
-// sync with the loader list in cmd/golars/subcmd_inspect.go.
+// splitImports separates stdlib from external paths. Stdlib paths
+// have no dot in their first segment.
+func splitImports(in map[string]struct{}) (stdlib, external []string) {
+	for path := range in {
+		first, _, _ := strings.Cut(path, "/")
+		if strings.Contains(first, ".") {
+			external = append(external, path)
+		} else {
+			stdlib = append(stdlib, path)
+		}
+	}
+	return
+}
+
+// --- helpers ----------------------------------------------------
+
 func readerForExt(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".csv", ".tsv":
@@ -602,9 +749,7 @@ func readerForExt(path string) string {
 
 func writerForExt(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".csv":
-		return "WriteCSV"
-	case ".tsv":
+	case ".csv", ".tsv":
 		return "WriteCSV"
 	case ".parquet", ".pq":
 		return "WriteParquet"
@@ -633,6 +778,16 @@ func parseCommaList(args []string) ([]string, error) {
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+func parseN(args []string, def int) int {
+	if len(args) == 0 {
+		return def
+	}
+	if v, err := strconv.Atoi(args[0]); err == nil {
+		return v
+	}
+	return def
 }
 
 func splitAssign(rest string) (name, expr string, err error) {
@@ -669,7 +824,7 @@ func splitAssign(rest string) (name, expr string, err error) {
 	return "", "", fmt.Errorf("with: missing `=`")
 }
 
-func titleCase(s string) string {
+func aggMethod(s string) string {
 	switch s {
 	case "sum":
 		return "Sum"
@@ -694,11 +849,47 @@ func titleCase(s string) string {
 	case "var":
 		return "Var"
 	}
-	// Fallback: capitalise first letter.
 	if s == "" {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// goIdent converts a glr frame name (snake_case) into a Go-friendly
+// camelCase identifier. Falls back to the original string if it
+// contains characters Go won't accept.
+func goIdent(s string) string {
+	if s == "" {
+		return "_"
+	}
+	var b strings.Builder
+	upper := false
+	for i, r := range s {
+		switch {
+		case r == '_':
+			upper = true
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9'):
+			if upper {
+				if r >= 'a' && r <= 'z' {
+					r = r - 'a' + 'A'
+				}
+				upper = false
+			}
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+			upper = false
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "_"
+	}
+	// Ensure it starts with a letter.
+	if c := out[0]; !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+		out = "f_" + out
+	}
+	return out
 }
 
 func splitLines(s string) func(yield func(string) bool) {
