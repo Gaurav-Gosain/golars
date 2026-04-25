@@ -2,7 +2,7 @@
 
 # golars installation script.
 # Pulls the latest release archive for the host OS + arch and drops
-# `golars`, `golars-lsp`, and `golars-mcp` onto the user's PATH.
+# `golars`, `golars-lsp`, `golars-mcp`, `golars-kernel` onto $PATH.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/golars/main/install.sh | bash
@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 REPO="Gaurav-Gosain/golars"
-BINARIES=("golars" "golars-lsp" "golars-mcp")
+BINARIES=("golars" "golars-lsp" "golars-mcp" "golars-kernel")
 
 info()    { echo -e "${BLUE}[*]${NC} $1"; }
 success() { echo -e "${GREEN}[ok]${NC} $1"; }

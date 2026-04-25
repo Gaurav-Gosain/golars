@@ -41,10 +41,11 @@ curl -fsSL https://raw.githubusercontent.com/Gaurav-Gosain/golars/main/install.s
 ### From source
 
 ```sh
-# library + all three CLIs
+# library + all four CLIs
 go install github.com/Gaurav-Gosain/golars/cmd/golars@latest
 go install github.com/Gaurav-Gosain/golars/cmd/golars-lsp@latest
 go install github.com/Gaurav-Gosain/golars/cmd/golars-mcp@latest
+go install github.com/Gaurav-Gosain/golars/cmd/golars-kernel@latest
 
 # or as a dependency in your Go module
 go get github.com/Gaurav-Gosain/golars@latest
@@ -261,6 +262,32 @@ Zed (or run `zed: reload extensions`) and open any `.glr` file.
 `describe`, `sql`, `row_count`, and `null_counts` as MCP tools any
 Claude Desktop / Cursor / Windsurf session can call against local
 files. See [docs/mcp.md](docs/mcp.md) for the install walkthrough.
+
+### Jupyter
+
+Two ways into the notebook:
+
+```sh
+golars-kernel install   # registers a .glr kernel; pick "golars (.glr)" in JupyterLab
+```
+
+`golars-kernel` is a native Jupyter kernel for the `.glr` scripting
+language. Frames render as HTML tables, state persists across cells,
+tab completion + hover docs work. The kernel speaks the v5.3 wire
+protocol over pure-Go ZeroMQ and delegates execution to a long-lived
+`golars kernel-host` subprocess so behaviour matches the REPL exactly.
+
+For Go notebooks via [GoNB](https://github.com/janpfeifer/gonb), the
+`jupyter/render` package produces multi-mimetype output:
+
+```go
+import jrender "github.com/Gaurav-Gosain/golars/jupyter/render"
+import "github.com/janpfeifer/gonb/gonbui"
+
+gonbui.DisplayHTML(jrender.HTML(df))
+```
+
+See [docs/jupyter.md](docs/jupyter.md) for the full walkthrough.
 
 ## Performance
 

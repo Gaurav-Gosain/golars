@@ -79,6 +79,7 @@ With no subcommand, runs the interactive REPL. Use a subcommand
 		newCatCmd(),
 		newReplCmd(),
 		newTranspileCmd(),
+		newKernelHostCmd(),
 		newVersionCmd(),
 	)
 

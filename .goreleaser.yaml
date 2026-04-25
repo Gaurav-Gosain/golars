@@ -53,9 +53,22 @@ builds:
       - -s -w
       - -X main.version={{ .Version }}
 
+  - id: golars-kernel
+    main: ./cmd/golars-kernel
+    binary: golars-kernel
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+
 archives:
   - id: default
-    ids: [golars, golars-mcp, golars-lsp]
+    ids: [golars, golars-mcp, golars-lsp, golars-kernel]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_
       {{- if eq .Os "darwin" }}Darwin
@@ -118,8 +131,8 @@ release:
     ```
 
     **Direct download:** grab the archive below for your os/arch,
-    extract, and drop `golars` / `golars-mcp` / `golars-lsp` on your
-    PATH.
+    extract, and drop `golars` / `golars-mcp` / `golars-lsp` /
+    `golars-kernel` on your PATH.
 
 brews:
   - name: golars
@@ -139,6 +152,7 @@ brews:
       bin.install "golars"
       bin.install "golars-lsp"
       bin.install "golars-mcp"
+      bin.install "golars-kernel"
     test: |
       system "#{bin}/golars", "version"
 
@@ -156,6 +170,7 @@ aurs:
       - golars
       - golars-lsp
       - golars-mcp
+      - golars-kernel
     conflicts:
       - golars
     package: |
@@ -169,8 +184,9 @@ aurs:
         *)       _d="." ;;
       esac
       cd "$_d"
-      install -Dm755 "./golars"     "${pkgdir}/usr/bin/golars"
-      install -Dm755 "./golars-lsp" "${pkgdir}/usr/bin/golars-lsp"
-      install -Dm755 "./golars-mcp" "${pkgdir}/usr/bin/golars-mcp"
+      install -Dm755 "./golars"        "${pkgdir}/usr/bin/golars"
+      install -Dm755 "./golars-lsp"    "${pkgdir}/usr/bin/golars-lsp"
+      install -Dm755 "./golars-mcp"    "${pkgdir}/usr/bin/golars-mcp"
+      install -Dm755 "./golars-kernel" "${pkgdir}/usr/bin/golars-kernel"
       install -Dm644 "./LICENSE"    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
       install -Dm644 "./NOTICE"     "${pkgdir}/usr/share/licenses/${pkgname}/NOTICE"
