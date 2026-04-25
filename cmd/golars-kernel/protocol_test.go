@@ -49,29 +49,6 @@ func TestSignAndVerify(t *testing.T) {
 	}
 }
 
-// TestEndsWithDisplayCommand: heuristic for suppressing the auto-HTML
-// when the user already explicitly displayed via show/head/etc.
-func TestEndsWithDisplayCommand(t *testing.T) {
-	cases := []struct {
-		code string
-		want bool
-	}{
-		{"load x.csv\nshow", true},
-		{"load x.csv\nhead 5", true},
-		{"load x.csv\n# done\ntail 3 # comment", true},
-		{"load x.csv\nfilter age > 25", false},
-		{"load x.csv", false},
-		{"", false},
-		{"# comment only", false},
-		{"load x.csv\n.show", true}, // dot-prefix REPL form
-	}
-	for _, c := range cases {
-		if got := endsWithDisplayCommand(c.code); got != c.want {
-			t.Errorf("endsWithDisplayCommand(%q) = %v, want %v", c.code, got, c.want)
-		}
-	}
-}
-
 // TestConnectionFile: defaults applied + bad scheme rejected.
 func TestConnectionFile(t *testing.T) {
 	tmp := t.TempDir() + "/c.json"

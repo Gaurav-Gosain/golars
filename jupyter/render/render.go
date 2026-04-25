@@ -46,23 +46,28 @@ func DefaultLimits() Limits {
 func HTML(df *dataframe.DataFrame) string { return HTMLWith(df, DefaultLimits()) }
 
 // HTMLWith is HTML with caller-supplied limits.
+//
+// Styling: borders use currentColor at 25% opacity, headers use
+// currentColor at 100%, dtypes + nulls at 60% / 40%. No filled
+// backgrounds. This way the table inherits the surrounding text
+// colour and reads on light or dark JupyterLab themes without
+// hardcoding either palette.
 func HTMLWith(df *dataframe.DataFrame, lim Limits) string {
 	if df == nil {
 		return `<pre>&lt;nil dataframe&gt;</pre>`
 	}
 	h, w := df.Shape()
 	if w == 0 || h == 0 {
-		return fmt.Sprintf(`<div class="golars-df"><small>shape: (%d, %d) - empty</small></div>`, h, w)
+		return fmt.Sprintf(`<div class="golars-df"><small style="opacity:0.6">shape: (%d, %d) - empty</small></div>`, h, w)
 	}
 	colIdx, colEllipsis := pickCols(w, lim.MaxCols)
 	rowIdx, rowEllipsisAt := pickRows(h, lim.MaxRows)
 
 	var b strings.Builder
-	b.WriteString(`<div class="golars-df" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px">`)
-	fmt.Fprintf(&b, `<small style="color:#888">shape: (%d, %d)</small>`, h, w)
-	b.WriteString(`<table style="border-collapse:collapse;border:1px solid #ddd;margin-top:4px">`)
+	b.WriteString(`<div class="golars-df" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:inherit">`)
+	fmt.Fprintf(&b, `<small style="opacity:0.6">shape: (%d, %d)</small>`, h, w)
+	b.WriteString(`<table style="border-collapse:collapse;margin-top:4px;border:1px solid;border-color:currentColor;border-color:rgba(128,128,128,0.4)">`)
 
-	// Header row: column names.
 	b.WriteString(`<thead><tr>`)
 	for _, ci := range colIdx {
 		if ci < 0 {
@@ -72,7 +77,6 @@ func HTMLWith(df *dataframe.DataFrame, lim Limits) string {
 		b.WriteString(thHTML(df.ColumnAt(ci).Name()))
 	}
 	b.WriteString(`</tr><tr>`)
-	// Subheader row: dtypes (dimmer).
 	for _, ci := range colIdx {
 		if ci < 0 {
 			b.WriteString(dtypeHTML("…"))
@@ -97,7 +101,7 @@ func HTMLWith(df *dataframe.DataFrame, lim Limits) string {
 
 	b.WriteString(`</tbody></table>`)
 	if colEllipsis {
-		fmt.Fprintf(&b, `<small style="color:#888">(showing %d of %d columns)</small>`, len(colIdx), w)
+		fmt.Fprintf(&b, `<small style="opacity:0.6">(showing %d of %d columns)</small>`, len(colIdx), w)
 	}
 	b.WriteString(`</div>`)
 	return b.String()
@@ -173,24 +177,30 @@ func MimeBundle(df *dataframe.DataFrame) map[string]string {
 
 // --- helpers ----------------------------------------------------
 
+// cellBorder is the rgba border every <th>/<td> uses. currentColor
+// would track text colour but breaks on themes that paint dark text on
+// dark backgrounds (charm-ish notebooks); a fixed translucent grey
+// reads cleanly on white, light grey, or near-black backgrounds.
+const cellBorder = "border:1px solid rgba(128,128,128,0.35)"
+
 func thHTML(s string) string {
 	return fmt.Sprintf(
-		`<th style="border:1px solid #ddd;padding:2px 6px;background:#f5f5f5;text-align:left;font-weight:600">%s</th>`,
-		html.EscapeString(s),
+		`<th style="%s;padding:2px 6px;text-align:left;font-weight:600">%s</th>`,
+		cellBorder, html.EscapeString(s),
 	)
 }
 
 func dtypeHTML(s string) string {
 	return fmt.Sprintf(
-		`<th style="border:1px solid #ddd;padding:2px 6px;background:#fafafa;color:#888;text-align:left;font-weight:400;font-size:11px">%s</th>`,
-		html.EscapeString(s),
+		`<th style="%s;padding:2px 6px;opacity:0.6;text-align:left;font-weight:400;font-size:11px">%s</th>`,
+		cellBorder, html.EscapeString(s),
 	)
 }
 
 func tdHTML(s string, isNull bool) string {
-	style := "border:1px solid #ddd;padding:2px 6px"
+	style := cellBorder + ";padding:2px 6px"
 	if isNull {
-		style += ";color:#bbb;font-style:italic"
+		style += ";opacity:0.45;font-style:italic"
 	}
 	return fmt.Sprintf(`<td style="%s">%s</td>`, style, html.EscapeString(s))
 }

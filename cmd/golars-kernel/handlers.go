@@ -83,16 +83,13 @@ func (k *kernel) handleExecute(msg message) {
 		return
 	}
 
-	// Auto-display the focused frame as the cell result. Suppress
-	// when the user already explicitly displayed (heuristic: the cell
-	// ends with show/head/tail/collect/save/describe/schema). This
-	// avoids the boxed text + HTML table doubling up.
-	if !silent && resp.HTML != "" && !endsWithDisplayCommand(code) {
-		data := map[string]any{
-			"text/html": resp.HTML,
-		}
+	// Auto-display the focused frame as the cell result whenever the
+	// host produced one. The HTML is theme-aware (uses currentColor +
+	// border-only styling) so it renders fine on light or dark
+	// JupyterLab; the captured stdout still shows alongside as stream.
+	if !silent && resp.HTML != "" {
+		data := map[string]any{"text/html": resp.HTML}
 		if resp.Text == "" {
-			// No stream output - include text/plain so consoles still see something.
 			data["text/plain"] = fmt.Sprintf("<dataframe shape=%v>", resp.Shape)
 		}
 		k.publish(broadcast(msg, "execute_result", map[string]any{
@@ -214,31 +211,6 @@ func (k *kernel) handleInspect(msg message) {
 		}
 	}
 	_ = k.send(k.shell, reply(msg, "inspect_reply", content))
-}
-
-// endsWithDisplayCommand returns true when the cell's last non-empty
-// non-comment line is a command that already prints its own output.
-// We use that to skip the extra auto-displayed HTML execute_result so
-// users don't see the same data rendered twice.
-func endsWithDisplayCommand(code string) bool {
-	lines := strings.Split(code, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		l := strings.TrimSpace(lines[i])
-		if l == "" || strings.HasPrefix(l, "#") {
-			continue
-		}
-		l = strings.TrimPrefix(l, ".")
-		first, _, _ := strings.Cut(l, " ")
-		switch first {
-		case "show", "head", "tail", "collect", "save", "describe",
-			"schema", "explain", "explain_tree", "tree", "graph",
-			"show_graph", "mermaid", "frames", "info", "ishow", "browse",
-			"glimpse", "size", "null_count", "null_count_all":
-			return true
-		}
-		return false
-	}
-	return false
 }
 
 func isIdentByte(c byte) bool {

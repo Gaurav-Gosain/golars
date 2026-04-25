@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/jupyter/render"
 )
 
@@ -127,6 +128,12 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 	go func() { defer wg.Done(); _, _ = io.Copy(&stdoutBuf, stdoutR) }()
 	go func() { defer wg.Done(); _, _ = io.Copy(&stderrBuf, stderrR) }()
 
+	// Track whether the cell touched the focused pipeline. Cells that
+	// only stage extra frames (`load X as A`) leave the focus
+	// untouched, in which case auto-displaying the lf would show stale
+	// state from a previous cell.
+	startDF := s.df
+	startLF := s.lf
 	var execErr error
 	for _, raw := range strings.Split(req.Code, "\n") {
 		line := strings.TrimSpace(raw)
@@ -138,6 +145,7 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 			break
 		}
 	}
+	focusChanged := s.df != startDF || s.lf != startLF
 
 	stdoutW.Close()
 	stderrW.Close()
@@ -152,11 +160,32 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 	if execErr != nil {
 		resp.Error = execErr.Error()
 	}
-	if s.df != nil {
-		resp.HTML = render.HTML(s.df)
-		h, w := s.df.Shape()
-		shape := [2]int{h, w}
-		resp.Shape = &shape
+
+	// Materialise the focused pipeline (lf wins over df) for the HTML
+	// auto-display. Limit(200) caps the work so a 10M-row frame doesn't
+	// pay full Collect() cost just for a preview. Skip entirely when
+	// the cell didn't touch the focus (pure `load X as NAME` cells, or
+	// REPL-only commands).
+	if focusChanged {
+		display := s.df
+		var collected *dataframe.DataFrame
+		if s.lf != nil {
+			preview := s.lf.Limit(200)
+			out, err := preview.Collect(s.ctx)
+			if err == nil {
+				collected = out
+				display = out
+			}
+		}
+		if display != nil {
+			resp.HTML = render.HTML(display)
+			h, w := display.Shape()
+			shape := [2]int{h, w}
+			resp.Shape = &shape
+		}
+		if collected != nil {
+			collected.Release()
+		}
 	}
 	return resp
 }
