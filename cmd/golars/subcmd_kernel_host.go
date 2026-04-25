@@ -38,6 +38,62 @@ type kernelRequest struct {
 	Code string `json:"code"`
 }
 
+// lastLineIsDisplayCommand returns true when the cell's final
+// non-empty non-comment statement is one that prints a table.
+// Used to decide whether to strip the dispatcher's ASCII table out
+// of stdout, since the auto-display HTML covers the same data.
+func lastLineIsDisplayCommand(code string) bool {
+	for _, raw := range reverse(strings.Split(code, "\n")) {
+		l := strings.TrimSpace(raw)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		l = strings.TrimPrefix(l, ".")
+		first, _, _ := strings.Cut(l, " ")
+		switch first {
+		case "show", "head", "tail", "collect", "describe":
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func reverse(s []string) []string {
+	out := make([]string, len(s))
+	for i, v := range s {
+		out[len(s)-1-i] = v
+	}
+	return out
+}
+
+// stripTrailingTable removes the trailing block of indented lines
+// from text. The dispatcher's printTable output is indented with two
+// leading spaces and ends with "  N rows shown"; commentary lines
+// (`ok ...`) start at column 0. Walking from the end and dropping
+// indented + blank lines until we hit a column-0 line strips exactly
+// the table block.
+func stripTrailingTable(text string) string {
+	lines := strings.Split(text, "\n")
+	end := len(lines)
+	for end > 0 {
+		l := lines[end-1]
+		if l == "" || strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") {
+			end--
+			continue
+		}
+		break
+	}
+	if end == len(lines) {
+		return text
+	}
+	out := strings.Join(lines[:end], "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out
+}
+
 type kernelResponse struct {
 	ID     string `json:"id"`
 	Text   string `json:"text"`
@@ -186,6 +242,14 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 		if collected != nil {
 			collected.Release()
 		}
+	}
+
+	// When the cell ends with a display command (show/head/tail/...),
+	// the dispatcher already printed an ASCII table to stdout. The
+	// HTML auto-display would otherwise render the same data twice.
+	// Strip the trailing table block so the user sees one display.
+	if resp.HTML != "" && lastLineIsDisplayCommand(req.Code) {
+		resp.Text = stripTrailingTable(resp.Text)
 	}
 	return resp
 }
