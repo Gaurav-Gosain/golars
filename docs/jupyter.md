@@ -98,6 +98,60 @@ golars-kernel install --name golars-py-py --display-name "golars (alt)"
 
 Set `$GOLARS_BIN` if you want the kernel to use a specific build.
 
+### LSP integration (diagnostics, hover, completion)
+
+`golars-lsp` ships with the same release tarball. Wire it to
+JupyterLab via [jupyterlab-lsp](https://github.com/jupyter-lsp/jupyterlab-lsp):
+
+```sh
+pip install --user jupyterlab-lsp jupyter-lsp
+```
+
+Then add a server registration to
+`~/.jupyter/jupyter_server_config.py` (creates the file if missing):
+
+```python
+c = get_config()  # noqa: F821
+
+c.LanguageServerManager.language_servers = {
+    "golars-lsp": {
+        "version": 2,
+        "argv": ["golars-lsp"],
+        "languages": ["golars", "glr"],
+        "mime_types": ["text/x-glr"],
+        "display_name": "golars-lsp",
+    },
+}
+```
+
+Restart the Jupyter server. Open a `.glr` notebook cell — diagnostics
+land in the gutter, hover shows command docs, completion suggests
+commands + frame names. golars-lsp speaks the same JSON-RPC over stdio
+it speaks to Neovim and Zed, so feature parity is automatic.
+
+### Themes
+
+JupyterLab's official themes are pretty plain. Two community options
+cover the "tokyo night / rose pine" niche:
+
+```sh
+pip install --user catppuccin-jupyterlab jupyterlab-night
+```
+
+- **catppuccin-jupyterlab** — Mocha (closest to tokyo-night), Macchiato,
+  Frappe (rose-pine vibe), Latte. Pick one in Settings → Theme.
+- **jupyterlab-night** — straight dark theme with neutral blues.
+
+Reload JupyterLab and pick one in **Settings → Theme**.
+
+### Syntax highlighting
+
+The kernel declares CodeMirror mode `shell` so braces/strings/numbers
+read sensibly. A proper glr CodeMirror language extension (highlighting
+`load`, `filter`, `groupby`, ... as keywords) is on the roadmap as a
+separate JupyterLab extension package — needs an npm + TypeScript
+build pipeline that doesn't fit the main repo.
+
 ## GoNB: golars in a Go notebook
 
 [GoNB](https://github.com/janpfeifer/gonb) is the reference Go
