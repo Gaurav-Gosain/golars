@@ -72,6 +72,9 @@ func findGolarsBin() (string, error) {
 
 func (h *kernelHost) spawn(bin string) error {
 	cmd := exec.CommandContext(h.ctx, bin, "kernel-host")
+	// JupyterLab's stream renderer parses ANSI; force lipgloss to
+	// emit it even though our stdout is a pipe (no TTY).
+	cmd.Env = append(os.Environ(), "CLICOLOR_FORCE=1", "COLORTERM=truecolor")
 	cmd.Stderr = os.Stderr // surface host crashes for debugging
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

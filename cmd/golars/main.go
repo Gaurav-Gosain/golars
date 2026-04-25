@@ -544,7 +544,7 @@ func (s *state) load(path string) error {
 	s.path = path
 	s.lf = nil
 	fmt.Printf("%s loaded %s (%d × %d)\n",
-		successStyle.Render("ok"), path, df.Height(), df.Width())
+		successStyle.Render("✓"), path, df.Height(), df.Width())
 	return nil
 }
 
@@ -584,7 +584,7 @@ func (s *state) save(path string) error {
 		return fmt.Errorf("unsupported extension %q (want .csv|.tsv|.parquet|.arrow|.ipc|.json|.ndjson)", ext)
 	}
 	fmt.Printf("%s wrote %s (%d x %d)\n",
-		successStyle.Render("ok"), path, df.Height(), df.Width())
+		successStyle.Render("✓"), path, df.Height(), df.Width())
 	return nil
 }
 
@@ -678,7 +678,7 @@ func (s *state) cmdSelect(args []string) error {
 	}
 	next := lf.Select(exprs...)
 	s.lf = &next
-	fmt.Println(successStyle.Render("ok") + " added SELECT to pipeline")
+	fmt.Println(successStyle.Render("✓") + " added SELECT to pipeline")
 	return nil
 }
 
@@ -688,7 +688,7 @@ func (s *state) cmdDrop(args []string) error {
 	}
 	lf := s.currentLazy().Drop(args...)
 	s.lf = &lf
-	fmt.Println(successStyle.Render("ok") + " added DROP to pipeline")
+	fmt.Println(successStyle.Render("✓") + " added DROP to pipeline")
 	return nil
 }
 
@@ -702,7 +702,7 @@ func (s *state) cmdFilter(predicate string) error {
 	}
 	next := s.currentLazy().Filter(e)
 	s.lf = &next
-	fmt.Println(successStyle.Render("ok") + " added FILTER to pipeline: " + dimStyle.Render(e.String()))
+	fmt.Println(successStyle.Render("✓") + " added FILTER to pipeline: " + dimStyle.Render(e.String()))
 	return nil
 }
 
@@ -720,7 +720,7 @@ func (s *state) cmdSort(args []string) error {
 	if desc {
 		dir = "desc"
 	}
-	fmt.Println(successStyle.Render("ok") + fmt.Sprintf(" added SORT %s %s to pipeline", args[0], dir))
+	fmt.Println(successStyle.Render("✓") + fmt.Sprintf(" added SORT %s %s to pipeline", args[0], dir))
 	return nil
 }
 
@@ -734,7 +734,7 @@ func (s *state) cmdLimit(args []string) error {
 	}
 	next := s.currentLazy().Limit(n)
 	s.lf = &next
-	fmt.Println(successStyle.Render("ok") + fmt.Sprintf(" added LIMIT %d to pipeline", n))
+	fmt.Println(successStyle.Render("✓") + fmt.Sprintf(" added LIMIT %d to pipeline", n))
 	return nil
 }
 
@@ -814,13 +814,13 @@ func (s *state) cmdCollect() error {
 	s.df = df
 	s.lf = nil
 	fmt.Printf("%s collected (%d × %d)\n",
-		successStyle.Render("ok"), df.Height(), df.Width())
+		successStyle.Render("✓"), df.Height(), df.Width())
 	return nil
 }
 
 func (s *state) cmdReset() error {
 	s.lf = nil
-	fmt.Println(successStyle.Render("ok") + " pipeline reset")
+	fmt.Println(successStyle.Render("✓") + " pipeline reset")
 	return nil
 }
 
@@ -838,7 +838,7 @@ func (s *state) cmdSource(path string) error {
 	if err := runner.RunFile(path); err != nil {
 		return err
 	}
-	fmt.Println(successStyle.Render("ok") + " script complete: " + path)
+	fmt.Println(successStyle.Render("✓") + " script complete: " + path)
 	return nil
 }
 
@@ -863,7 +863,7 @@ func (s *state) cmdGroupBy(args []string) error {
 	}
 	next := s.currentLazy().GroupBy(keys...).Agg(aggs...)
 	s.lf = &next
-	fmt.Println(successStyle.Render("ok") + fmt.Sprintf(" added GROUP BY %v with %d aggs", keys, len(aggs)))
+	fmt.Println(successStyle.Render("✓") + fmt.Sprintf(" added GROUP BY %v with %d aggs", keys, len(aggs)))
 	return nil
 }
 
@@ -964,7 +964,7 @@ func (s *state) cmdJoin(args []string) error {
 	s.df = joined
 	s.lf = nil
 	fmt.Printf("%s joined (%d × %d) via %s on %s\n",
-		successStyle.Render("ok"), joined.Height(), joined.Width(), how, key)
+		successStyle.Render("✓"), joined.Height(), joined.Width(), how, key)
 	return nil
 }
 

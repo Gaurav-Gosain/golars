@@ -24,19 +24,13 @@ import (
 
 // loadAs reads PATH into a named registry slot without touching the
 // currently-focused frame. If NAME already exists, the previous frame
-// is released.
+// is released. Uses loadFile so the public `s.load` loader's "ok
+// loaded ..." print doesn't duplicate the staged-frame summary.
 func (s *state) loadAs(path, name string) error {
 	if name == "" {
 		return fmt.Errorf("load as: name must be non-empty")
 	}
-	// Reuse the core loader: temporarily swap the focus out so
-	// s.load(...) populates it cleanly, then move the loaded frame
-	// into the named slot.
-	prevDF, prevLF, prevPath := s.df, s.lf, s.path
-	s.df, s.lf, s.path = nil, nil, ""
-	err := s.load(path)
-	loadedDF, loadedLF, loadedPath := s.df, s.lf, s.path
-	s.df, s.lf, s.path = prevDF, prevLF, prevPath
+	df, err := s.loadFile(path)
 	if err != nil {
 		return err
 	}
@@ -45,10 +39,10 @@ func (s *state) loadAs(path, name string) error {
 			existing.df.Release()
 		}
 	}
-	s.frames[name] = &namedFrame{df: loadedDF, lf: loadedLF, path: loadedPath}
+	s.frames[name] = &namedFrame{df: df, lf: nil, path: path}
 	fmt.Printf("%s loaded %s as %s (%d × %d)\n",
-		successStyle.Render("ok"), loadedPath, cmdStyle.Render(name),
-		loadedDF.Height(), loadedDF.Width())
+		successStyle.Render("✓"), path, cmdStyle.Render(name),
+		df.Height(), df.Width())
 	return nil
 }
 
@@ -73,7 +67,7 @@ func (s *state) cmdUse(name string) error {
 	s.path = target.path
 	s.focused = name
 	fmt.Printf("%s focused %s (%d × %d)\n",
-		successStyle.Render("ok"), cmdStyle.Render(name), s.df.Height(), s.df.Width())
+		successStyle.Render("✓"), cmdStyle.Render(name), s.df.Height(), s.df.Width())
 	return nil
 }
 
@@ -106,7 +100,7 @@ func (s *state) cmdStash(name string) error {
 	s.df = df
 	s.lf = nil
 	fmt.Printf("%s stashed %s (%d × %d)\n",
-		successStyle.Render("ok"), cmdStyle.Render(name),
+		successStyle.Render("✓"), cmdStyle.Render(name),
 		df.Height(), df.Width())
 	return nil
 }
@@ -164,7 +158,7 @@ func (s *state) cmdDropFrame(name string) error {
 		f.df.Release()
 	}
 	delete(s.frames, name)
-	fmt.Printf("%s dropped %s\n", successStyle.Render("ok"), cmdStyle.Render(name))
+	fmt.Printf("%s dropped %s\n", successStyle.Render("✓"), cmdStyle.Render(name))
 	return nil
 }
 

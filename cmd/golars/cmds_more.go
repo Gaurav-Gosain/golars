@@ -26,7 +26,7 @@ func (s *state) cmdCast(args []string) error {
 	}
 	lf := s.currentLazy().Cast(col, dt)
 	s.lf = &lf
-	fmt.Printf("%s added CAST %q -> %s to pipeline\n", successStyle.Render("ok"), col, dt)
+	fmt.Printf("%s added CAST %q -> %s to pipeline\n", successStyle.Render("✓"), col, dt)
 	return nil
 }
 
@@ -43,7 +43,7 @@ func (s *state) cmdFillNull(args []string) error {
 	}
 	lf := s.currentLazy().FillNull(v)
 	s.lf = &lf
-	fmt.Printf("%s added FILL_NULL value=%v to pipeline\n", successStyle.Render("ok"), v)
+	fmt.Printf("%s added FILL_NULL value=%v to pipeline\n", successStyle.Render("✓"), v)
 	return nil
 }
 
@@ -56,9 +56,9 @@ func (s *state) cmdDropNull(args []string) error {
 	lf := s.currentLazy().DropNulls(args...)
 	s.lf = &lf
 	if len(args) == 0 {
-		fmt.Printf("%s added DROP_NULLS (all columns) to pipeline\n", successStyle.Render("ok"))
+		fmt.Printf("%s added DROP_NULLS (all columns) to pipeline\n", successStyle.Render("✓"))
 	} else {
-		fmt.Printf("%s added DROP_NULLS cols=%v to pipeline\n", successStyle.Render("ok"), args)
+		fmt.Printf("%s added DROP_NULLS cols=%v to pipeline\n", successStyle.Render("✓"), args)
 	}
 	return nil
 }
@@ -74,7 +74,7 @@ func (s *state) cmdRename(args []string) error {
 	}
 	lf := s.currentLazy().Rename(args[0], args[2])
 	s.lf = &lf
-	fmt.Printf("%s renamed %q to %q\n", successStyle.Render("ok"), args[0], args[2])
+	fmt.Printf("%s renamed %q to %q\n", successStyle.Render("✓"), args[0], args[2])
 	return nil
 }
 
@@ -142,7 +142,7 @@ func (s *state) cmdWithRowIndex(args []string) error {
 	lf := s.currentLazy().WithRowIndex(name, offset)
 	s.lf = &lf
 	fmt.Printf("%s added row index %q starting at %d\n",
-		successStyle.Render("ok"), name, offset)
+		successStyle.Render("✓"), name, offset)
 	return nil
 }
 

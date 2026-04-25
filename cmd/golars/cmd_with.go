@@ -39,7 +39,7 @@ func (s *state) cmdWith(rest string) error {
 	e = e.Alias(name)
 	next := s.currentLazy().WithColumns(e)
 	s.lf = &next
-	fmt.Printf("%s with %s = %s\n", successStyle.Render("ok"),
+	fmt.Printf("%s with %s = %s\n", successStyle.Render("✓"),
 		cmdStyle.Render(name), dimStyle.Render(exprText))
 	return nil
 }

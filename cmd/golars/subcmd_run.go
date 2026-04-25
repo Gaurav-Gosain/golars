@@ -139,7 +139,7 @@ func runExplainProfile(s *state, profile bool, tracePath string) error {
 		if err := os.WriteFile(tracePath, []byte(p.ChromeTrace()), 0o644); err != nil {
 			return err
 		}
-		fmt.Printf("%s wrote chrome-trace to %s\n", successStyle.Render("ok"), tracePath)
+		fmt.Printf("%s wrote chrome-trace to %s\n", successStyle.Render("✓"), tracePath)
 	}
 	return nil
 }

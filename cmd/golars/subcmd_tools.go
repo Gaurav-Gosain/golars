@@ -201,7 +201,7 @@ func newConvertCmd() *cobra.Command {
 			return errSubcommandFailed
 		}
 		fmt.Printf("%s wrote %s (%d × %d)\n",
-			successStyle.Render("ok"), dst, df.Height(), df.Width())
+			successStyle.Render("✓"), dst, df.Height(), df.Width())
 		return nil
 	}
 	return cmd

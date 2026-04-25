@@ -26,6 +26,17 @@ func colorsEnabled(args []string) bool {
 	if _, ok := os.LookupEnv("NO_COLOR"); ok {
 		return false
 	}
+	// Standard "force colors when piped" overrides; honoured by
+	// every modern CLI (eza, fd, ripgrep, gh, ...). The Jupyter
+	// kernel sets one of these in the kernel-host subprocess so
+	// styled commentary lands as ANSI in the cell output (which
+	// JupyterLab parses inline).
+	if v, ok := os.LookupEnv("FORCE_COLOR"); ok && v != "" && v != "0" {
+		return true
+	}
+	if v, ok := os.LookupEnv("CLICOLOR_FORCE"); ok && v != "" && v != "0" {
+		return true
+	}
 	fi, err := os.Stdout.Stat()
 	if err != nil {
 		return false
@@ -51,8 +62,15 @@ func stripNoColorArg(args []string) []string {
 // with empty styles so every Render returns its input unchanged.
 // lipgloss.Writer's profile is also flipped so rare direct-writer
 // callers get ASCII output too.
+//
+// When color is on we explicitly pin the writer profile to
+// TrueColor; lipgloss's auto-detection falls back to NoTTY/Ascii on
+// non-TTY stdout, which is exactly what we DON'T want for piped
+// scenarios (Jupyter cell stream, log capture) once a force-color
+// flag has set our policy to on.
 func applyColorPolicy(enable bool) {
 	if enable {
+		lipgloss.Writer.Profile = colorprofile.TrueColor
 		return
 	}
 	lipgloss.Writer.Profile = colorprofile.Ascii

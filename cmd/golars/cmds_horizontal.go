@@ -44,7 +44,7 @@ func (s *state) cmdHorizontal(op string, args []string) error {
 	}
 	s.lf = &lf
 	fmt.Printf("%s added %s -> %q to pipeline\n",
-		successStyle.Render("ok"), strings.ToUpper(op), out)
+		successStyle.Render("✓"), strings.ToUpper(op), out)
 	return nil
 }
 
@@ -123,7 +123,7 @@ func (s *state) cmdScan(format string, args []string) error {
 		}
 		s.frames[name] = &namedFrame{df: df, path: path}
 		fmt.Printf("%s scanned %s as %s (%d x %d)\n",
-			successStyle.Render("ok"), path, cmdStyle.Render(name),
+			successStyle.Render("✓"), path, cmdStyle.Render(name),
 			df.Height(), df.Width())
 		return nil
 	}
@@ -136,7 +136,7 @@ func (s *state) cmdScan(format string, args []string) error {
 	s.lf = &lf
 	s.path = path
 	fmt.Printf("%s registered scan_%s %s\n",
-		successStyle.Render("ok"), format, path)
+		successStyle.Render("✓"), format, path)
 	return nil
 }
 
@@ -170,7 +170,7 @@ func (s *state) cmdFillNan(args []string) error {
 	}
 	lf := s.currentLazy().FillNan(v)
 	s.lf = &lf
-	fmt.Printf("%s added FILL_NAN value=%v to pipeline\n", successStyle.Render("ok"), v)
+	fmt.Printf("%s added FILL_NAN value=%v to pipeline\n", successStyle.Render("✓"), v)
 	return nil
 }
 
@@ -204,7 +204,7 @@ func (s *state) cmdDirectionalFill(name string, args []string, forward bool) err
 	}
 	s.lf = &lf
 	fmt.Printf("%s added %s limit=%d to pipeline\n",
-		successStyle.Render("ok"), strings.ToUpper(name), limit)
+		successStyle.Render("✓"), strings.ToUpper(name), limit)
 	return nil
 }
 

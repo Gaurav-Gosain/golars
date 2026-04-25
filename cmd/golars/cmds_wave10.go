@@ -127,7 +127,7 @@ func (s *state) cmdPartitionBy(args []string) error {
 			p.Release()
 		}
 	}()
-	fmt.Printf("%s %d partitions by %v:\n", successStyle.Render("ok"), len(parts), keys)
+	fmt.Printf("%s %d partitions by %v:\n", successStyle.Render("✓"), len(parts), keys)
 	for i, p := range parts {
 		fmt.Printf("  %d: %d rows\n", i, p.Height())
 	}
