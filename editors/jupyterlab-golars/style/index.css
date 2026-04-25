@@ -1,0 +1,4 @@
+/* Empty by design - all styling comes from the active JupyterLab
+   theme via the standard CodeMirror token classes (keyword,
+   variableName, attribute, etc.). Drop overrides here if you want
+   golars-specific tweaks beyond what the theme provides. */

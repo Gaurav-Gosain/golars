@@ -1,0 +1,13 @@
+node_modules/
+lib/
+jupyterlab_golars/labextension/
+jupyterlab_golars/_version.py
+jupyterlab_golars.egg-info/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+yarn.lock
+package-lock.json
+bun.lockb
+.yarn/
+.pnp.*

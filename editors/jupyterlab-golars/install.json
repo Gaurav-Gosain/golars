@@ -1,0 +1,5 @@
+{
+  "packageManager": "python",
+  "packageName": "jupyterlab_golars",
+  "uninstallInstructions": "Use `pip uninstall jupyterlab_golars` to remove."
+}

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.5.0", "jupyterlab>=4.0.0,<5", "hatch-nodejs-version>=0.3.2", "hatch-jupyter-builder>=0.5"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jupyterlab_golars"
+description = "Syntax highlighting + LSP wiring for the golars .glr scripting language in JupyterLab."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "Gaurav Gosain" }]
+keywords = ["jupyter", "jupyterlab", "jupyterlab-extension", "golars", "glr"]
+classifiers = [
+    "Framework :: Jupyter",
+    "Framework :: Jupyter :: JupyterLab",
+    "Framework :: Jupyter :: JupyterLab :: 4",
+    "Framework :: Jupyter :: JupyterLab :: Extensions",
+    "Framework :: Jupyter :: JupyterLab :: Extensions :: Prebuilt",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/Gaurav-Gosain/golars"
+Repository = "https://github.com/Gaurav-Gosain/golars.git"
+
+[tool.hatch.version]
+source = "nodejs"
+
+[tool.hatch.metadata.hooks.nodejs]
+fields = ["description", "authors", "urls"]
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["jupyterlab_golars/labextension"]
+exclude = [".github", "node_modules", "lib", ".yarn"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"jupyterlab_golars/labextension" = "share/jupyter/labextensions/jupyterlab-golars"
+"install.json" = "share/jupyter/labextensions/jupyterlab-golars/install.json"
+
+[tool.hatch.build.hooks.version]
+path = "jupyterlab_golars/_version.py"
+
+[tool.hatch.build.hooks.jupyter-builder]
+dependencies = ["hatch-jupyter-builder>=0.5"]
+build-function = "hatch_jupyter_builder.npm_builder"
+ensured-targets = [
+    "jupyterlab_golars/labextension/static/style.js",
+    "jupyterlab_golars/labextension/package.json",
+]
+skip-if-exists = ["jupyterlab_golars/labextension/static/style.js"]
+
+[tool.hatch.build.hooks.jupyter-builder.build-kwargs]
+build_cmd = "build:prod"
+npm = ["jlpm"]

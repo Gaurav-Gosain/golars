@@ -1,8 +1,8 @@
-# TUIOS Documentation
+# golars Documentation
 
-Official documentation site for [TUIOS](https://github.com/Gaurav-Gosain/tuios) - Terminal UI Operating System.
+Official documentation site for [golars](https://github.com/Gaurav-Gosain/golars) - pure-Go DataFrames modeled on polars.
 
-**Live site**: https://tuios.gaurav.zip
+**Live site**: https://golars.gaurav.zip
 
 ## Tech Stack
 
