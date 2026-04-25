@@ -52,7 +52,7 @@ func HTMLWith(df *dataframe.DataFrame, lim Limits) string {
 	}
 	h, w := df.Shape()
 	if w == 0 || h == 0 {
-		return fmt.Sprintf(`<div class="golars-df"><small>shape: (%d, %d) — empty</small></div>`, h, w)
+		return fmt.Sprintf(`<div class="golars-df"><small>shape: (%d, %d) - empty</small></div>`, h, w)
 	}
 	colIdx, colEllipsis := pickCols(w, lim.MaxCols)
 	rowIdx, rowEllipsisAt := pickRows(h, lim.MaxRows)
@@ -115,7 +115,7 @@ func MarkdownWith(df *dataframe.DataFrame, lim Limits) string {
 	}
 	h, w := df.Shape()
 	if w == 0 || h == 0 {
-		return fmt.Sprintf("_shape: (%d, %d) — empty_", h, w)
+		return fmt.Sprintf("_shape: (%d, %d) - empty_", h, w)
 	}
 	colIdx, _ := pickCols(w, lim.MaxCols)
 	rowIdx, rowEllipsisAt := pickRows(h, lim.MaxRows)

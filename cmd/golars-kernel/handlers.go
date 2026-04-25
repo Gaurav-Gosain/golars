@@ -29,7 +29,7 @@ func (k *kernel) handleKernelInfo(sock zmq4.Socket, msg message) {
 			},
 		},
 		"banner": fmt.Sprintf(
-			"golars-kernel %s on %s/%s — pure-Go DataFrames with lazy plan + optimizer.\nLearn more: https://github.com/Gaurav-Gosain/golars",
+			"golars-kernel %s on %s/%s - pure-Go DataFrames with lazy plan + optimizer.\nLearn more: https://github.com/Gaurav-Gosain/golars",
 			version, runtime.GOOS, runtime.GOARCH,
 		),
 		"help_links": []map[string]string{
@@ -209,7 +209,7 @@ func (k *kernel) handleInspect(msg message) {
 	if spec := script.FindCommand(word); spec != nil {
 		content["found"] = true
 		content["data"] = map[string]any{
-			"text/markdown": fmt.Sprintf("**`%s`** — %s\n\n%s", spec.Signature, spec.Summary, spec.LongDoc),
+			"text/markdown": fmt.Sprintf("**`%s`** - %s\n\n%s", spec.Signature, spec.Summary, spec.LongDoc),
 			"text/plain":    fmt.Sprintf("%s\n\n%s\n\n%s", spec.Signature, spec.Summary, spec.LongDoc),
 		}
 	}

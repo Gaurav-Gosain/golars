@@ -2,11 +2,11 @@
 
 golars ships two ways into the notebook ecosystem:
 
-1. **`golars-kernel`** — a native Jupyter kernel for the `.glr`
+1. **`golars-kernel`** - a native Jupyter kernel for the `.glr`
    scripting language. Each cell is a glr pipeline, the kernel runs
    it, and frames render as HTML tables. No Go knowledge needed.
 
-2. **`jupyter/render` package** — HTML/markdown/text renderers for
+2. **`jupyter/render` package** - HTML/markdown/text renderers for
    `*dataframe.DataFrame`. Drop into [GoNB](https://github.com/janpfeifer/gonb)
    so DataFrames show up as proper tables in a Go notebook.
 
@@ -47,7 +47,7 @@ show
 - HTML tables for every materialised frame (`show`, `head`, implicit
   end-of-cell display).
 - Persistent state across cells: `load` in cell 1, `filter` in cell 2,
-  `groupby` in cell 3 — same model as the REPL.
+  `groupby` in cell 3 - same model as the REPL.
 - `stash NAME` / `use NAME` for branching pipelines.
 - Tab completion on command names.
 - Hover docs on commands (Shift+Tab in classic notebook, hover panel
@@ -61,7 +61,7 @@ The kernel binary (`cmd/golars-kernel`) speaks the Jupyter v5.3 wire
 protocol over ZeroMQ (pure-Go, no `libzmq`). Cell execution is
 delegated to a long-lived `golars kernel-host` subprocess via a tiny
 NDJSON protocol on stdin/stdout, which means the kernel uses the same
-dispatcher (`state.handle`) as the interactive REPL — no second
+dispatcher (`state.handle`) as the interactive REPL - no second
 implementation to drift.
 
 ```
@@ -129,7 +129,7 @@ The `jupyter/render` package exposes:
 | `MimeBundle(df)` | `map[mimetype]string` with all three |
 
 `MimeBundle` is the right call when the consumer takes a multi-format
-dict — pass it to `gonbui.DisplayMIMEData` for Jupyter's "richest
+dict - pass it to `gonbui.DisplayMIMEData` for Jupyter's "richest
 available" routing.
 
 ### Limits

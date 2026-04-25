@@ -11,7 +11,7 @@ import (
 
 // Each input script must produce Go source that (a) parses, (b) has
 // no unused imports, and (c) contains the expected calls. We do not
-// execute the generated program here — the example inputs reference
+// execute the generated program here - the example inputs reference
 // CSV paths relative to the repo root that may not exist in every
 // test environment.
 func TestTranspileExamples(t *testing.T) {
