@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -14,6 +15,13 @@ import (
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/jupyter/render"
 )
+
+// ansiCSI matches CSI sequences (colour, cursor moves) so the
+// trailing-table strip can decide indent on the visible glyphs, not
+// the ANSI envelope. Lipgloss prepends \x1b[<sgr>m to styled cells;
+// without this the "starts with 2 spaces" check fails for coloured
+// table rows and the strip bails too early.
+var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 // kernel-host is a hidden subcommand that turns golars into an NDJSON
 // request/response server. The custom Jupyter kernel (cmd/golars-kernel)
@@ -70,14 +78,16 @@ func reverse(s []string) []string {
 // stripTrailingTable removes the trailing block of indented lines
 // from text. The dispatcher's printTable output is indented with two
 // leading spaces and ends with "  N rows shown"; commentary lines
-// (`ok ...`) start at column 0. Walking from the end and dropping
+// (`✓ ...`) start at column 0. Walking from the end and dropping
 // indented + blank lines until we hit a column-0 line strips exactly
-// the table block.
+// the table block. ANSI codes are stripped before the indent check
+// so a coloured `  name` row (`\x1b[...m  name\x1b[m`) still counts
+// as indented.
 func stripTrailingTable(text string) string {
 	lines := strings.Split(text, "\n")
 	end := len(lines)
 	for end > 0 {
-		l := lines[end-1]
+		l := ansiCSI.ReplaceAllString(lines[end-1], "")
 		if l == "" || strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") {
 			end--
 			continue
