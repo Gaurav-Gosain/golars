@@ -325,30 +325,67 @@ func rowKeyNull(c multiKeyCol, i int) bool {
 // serially, mirroring parallelAssignInt64.
 func assignGroupsMultiKey(cols []multiKeyCol, n int) ([]int, []*keyUniques) {
 	if n >= hashAggParThreshold {
-		if ids, uniques, ok := assignGroupsMultiKeyParallel(cols, n); ok {
+		if ids, uniques, ok := assignGroupsMultiKeyAdaptive(cols, n); ok {
 			return ids, uniques
 		}
 	}
-	ids, uniques, _ := assignGroupsMultiKeyRange(cols, 0, n)
-	return ids, uniques
+	return assignGroupsMultiKeyRange(cols, 0, n)
+}
+
+// assignGroupsMultiKeyAdaptive samples the first partition serially,
+// then fans out only when groups are large enough for probe
+// parallelism to beat duplication: every worker rediscovers every
+// group, so high-cardinality inputs (small groups) continue serially
+// reusing the sample's table, while low-cardinality inputs (big
+// groups) go parallel. Either way the grouping is exact; only the
+// speed differs.
+func assignGroupsMultiKeyAdaptive(cols []multiKeyCol, n int) ([]int, []*keyUniques, bool) {
+	k := min(runtime.GOMAXPROCS(0), 8)
+	chunk := (n + k - 1) / k
+	end := min(chunk, n)
+	table := make(map[string]int)
+	uniques := make([]*keyUniques, len(cols))
+	for i := range uniques {
+		uniques[i] = &keyUniques{}
+	}
+	groupIDs := make([]int, n)
+	assignRangeInto(cols, 0, end, table, uniques, groupIDs[:end])
+	// Heuristic: parallel pays when the sample's average group holds
+	// at least 32 rows (probe-bound regime). Below that, table and
+	// merge overhead dominate and serial wins.
+	if ng := groupLen(uniques[0]); ng == 0 || end/ng < 32 {
+		assignRangeInto(cols, end, n, table, uniques, groupIDs[end:])
+		return groupIDs, uniques, true
+	}
+	// Sample discarded; parallel assignment wins big enough to dwarf
+	// one partition of repeated work.
+	return assignGroupsMultiKeyParallel(cols, n)
 }
 
 // multiKeyPart is one worker's local assignment over a row partition.
 type multiKeyPart struct {
 	ids     []int // local group id per row, relative to part start
 	uniques []*keyUniques
-	table   map[string]int
 }
 
 // assignGroupsMultiKeyRange assigns rows [start, end) to first-seen
 // local group ids.
-func assignGroupsMultiKeyRange(cols []multiKeyCol, start, end int) ([]int, []*keyUniques, map[string]int) {
+func assignGroupsMultiKeyRange(cols []multiKeyCol, start, end int) ([]int, []*keyUniques) {
 	uniques := make([]*keyUniques, len(cols))
 	for i := range uniques {
 		uniques[i] = &keyUniques{}
 	}
-	table := make(map[string]int)
 	groupIDs := make([]int, end-start)
+	assignRangeInto(cols, start, end, make(map[string]int), uniques, groupIDs)
+	return groupIDs, uniques
+}
+
+// assignRangeInto assigns rows [start, end), writing ids into out
+// (sized end-start) and accumulating uniques into shared state, so an
+// adaptive sample can continue serially without repeated work. Lookups
+// use string(buf) directly in the map index, which skips the conversion
+// allocation on hits; only first-seen tuples copy.
+func assignRangeInto(cols []multiKeyCol, start, end int, table map[string]int, uniques []*keyUniques, out []int) {
 	buf := make([]byte, 0, 32*len(cols))
 	for i := start; i < end; i++ {
 		buf = encodeKeyTuple(buf[:0], cols, i)
@@ -364,9 +401,8 @@ func assignGroupsMultiKeyRange(cols []multiKeyCol, start, end int) ([]int, []*ke
 				}
 			}
 		}
-		groupIDs[i-start] = id
+		out[i-start] = id
 	}
-	return groupIDs, uniques, table
 }
 
 // assignGroupsMultiKeyParallel is the parallel assignment path: each
@@ -390,11 +426,10 @@ func assignGroupsMultiKeyParallel(cols []multiKeyCol, n int) ([]int, []*keyUniqu
 				for i := range parts[p].uniques {
 					parts[p].uniques[i] = &keyUniques{}
 				}
-				parts[p].table = make(map[string]int)
 				return
 			}
-			ids, uniques, table := assignGroupsMultiKeyRange(cols, start, end)
-			parts[p] = multiKeyPart{ids: ids, uniques: uniques, table: table}
+			ids, uniques := assignGroupsMultiKeyRange(cols, start, end)
+			parts[p] = multiKeyPart{ids: ids, uniques: uniques}
 		}(p)
 	}
 	wg.Wait()
