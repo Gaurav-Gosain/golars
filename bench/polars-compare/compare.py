@@ -9,7 +9,9 @@ Each of the four engines is built on demand:
 By default the script runs each engine 3 times end-to-end, drops the
 worst run per engine (outlier rejection), and reports the median ratio
 per workload across the remaining runs. This trims most OS-scheduling
-noise on sub-millisecond workloads.
+noise on sub-millisecond workloads. Engine order rotates (and reverses)
+every repetition so thermal/load drift across the session cancels out
+instead of penalising whoever runs last.
 
 Run:
   uv run python compare.py              # default: 3 runs, drop 1
@@ -53,14 +55,6 @@ def _noise_wrap(cmd: list[str], *, cores: str = "", nice: int = 0) -> list[str]:
 
 def run(cmd, cwd, env=None):
     return subprocess.check_output(cmd, cwd=cwd, text=True, env=env)
-
-
-def gather_runs(cmd, cwd, n, env=None):
-    """Invoke cmd n times; return a list of parsed JSON results."""
-    out = []
-    for _ in range(n):
-        out.append(json.loads(run(cmd, cwd=cwd, env=env)))
-    return out
 
 
 def aggregate_runs(runs, how="median_drop_worst"):
@@ -167,10 +161,26 @@ def main() -> int:
     def wrap(cmd: list[str]) -> list[str]:
         return _noise_wrap(cmd, cores=args.pin_cores, nice=args.nice)
 
-    polars_py_runs = gather_runs(wrap(["uv", "run", "python", "bench.py"]), cwd=here, n=nr)
-    polars_rs_runs = gather_runs(wrap([str(rust_bin)]), cwd=here, n=nr)
-    scalar_runs = gather_runs(wrap([str(bin_dir / "golars-bench")]), cwd=repo, n=nr)
-    simd_runs = gather_runs(wrap([str(bin_dir / "golars-bench-simd")]), cwd=repo, n=nr)
+    engines = {
+        "py": (wrap(["uv", "run", "python", "bench.py"]), here),
+        "rs": (wrap([str(rust_bin)]), here),
+        "scalar": (wrap([str(bin_dir / "golars-bench")]), repo),
+        "simd": (wrap([str(bin_dir / "golars-bench-simd")]), repo),
+    }
+    base = ["py", "rs", "scalar", "simd"]
+    runs: dict[str, list] = {name: [] for name in base}
+    for r in range(nr):
+        order = base[r:] + base[:r]
+        if r % 2 == 1:
+            order = order[::-1]
+        for name in order:
+            cmd, cwd = engines[name]
+            print(f"[rep {r + 1}/{nr}] engine={name}", flush=True)
+            runs[name].append(json.loads(run(cmd, cwd=cwd)))
+    polars_py_runs = runs["py"]
+    polars_rs_runs = runs["rs"]
+    scalar_runs = runs["scalar"]
+    simd_runs = runs["simd"]
 
     # Two aggregations we report alongside:
     #   typical: median-with-worst-dropped across runs. Stable-case view.
