@@ -91,54 +91,17 @@ func (s *Series) ArgMax() (int, error) {
 func (s *Series) ArgSort() ([]int, error) {
 	chunk := s.Chunk(0)
 	n := chunk.Len()
+	switch a := chunk.(type) {
+	case *array.Int64:
+		return argSortInt64Asc(a, a.Int64Values(), n), nil
+	case *array.Float64:
+		return argSortFloat64Asc(a, a.Float64Values(), n), nil
+	}
 	idx := make([]int, n)
 	for i := range idx {
 		idx[i] = i
 	}
 	switch a := chunk.(type) {
-	case *array.Int64:
-		raw := a.Int64Values()
-		sort.SliceStable(idx, func(i, j int) bool {
-			vi, vj := idx[i], idx[j]
-			vInull := a.NullN() > 0 && !a.IsValid(vi)
-			vJnull := a.NullN() > 0 && !a.IsValid(vj)
-			if vInull && vJnull {
-				return false
-			}
-			if vInull {
-				return false // nulls last
-			}
-			if vJnull {
-				return true
-			}
-			return raw[vi] < raw[vj]
-		})
-		return idx, nil
-	case *array.Float64:
-		raw := a.Float64Values()
-		sort.SliceStable(idx, func(i, j int) bool {
-			vi, vj := idx[i], idx[j]
-			vInull := a.NullN() > 0 && !a.IsValid(vi)
-			vJnull := a.NullN() > 0 && !a.IsValid(vj)
-			if vInull && vJnull {
-				return false
-			}
-			if vInull {
-				return false
-			}
-			if vJnull {
-				return true
-			}
-			fi, fj := raw[vi], raw[vj]
-			if math.IsNaN(fi) {
-				return false
-			}
-			if math.IsNaN(fj) {
-				return true
-			}
-			return fi < fj
-		})
-		return idx, nil
 	case *array.String:
 		sort.SliceStable(idx, func(i, j int) bool {
 			vi, vj := idx[i], idx[j]
