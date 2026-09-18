@@ -76,22 +76,115 @@ func (df *DataFrame) sumHorizontalFast(ctx context.Context, strategy NullStrateg
 		releaseAll(selected)
 		return nil, false, nil
 	}
-	// Reduce via compute.Add pairwise. compute.Add picks the SIMD
-	// path on amd64 for int64/float64 when available.
-	acc := selected[0].Clone()
-	for _, c := range selected[1:] {
-		next, err := compute.Add(ctx, acc, c)
-		acc.Release()
-		if err != nil {
-			releaseAll(selected)
-			return nil, true, err
+	// Fuse into one pass over K streams: seed with the first column,
+	// accumulate the rest. Pairwise compute.Add would cost K-1 full
+	// passes plus K-1 temp buffers and validity recomputes.
+	n := df.height
+	switch firstID {
+	case arrow.INT64:
+		slices := make([][]int64, len(selected))
+		for i, c := range selected {
+			slices[i] = c.Chunk(0).(*array.Int64).Int64Values()
 		}
-		acc = next
+		out, err := series.BuildInt64Direct("sum", n, memory.DefaultAllocator, func(buf []int64) {
+			rowSumInt64(buf, slices)
+		})
+		releaseAll(selected)
+		return out, true, err
+	case arrow.FLOAT64:
+		slices := make([][]float64, len(selected))
+		for i, c := range selected {
+			slices[i] = c.Chunk(0).(*array.Float64).Float64Values()
+		}
+		out, err := series.BuildFloat64Direct("sum", n, memory.DefaultAllocator, func(buf []float64) {
+			rowSumFloat64(buf, slices)
+		})
+		releaseAll(selected)
+		return out, true, err
 	}
 	releaseAll(selected)
-	renamed := acc.Rename("sum")
-	acc.Release()
-	return renamed, true, nil
+	return nil, false, nil
+}
+
+// rowSumInt64 writes buf[i] = sum(slices[*][i]). Single fused pass:
+// K+1 streams vs 2(K-1) for pairwise adds, no temps, no validity
+// work (callers guarantee no nulls). Parallel caps mirror
+// rowReduceInt64.
+func rowSumInt64(buf []int64, slices [][]int64) {
+	n := len(buf)
+	const parallelCutoff = 128 * 1024
+	if n < parallelCutoff {
+		rowSumInt64Serial(buf, slices, 0, n)
+		return
+	}
+	maxWorkers := 8
+	if n <= 256*1024 {
+		maxWorkers = 4
+	}
+	workers := min(runtime.GOMAXPROCS(0), maxWorkers)
+	chunk := (n + workers - 1) / workers
+	var wg sync.WaitGroup
+	for w := range workers {
+		start := w * chunk
+		end := min(start+chunk, n)
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(s, e int) {
+			defer wg.Done()
+			rowSumInt64Serial(buf, slices, s, e)
+		}(start, end)
+	}
+	wg.Wait()
+}
+
+func rowSumInt64Serial(buf []int64, slices [][]int64, start, end int) {
+	copy(buf[start:end], slices[0][start:end])
+	for _, s := range slices[1:] {
+		for i := start; i < end; i++ {
+			buf[i] += s[i]
+		}
+	}
+}
+
+// rowSumFloat64 is the float64 counterpart.
+func rowSumFloat64(buf []float64, slices [][]float64) {
+	n := len(buf)
+	const parallelCutoff = 128 * 1024
+	if n < parallelCutoff {
+		rowSumFloat64Serial(buf, slices, 0, n)
+		return
+	}
+	maxWorkers := 8
+	if n <= 256*1024 {
+		maxWorkers = 4
+	}
+	workers := min(runtime.GOMAXPROCS(0), maxWorkers)
+	chunk := (n + workers - 1) / workers
+	var wg sync.WaitGroup
+	for w := range workers {
+		start := w * chunk
+		end := min(start+chunk, n)
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(s, e int) {
+			defer wg.Done()
+			rowSumFloat64Serial(buf, slices, s, e)
+		}(start, end)
+	}
+	wg.Wait()
+}
+
+func rowSumFloat64Serial(buf []float64, slices [][]float64, start, end int) {
+	copy(buf[start:end], slices[0][start:end])
+	for _, s := range slices[1:] {
+		for i := start; i < end; i++ {
+			buf[i] += s[i]
+		}
+	}
 }
 
 // MeanHorizontal returns a Float64 Series with row-wise mean. Denominator
