@@ -23,5 +23,8 @@
       "highlights": "queries/highlights.scm",
       "injections": "queries/injections.scm"
     }
-  ]
+  ],
+  "allowScripts": {
+    "tree-sitter-cli@0.24.7": true
+  }
 }

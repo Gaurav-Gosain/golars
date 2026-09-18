@@ -148,3 +148,51 @@ func TestLoadByExtUnknown(t *testing.T) {
 		t.Fatalf("expected unsupported-extension error, got %v", err)
 	}
 }
+
+func TestLoadByExtDirectory(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "data.csv")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := mustJSON(t, map[string]any{"path": nested})
+	_, err := runSchema(raw)
+	if err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("expected regular-file error, got %v", err)
+	}
+}
+
+func TestRunHeadNegativeN(t *testing.T) {
+	path := writeCSV(t, "x\n1\n2\n")
+	raw := mustJSON(t, map[string]any{"path": path, "n": -3})
+	if _, err := runHead(raw); err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("expected non-negative error, got %v", err)
+	}
+}
+
+func TestRunHeadHugeN(t *testing.T) {
+	path := writeCSV(t, "x\n1\n")
+	raw := mustJSON(t, map[string]any{"path": path, "n": "99999999999999999999"})
+	if _, err := runHead(raw); err == nil || !strings.Contains(err.Error(), "in range") {
+		t.Fatalf("expected out-of-range error, got %v", err)
+	}
+}
+
+func TestRunSQLDuplicateStems(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "same.csv")
+	b := filepath.Join(dir, "same.ndjson")
+	if err := os.WriteFile(a, []byte("v\n1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("{\"v\":9}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := mustJSON(t, map[string]any{
+		"query": "SELECT v FROM same",
+		"files": []string{a, b},
+	})
+	if _, err := runSQL(raw); err == nil || !strings.Contains(err.Error(), "duplicate table name") {
+		t.Fatalf("expected duplicate-table error, got %v", err)
+	}
+}

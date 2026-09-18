@@ -17,7 +17,8 @@ var MaxInt64PairFold func(buf, col []int64) int
 
 var MinInt64PairFold func(buf, col []int64) int
 
-// NT-store variants - same story: nil on non-amd64 so the dataframe
+// MaxInt64PairFoldNT and MinInt64PairFoldNT are the NT-store
+// variants - same story: nil on non-amd64 so the dataframe
 // dispatcher falls back to the cached path.
 var MaxInt64PairFoldNT func(buf, col []int64) int
 var MinInt64PairFoldNT func(buf, col []int64) int

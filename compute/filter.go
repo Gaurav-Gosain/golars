@@ -57,9 +57,9 @@ func Filter(ctx context.Context, s, mask *series.Series, opts ...Option) (*serie
 				maskBytes := buffers[1].Bytes()
 				switch s.DType().ID() {
 				case arrow.INT64:
-					return fusedFilterInt64(name, int64Values(sArr), maskBytes, n, cfg.alloc)
+					return fusedFilterInt64(name, int64Values(sArr), maskBytes, n, poolingMem(cfg.alloc))
 				case arrow.FLOAT64:
-					return fusedFilterFloat64(name, float64Values(sArr), maskBytes, n, cfg.alloc)
+					return fusedFilterFloat64(name, float64Values(sArr), maskBytes, n, poolingMem(cfg.alloc))
 				}
 			}
 		}

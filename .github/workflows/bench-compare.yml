@@ -1,0 +1,53 @@
+name: bench-compare
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: invocations per engine
+        required: false
+        default: '3'
+  schedule:
+    # Weekly parity check against polars, same morning as the
+    # security scan but later so the two do not contend.
+    - cron: '0 8 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: polars-py vs polars-rs vs golars
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: run comparison
+        shell: bash
+        run: |
+          RUNS="${{ inputs.runs }}"
+          RUNS="${RUNS:-3}"
+          uv run --project bench/polars-compare python bench/polars-compare/compare.py --runs "$RUNS" 2>&1 | tee compare-output.txt
+
+      - name: upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compare-output
+          path: compare-output.txt
+          retention-days: 30

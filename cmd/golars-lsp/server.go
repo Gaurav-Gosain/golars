@@ -25,6 +25,7 @@ type server struct {
 
 	docs     *docStore
 	shutdown bool
+	writeErr error
 }
 
 func newServer(in io.Reader, out io.Writer, log io.Writer) *server {
@@ -53,6 +54,9 @@ func (s *server) Run() error {
 			continue
 		}
 		s.dispatch(&msg)
+		if s.writeErr != nil {
+			return s.writeErr
+		}
 		if msg.Method == "exit" {
 			return nil
 		}
@@ -63,20 +67,34 @@ func (s *server) Run() error {
 // Transport: LSP base protocol: "Content-Length: N\r\n\r\n{...}".
 // -----------------------------------------------------------------
 
+const maxMessageBytes = 8 * 1024 * 1024
+const maxHeaderBytes = 8192
+
 func (s *server) readMessage() ([]byte, error) {
-	var contentLen int
-	// Headers come one per CRLF line, terminated by a blank line.
+	var contentLen, headerBytes int
+	seenLength := false
 	for {
-		line, err := s.in.ReadString('\n')
+		rawLine, err := s.in.ReadSlice('\n')
+		headerBytes += len(rawLine)
+		if headerBytes > maxHeaderBytes || errors.Is(err, bufio.ErrBufferFull) {
+			return nil, errors.New("message headers too large")
+		}
 		if err != nil {
+			if errors.Is(err, io.EOF) && headerBytes > 0 {
+				return nil, io.ErrUnexpectedEOF
+			}
 			return nil, err
 		}
-		line = strings.TrimRight(line, "\r\n")
+		line := strings.TrimRight(string(rawLine), "\r\n")
 		if line == "" {
 			break
 		}
 		if k, v, ok := strings.Cut(line, ":"); ok {
 			if strings.EqualFold(strings.TrimSpace(k), "Content-Length") {
+				if seenLength {
+					return nil, errors.New("duplicate Content-Length header")
+				}
+				seenLength = true
 				contentLen, err = strconv.Atoi(strings.TrimSpace(v))
 				if err != nil {
 					return nil, fmt.Errorf("bad Content-Length %q: %w", v, err)
@@ -87,8 +105,14 @@ func (s *server) readMessage() ([]byte, error) {
 	if contentLen <= 0 {
 		return nil, errors.New("missing Content-Length header")
 	}
+	if contentLen > maxMessageBytes {
+		return nil, errors.New("message body too large")
+	}
 	buf := make([]byte, contentLen)
 	if _, err := io.ReadFull(s.in, buf); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, io.ErrUnexpectedEOF
+		}
 		return nil, err
 	}
 	return buf, nil
@@ -97,14 +121,21 @@ func (s *server) readMessage() ([]byte, error) {
 func (s *server) writeMessage(payload any) {
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
-	body, err := json.Marshal(payload)
-	if err != nil {
-		s.logf("marshal reply: %v", err)
+	if s.writeErr != nil {
 		return
 	}
-	fmt.Fprintf(s.out, "Content-Length: %d\r\n\r\n", len(body))
-	s.out.Write(body)
-	s.out.Flush()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		s.writeErr = fmt.Errorf("marshal reply: %w", err)
+		return
+	}
+	if _, err = fmt.Fprintf(s.out, "Content-Length: %d\r\n\r\n", len(body)); err == nil {
+		_, err = s.out.Write(body)
+	}
+	if err == nil {
+		err = s.out.Flush()
+	}
+	s.writeErr = err
 }
 
 func (s *server) logf(format string, args ...any) {

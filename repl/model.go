@@ -68,14 +68,14 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 	case "ctrl+u":
 		// Kill to line start.
 		if m.ti.Value() != "" {
-			tail := m.ti.Value()[m.ti.Position():]
+			tail := string([]rune(m.ti.Value())[m.ti.Position():])
 			m.ti.SetValue(tail)
 			m.ti.SetCursor(0)
 			m.refreshGhost()
 		}
 		return true, m, nil
 	case "right":
-		if m.ghost != "" && m.ti.Position() == len(m.ti.Value()) {
+		if m.ghost != "" && m.ti.Position() == len([]rune(m.ti.Value())) {
 			m.ti.SetValue(m.ti.Value() + m.ghost)
 			m.ti.SetCursor(len(m.ti.Value()))
 			m.refreshGhost()

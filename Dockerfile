@@ -3,7 +3,7 @@
 # image with the two binaries on $PATH and no shell: exactly what
 # you want for `docker run ghcr.io/gaurav-gosain/golars sql '...'`.
 
-FROM golang:1.26 AS build
+FROM golang:1.27.1 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

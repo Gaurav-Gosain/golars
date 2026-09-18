@@ -72,7 +72,7 @@ func (r Runner) Run(rd io.Reader, name string) error {
 
 	for sc.Scan() {
 		physLine++
-		raw := sc.Text()
+		raw := stripComment(sc.Text())
 		// Line continuation: a `\` at the VERY end of a physical line
 		// (after trimming trailing whitespace) joins with the next.
 		trimmed := strings.TrimRight(raw, " \t")
@@ -155,15 +155,17 @@ func Normalize(raw string) string {
 // stripComment drops everything from the first unquoted `#` onward.
 // A backslash before `#` also escapes it.
 func stripComment(s string) string {
-	inQuote := false
+	inQuote := byte(0)
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
 		case c == '\\' && i+1 < len(s):
 			i++ // skip next char
-		case c == '"':
-			inQuote = !inQuote
-		case c == '#' && !inQuote:
+		case c == inQuote:
+			inQuote = 0
+		case (c == '"' || c == '\'') && inQuote == 0:
+			inQuote = c
+		case c == '#' && inQuote == 0:
 			return s[:i]
 		}
 	}

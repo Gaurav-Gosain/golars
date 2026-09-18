@@ -15,26 +15,26 @@ import (
 // suitable for the terminal. Users who want a raster image can pipe
 // MermaidGraph output into `mmdc` instead.
 var graphStyleByPrefix = map[string]lipgloss.Style{
-	"SCAN":          lipgloss.NewStyle().Foreground(lipgloss.Color("2")), // green
-	"FILTER":        lipgloss.NewStyle().Foreground(lipgloss.Color("3")), // yellow
-	"SORT":          lipgloss.NewStyle().Foreground(lipgloss.Color("4")), // blue
-	"AGG":           lipgloss.NewStyle().Foreground(lipgloss.Color("6")), // cyan
-	"PROJECT":       lipgloss.NewStyle().Foreground(lipgloss.Color("5")), // magenta
-	"WITH_COLUMNS":  lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
-	"SELECT":        lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
-	"INNER JOIN":    lipgloss.NewStyle().Foreground(lipgloss.Color("13")), // bright magenta
-	"LEFT JOIN":     lipgloss.NewStyle().Foreground(lipgloss.Color("13")),
-	"CROSS JOIN":    lipgloss.NewStyle().Foreground(lipgloss.Color("13")),
-	"SLICE":         lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-	"LIMIT":         lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-	"UNIQUE":        lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
-	"DROP":          lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-	"RENAME":        lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-	"CAST":          lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
-	"CACHE":         lipgloss.NewStyle().Foreground(lipgloss.Color("12")),
-	"FILL_NULL":     lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
-	"DROP_NULLS":    lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
-	"WITH_ROW_IDX":  lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	"SCAN":         lipgloss.NewStyle().Foreground(lipgloss.Color("2")), // green
+	"FILTER":       lipgloss.NewStyle().Foreground(lipgloss.Color("3")), // yellow
+	"SORT":         lipgloss.NewStyle().Foreground(lipgloss.Color("4")), // blue
+	"AGG":          lipgloss.NewStyle().Foreground(lipgloss.Color("6")), // cyan
+	"PROJECT":      lipgloss.NewStyle().Foreground(lipgloss.Color("5")), // magenta
+	"WITH_COLUMNS": lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
+	"SELECT":       lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
+	"INNER JOIN":   lipgloss.NewStyle().Foreground(lipgloss.Color("13")), // bright magenta
+	"LEFT JOIN":    lipgloss.NewStyle().Foreground(lipgloss.Color("13")),
+	"CROSS JOIN":   lipgloss.NewStyle().Foreground(lipgloss.Color("13")),
+	"SLICE":        lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	"LIMIT":        lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	"UNIQUE":       lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
+	"DROP":         lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	"RENAME":       lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+	"CAST":         lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
+	"CACHE":        lipgloss.NewStyle().Foreground(lipgloss.Color("12")),
+	"FILL_NULL":    lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
+	"DROP_NULLS":   lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
+	"WITH_ROW_IDX": lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
 }
 
 var connectorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // dim

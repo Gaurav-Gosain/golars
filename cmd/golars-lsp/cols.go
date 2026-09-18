@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/csv"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,7 +43,7 @@ const maxRowCountBytes int64 = 8 * 1024 * 1024
 // unsupported formats or files above maxRowCountBytes.
 func readFileStats(absPath string) headerEntry {
 	info, err := os.Stat(absPath)
-	if err != nil {
+	if err != nil || !info.Mode().IsRegular() {
 		return headerEntry{rows: -1}
 	}
 	mtime := info.ModTime().UnixNano()
@@ -63,35 +64,36 @@ func readFileStats(absPath string) headerEntry {
 	return e
 }
 
-// countCSVRows returns the number of data rows in a CSV/TSV file
-// (excluding the header). Returns -1 on any error. We scan line-by-
-// line rather than parsing records because lsp-side counts don't
-// have to be perfect on multi-line-quoted values: the inlay hint
-// is an approximation.
 func countCSVRows(absPath string) int {
 	f, err := os.Open(absPath)
 	if err != nil {
 		return -1
 	}
 	defer f.Close()
-	buf := make([]byte, 64*1024)
-	lines := 0
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxRowCountBytes {
+		return -1
+	}
+	limited := &io.LimitedReader{R: f, N: maxRowCountBytes + 1}
+	r := csv.NewReader(limited)
+	r.ReuseRecord = true
+	if strings.EqualFold(filepath.Ext(absPath), ".tsv") {
+		r.Comma = '\t'
+	}
+	records := 0
 	for {
-		n, err := f.Read(buf)
-		for _, b := range buf[:n] {
-			if b == '\n' {
-				lines++
-			}
+		_, err := r.Read()
+		if limited.N == 0 {
+			return -1
+		}
+		if err == io.EOF {
+			return max(0, records-1)
 		}
 		if err != nil {
-			break
+			return -1
 		}
+		records++
 	}
-	// Header row → subtract one. Guard against empty file.
-	if lines <= 0 {
-		return 0
-	}
-	return lines - 1
 }
 
 func readHeaderFromDisk(absPath string) []string {
@@ -109,13 +111,18 @@ func readDelimitedHeader(absPath string, isTSV bool) []string {
 		return nil
 	}
 	defer f.Close()
-	r := csv.NewReader(f)
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	limited := &io.LimitedReader{R: f, N: maxRowCountBytes + 1}
+	r := csv.NewReader(limited)
 	r.FieldsPerRecord = -1
 	if isTSV {
 		r.Comma = '\t'
 	}
 	row, err := r.Read()
-	if err != nil {
+	if err != nil || limited.N == 0 {
 		return nil
 	}
 	out := make([]string, len(row))

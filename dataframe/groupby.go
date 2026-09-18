@@ -70,9 +70,20 @@ func (g *GroupBy) Agg(ctx context.Context, aggs []expr.Expr, opts ...GroupByOpti
 
 	// Fast path: single-key hash groupby. O(n) vs the sort-based O(n log n);
 	// measured ~80x faster on the GroupBySum benchmark. Falls through to the
-	// sort path for multi-key or unsupported dtype combinations.
+	// sort path for unsupported dtype combinations.
 	if len(g.keys) == 1 {
 		if out, ok, err := hashAggSingleKey(ctx, g.df, g.keys[0], specs, cfg.alloc); err != nil {
+			return nil, err
+		} else if ok {
+			return out, nil
+		}
+	}
+
+	// Multi-key hash groupby: same O(n) assignment over encoded key
+	// tuples, groups reordered to match the sort path. Falls through
+	// for unsupported key dtypes.
+	if len(g.keys) > 1 {
+		if out, ok, err := hashAggMultiKey(ctx, g.df, g.keys, specs, cfg.alloc); err != nil {
 			return nil, err
 		} else if ok {
 			return out, nil
@@ -203,11 +214,15 @@ func runAggForGroups(ctx context.Context, alloc memory.Allocator, sorted *DataFr
 func countGroups(boundaries []int, total int, col *series.Series, name string, alloc memory.Allocator) (*series.Series, error) {
 	arr := col.Chunk(0)
 	out := make([]int64, len(boundaries))
-	for i, start := range boundaries {
-		end := total
-		if i+1 < len(boundaries) {
-			end = boundaries[i+1]
+	if arr.NullN() == 0 {
+		// No nulls: every row counts, no per-row scan.
+		for i, start := range boundaries {
+			out[i] = int64(groupEnd(boundaries, i, total) - start)
 		}
+		return series.FromInt64(name, out, nil, series.WithAllocator(alloc))
+	}
+	for i, start := range boundaries {
+		end := groupEnd(boundaries, i, total)
 		var n int64
 		for j := start; j < end; j++ {
 			if arr.IsValid(j) {
@@ -222,11 +237,12 @@ func countGroups(boundaries []int, total int, col *series.Series, name string, a
 func nullCountGroups(boundaries []int, total int, col *series.Series, name string, alloc memory.Allocator) (*series.Series, error) {
 	arr := col.Chunk(0)
 	out := make([]int64, len(boundaries))
+	if arr.NullN() == 0 {
+		// No nulls: every group contributes zero.
+		return series.FromInt64(name, out, nil, series.WithAllocator(alloc))
+	}
 	for i, start := range boundaries {
-		end := total
-		if i+1 < len(boundaries) {
-			end = boundaries[i+1]
-		}
+		end := groupEnd(boundaries, i, total)
 		var n int64
 		for j := start; j < end; j++ {
 			if arr.IsNull(j) {

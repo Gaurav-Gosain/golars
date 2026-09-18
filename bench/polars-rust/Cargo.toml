@@ -20,6 +20,7 @@ polars = { version = "0.53", features = [
     "timezones",
     "cum_agg",
     "dtype-full",
+    "top_k",
 ] }
 polars-core = "0.53"
 rand = "0.8"

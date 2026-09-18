@@ -177,6 +177,34 @@ func benchGroupBySum(ctx context.Context, rows, groups int) result {
 	return result{Name: fmt.Sprintf("GroupBySum(groups=%d)", groups), Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
 }
 
+var benchRegions = []string{"n", "s", "e", "w", "ne", "nw", "se", "sw"}
+
+func benchGroupBySumMultiKey(ctx context.Context, rows int) result {
+	regions := make([]string, rows)
+	years := make([]int64, rows)
+	for i := range regions {
+		regions[i] = benchRegions[i%len(benchRegions)]
+		years[i] = 2020 + int64(i%5)
+	}
+	vals := randInt64s(rows, 44, 1<<20)
+	rSeries, _ := series.FromString("region", regions, nil)
+	ySeries, _ := series.FromInt64("year", years, nil)
+	vSeries, _ := series.FromInt64("v", vals, nil)
+	df, _ := dataframe.New(rSeries, ySeries, vSeries)
+	defer df.Release()
+
+	aggs := []expr.Expr{expr.Col("v").Sum().Alias("s")}
+	fn := func() {
+		out, err := df.GroupBy("region", "year").Agg(ctx, aggs)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	return result{Name: "GroupBySumMultiKey", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*24) / float64(t) * 1000.0}
+}
+
 func benchInnerJoin(ctx context.Context, rows int) result {
 	ids := make([]int64, rows)
 	for i := range ids {
@@ -538,6 +566,70 @@ func benchRollingSum(ctx context.Context, rows int) result {
 	return result{Name: "RollingSum(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
 }
 
+func benchRollingMin(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.RollingMin(series.RollingOptions{WindowSize: 32})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RollingMin(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
+func benchRollingMax(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.RollingMax(series.RollingOptions{WindowSize: 32})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RollingMax(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
+func benchTopK(ctx context.Context, rows, k int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.TopK(k)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: fmt.Sprintf("TopK(k=%d)", k), Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
+func benchRollingMean(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.RollingMean(series.RollingOptions{WindowSize: 32})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RollingMean(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
 func benchWhenThen(ctx context.Context, rows int) result {
 	vals := randInt64s(rows, 42, 1<<20)
 	a, _ := series.FromInt64("a", vals, nil)
@@ -581,6 +673,30 @@ func benchOverSum(ctx context.Context, rows int) result {
 	}
 	t := timeNs(fn, 1, 5)
 	return result{Name: "SumOverGroup", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
+}
+
+func benchOverCumSum(ctx context.Context, rows int) result {
+	keys := make([]int64, rows)
+	r := rand.New(rand.NewPCG(42, 43))
+	for i := range keys {
+		keys[i] = r.Int64N(64)
+	}
+	vals := randInt64s(rows, 44, 1<<20)
+	k, _ := series.FromInt64("k", keys, nil)
+	v, _ := series.FromInt64("v", vals, nil)
+	df, _ := dataframe.New(k, v)
+	defer df.Release()
+	fn := func() {
+		out, err := lazy.FromDataFrame(df).
+			Select(expr.Col("v").CumSum().Over("k").Alias("cum")).
+			Collect(ctx)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	return result{Name: "CumSumOverGroup", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
 }
 
 func benchForwardFill(ctx context.Context, rows int) result {
@@ -802,6 +918,7 @@ func main() {
 			benchGroupBySum(ctx, n, 1024),
 			benchGroupByMean(ctx, n, 64),
 			benchGroupByMultiAgg(ctx, n, 64),
+			benchGroupBySumMultiKey(ctx, n),
 		)
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
@@ -820,7 +937,7 @@ func main() {
 		runs = append(runs, benchMaxHorizontal(ctx, n))
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs, benchUniqueInt64(ctx, n))
+		runs = append(runs, benchUniqueInt64(ctx, n), benchTopK(ctx, n, 10))
 	}
 	for _, n := range sizes {
 		runs = append(runs,
@@ -834,10 +951,10 @@ func main() {
 		runs = append(runs, benchForwardFill(ctx, n))
 	}
 	for _, n := range sizes {
-		runs = append(runs, benchRollingSum(ctx, n))
+		runs = append(runs, benchRollingSum(ctx, n), benchRollingMin(ctx, n), benchRollingMax(ctx, n), benchRollingMean(ctx, n))
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs, benchWhenThen(ctx, n), benchOverSum(ctx, n))
+		runs = append(runs, benchWhenThen(ctx, n), benchOverSum(ctx, n), benchOverCumSum(ctx, n))
 	}
 
 	out := map[string]any{

@@ -1,6 +1,37 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestCSVRecordCounts(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want int
+	}{
+		{"a,b\n1,2", 1},
+		{"a,b\n\"one\ntwo\",2\n", 1},
+		{"a,b\n\n1,2\n", 1},
+		{"a,b\n1", -1},
+		{"", 0},
+	} {
+		path := filepath.Join(t.TempDir(), "data.csv")
+		if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := countCSVRows(path); got != tc.want {
+			t.Fatalf("%q: got %d, want %d", tc.body, got, tc.want)
+		}
+	}
+}
+
+func TestFileStatsRejectDirectory(t *testing.T) {
+	if got := readFileStats(t.TempDir()); got.rows != rowsUnknown || len(got.cols) != 0 {
+		t.Fatalf("unexpected stats: %+v", got)
+	}
+}
 
 // TestStashAndUseBranching verifies that `stash NAME` copies the focus
 // into the registry without consuming it, and `use NAME` clones the

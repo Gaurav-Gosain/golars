@@ -107,6 +107,20 @@ def bench_groupby_sum(rows: int, groups: int) -> Result:
     return Result(f"GroupBySum(groups={groups})", rows, t, bytes_in / t * 1000.0)
 
 
+def bench_groupby_sum_multikey(rows: int) -> Result:
+    regions = [f"r{i % 8}" for i in range(rows)]
+    years = [2020 + i % 5 for i in range(rows)]
+    rng = np.random.default_rng(44)
+    vals = rng.integers(0, 1 << 20, size=rows, dtype=np.int64)
+    df = pl.DataFrame({"region": regions, "year": years, "v": vals})
+
+    def run():
+        _ = df.group_by("region", "year").agg(pl.col("v").sum().alias("s"))
+
+    t = time_ns(run)
+    return Result("GroupBySumMultiKey", rows, t, rows * 24 / t * 1000.0)
+
+
 def bench_inner_join(rows: int) -> Result:
     rng = np.random.default_rng(42)
     ids = np.arange(rows, dtype=np.int64)
@@ -336,6 +350,45 @@ def bench_rolling_sum(rows: int) -> Result:
     return Result("RollingSum(w=32)", rows, t, rows * 8 / t * 1000.0)
 
 
+def bench_rolling_min(rows: int) -> Result:
+    """Rolling min with window=32 on a no-null int64 column."""
+    rng = np.random.default_rng(42)
+    vals = rng.integers(0, 1 << 20, size=rows, dtype=np.int64)
+    df = pl.DataFrame({"x": vals})
+
+    def run():
+        _ = df.select(pl.col("x").rolling_min(window_size=32))
+
+    t = time_ns(run)
+    return Result("RollingMin(w=32)", rows, t, rows * 8 / t * 1000.0)
+
+
+def bench_rolling_max(rows: int) -> Result:
+    """Rolling max with window=32 on a no-null int64 column."""
+    rng = np.random.default_rng(42)
+    vals = rng.integers(0, 1 << 20, size=rows, dtype=np.int64)
+    df = pl.DataFrame({"x": vals})
+
+    def run():
+        _ = df.select(pl.col("x").rolling_max(window_size=32))
+
+    t = time_ns(run)
+    return Result("RollingMax(w=32)", rows, t, rows * 8 / t * 1000.0)
+
+
+def bench_rolling_mean(rows: int) -> Result:
+    """Rolling mean with window=32 on a no-null int64 column."""
+    rng = np.random.default_rng(42)
+    vals = rng.integers(0, 1 << 20, size=rows, dtype=np.int64)
+    df = pl.DataFrame({"x": vals})
+
+    def run():
+        _ = df.select(pl.col("x").rolling_mean(window_size=32))
+
+    t = time_ns(run)
+    return Result("RollingMean(w=32)", rows, t, rows * 8 / t * 1000.0)
+
+
 def bench_when_then(rows: int) -> Result:
     """when/then/otherwise picking between two int64 columns."""
     rng = np.random.default_rng(42)
@@ -364,6 +417,19 @@ def bench_over_sum(rows: int) -> Result:
 
     t = time_ns(run)
     return Result("SumOverGroup", rows, t, rows * 16 / t * 1000.0)
+
+
+def bench_cumsum_over_group(rows: int) -> Result:
+    rng = np.random.default_rng(42)
+    keys = rng.integers(0, 64, size=rows, dtype=np.int64)
+    vals = rng.integers(0, 1 << 20, size=rows, dtype=np.int64)
+    df = pl.DataFrame({"k": keys, "v": vals})
+
+    def run():
+        _ = df.select(pl.col("v").cum_sum().over("k").alias("cum"))
+
+    t = time_ns(run)
+    return Result("CumSumOverGroup", rows, t, rows * 16 / t * 1000.0)
 
 
 def bench_forward_fill(rows: int) -> Result:
@@ -423,6 +489,19 @@ def bench_unique_int64(rows: int) -> Result:
 
     t = time_ns(run)
     return Result("UniqueInt64", rows, t, rows * 8 / t * 1000.0)
+
+
+def bench_top_k(rows: int, k: int) -> Result:
+    """Top-k selection over an int64 column."""
+    rng = np.random.default_rng(42)
+    vals = rng.integers(0, 1 << 20, size=rows, dtype=np.int64)
+    df = pl.DataFrame({"x": vals})
+
+    def run():
+        _ = df.select(pl.col("x").top_k(k))
+
+    t = time_ns(run)
+    return Result(f"TopK(k={k})", rows, t, rows * 8 / t * 1000.0)
 
 
 def bench_cumsum_int64(rows: int) -> Result:
@@ -513,6 +592,7 @@ def main() -> int:
         for g in (64,):
             out.append(vars(bench_groupby_mean(n, g)))
             out.append(vars(bench_groupby_multi_agg(n, g)))
+        out.append(vars(bench_groupby_sum_multikey(n)))
 
     for n in (16_384, 262_144):
         out.append(vars(bench_inner_join(n)))
@@ -529,6 +609,7 @@ def main() -> int:
 
     for n in (16_384, 262_144):
         out.append(vars(bench_unique_int64(n)))
+        out.append(vars(bench_top_k(n, 10)))
 
     for n in SIZES:
         out.append(vars(bench_cumsum_int64(n)))
@@ -541,10 +622,14 @@ def main() -> int:
 
     for n in SIZES:
         out.append(vars(bench_rolling_sum(n)))
+        out.append(vars(bench_rolling_min(n)))
+        out.append(vars(bench_rolling_max(n)))
+        out.append(vars(bench_rolling_mean(n)))
 
     for n in (16_384, 262_144):
         out.append(vars(bench_when_then(n)))
         out.append(vars(bench_over_sum(n)))
+        out.append(vars(bench_cumsum_over_group(n)))
 
     json.dump({"engine": "polars", "version": pl.__version__, "runs": out}, sys.stdout, indent=2)
     print()

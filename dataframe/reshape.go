@@ -7,6 +7,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -26,15 +27,35 @@ func (df *DataFrame) topKImpl(ctx context.Context, k int, col string, descending
 	if k <= 0 {
 		return Empty(df.sch), nil
 	}
-	sorted, err := df.Sort(ctx, col, descending)
+	keyCol, err := df.Column(col)
 	if err != nil {
 		return nil, err
 	}
-	defer sorted.Release()
-	if k > sorted.Height() {
-		k = sorted.Height()
+	// Index selection plus per-column Take avoids sorting the whole
+	// wide frame. Null keys never rank (matching Series.TopK).
+	idx, err := keyCol.TopKIndices(k, descending)
+	if err != nil {
+		return nil, err
 	}
-	return sorted.Slice(0, k)
+	out := make([]*series.Series, 0, df.Width())
+	for _, name := range df.ColumnNames() {
+		c, err := df.Column(name)
+		if err != nil {
+			for _, p := range out {
+				p.Release()
+			}
+			return nil, err
+		}
+		taken, err := compute.Take(ctx, c, idx)
+		if err != nil {
+			for _, p := range out {
+				p.Release()
+			}
+			return nil, err
+		}
+		out = append(out, taken)
+	}
+	return New(out...)
 }
 
 // PartitionBy splits df into one DataFrame per distinct combination
@@ -58,24 +79,45 @@ func (df *DataFrame) PartitionBy(ctx context.Context, keys ...string) ([]*DataFr
 		}
 		keyCols[i] = c
 	}
-	// Build per-row partition keys as a formatted string. This is
-	// simple and dtype-agnostic; for performance-sensitive callers
-	// future work can specialise on single-int / single-string keys.
+	// Build per-row partition keys. Supported dtypes use the shared
+	// binary tuple encoding (no per-row formatting or allocation);
+	// anything else falls back to the formatted string.
 	partitions := map[string][]int{}
 	order := []string{}
-	for row := range height {
-		buf := make([]byte, 0, 32)
-		for i, c := range keyCols {
-			if i > 0 {
-				buf = append(buf, 0x1f)
+	if SupportedKeyTuple(keyCols) {
+		// Pointer values so per-row hits only read the map: a
+		// write of string(buf) would convert (allocating) per row.
+		var buf []byte
+		ptrs := make(map[string]*[]int)
+		for row := range height {
+			buf, _ = AppendKeyTuple(buf[:0], keyCols, row)
+			if p, ok := ptrs[string(buf)]; ok {
+				*p = append(*p, row)
+			} else {
+				key := string(buf)
+				order = append(order, key)
+				rows := []int{row}
+				ptrs[key] = &rows
 			}
-			buf = append(buf, formatCell(c.Chunk(0), row)...)
 		}
-		key := string(buf)
-		if _, ok := partitions[key]; !ok {
-			order = append(order, key)
+		for _, key := range order {
+			partitions[key] = *ptrs[key]
 		}
-		partitions[key] = append(partitions[key], row)
+	} else {
+		for row := range height {
+			buf := make([]byte, 0, 32)
+			for i, c := range keyCols {
+				if i > 0 {
+					buf = append(buf, 0x1f)
+				}
+				buf = append(buf, formatCell(c.Chunk(0), row)...)
+			}
+			key := string(buf)
+			if _, ok := partitions[key]; !ok {
+				order = append(order, key)
+			}
+			partitions[key] = append(partitions[key], row)
+		}
 	}
 	out := make([]*DataFrame, 0, len(order))
 	for _, k := range order {

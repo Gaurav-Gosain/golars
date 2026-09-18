@@ -100,7 +100,7 @@ func tokenize(s string) []token {
 			}
 			toks = append(toks, token{tokString, lit, i})
 			i = end
-		case isDigit(c) || (c == '-' && i+1 < len(s) && isDigit(s[i+1]) && (len(toks) == 0 || !lastIsOperand(toks))):
+		case isDigit(c) || (c == '.' && i+1 < len(s) && isDigit(s[i+1])) || (c == '-' && i+1 < len(s) && isDigit(s[i+1]) && (len(toks) == 0 || !lastIsOperand(toks))):
 			end, lit := readNumber(s, i)
 			toks = append(toks, token{tokNumber, lit, i})
 			i = end
@@ -171,6 +171,15 @@ func readNumber(s string, i int) (int, string) {
 	}
 	if j < len(s) && s[j] == '.' {
 		j++
+		for j < len(s) && isDigit(s[j]) {
+			j++
+		}
+	}
+	if j < len(s) && (s[j] == 'e' || s[j] == 'E') {
+		j++
+		if j < len(s) && (s[j] == '+' || s[j] == '-') {
+			j++
+		}
 		for j < len(s) && isDigit(s[j]) {
 			j++
 		}
@@ -383,7 +392,7 @@ func (p *parser) parsePrimary() (expr.Expr, error) {
 	switch t.kind {
 	case tokNumber:
 		p.advance()
-		if strings.Contains(t.text, ".") {
+		if strings.ContainsAny(t.text, ".eE") {
 			f, err := strconv.ParseFloat(t.text, 64)
 			if err != nil {
 				return expr.Expr{}, fmt.Errorf("invalid number %q: %w", t.text, err)
@@ -420,7 +429,7 @@ func (p *parser) parsePrimary() (expr.Expr, error) {
 		if _, err := p.expect(tokRParen); err != nil {
 			return expr.Expr{}, err
 		}
-		return inner, nil
+		return p.parsePostfix(inner)
 	}
 	return expr.Expr{}, fmt.Errorf("unexpected token %q at byte %d", t.text, t.start)
 }
@@ -437,10 +446,17 @@ func (p *parser) parseMethodChain() (expr.Expr, error) {
 	// Function-style call at the head: allow `sum(col)` / `abs(col)`
 	// for aggregate / scalar ops that would otherwise require a bare
 	// column start.
-	if p.peek().kind == tokLParen {
-		return p.parseFreeFunction(head.text)
-	}
 	base := expr.Col(head.text)
+	if p.peek().kind == tokLParen {
+		base, err = p.parseFreeFunction(head.text)
+		if err != nil {
+			return expr.Expr{}, err
+		}
+	}
+	return p.parsePostfix(base)
+}
+
+func (p *parser) parsePostfix(base expr.Expr) (expr.Expr, error) {
 	for p.peek().kind == tokDot {
 		p.advance()
 		member, err := p.expect(tokIdent)
@@ -562,6 +578,12 @@ func applyBinary(left, right expr.Expr, op string) expr.Expr {
 // count mismatches return a descriptive error rather than panicking.
 func dispatchStr(base expr.Expr, method string, args []expr.Expr) (expr.Expr, error) {
 	switch method {
+	case "upper", "to_upper", "to_uppercase", "lower", "to_lower", "to_lowercase", "trim", "len_bytes", "len_chars":
+		if len(args) != 0 {
+			return expr.Expr{}, fmt.Errorf("%s takes 0 arguments, got %d", method, len(args))
+		}
+	}
+	switch method {
 	case "upper", "to_upper", "to_uppercase":
 		return base.Str().ToUpper(), nil
 	case "lower", "to_lower", "to_lowercase":
@@ -676,6 +698,14 @@ func dispatchStr(base expr.Expr, method string, args []expr.Expr) (expr.Expr, er
 // derived expression: aggregates (.sum, .mean, ...), casts, shape
 // ops (.shift, .reverse, ...).
 func dispatchMethod(base expr.Expr, method string, args []expr.Expr) (expr.Expr, error) {
+	switch method {
+	case "sum", "mean", "min", "max", "count", "null_count", "first", "last", "std", "var", "median",
+		"skew", "kurtosis", "n_unique", "approx_n_unique", "is_null", "is_not_null", "abs", "neg", "not",
+		"floor", "ceil", "sqrt", "exp", "log", "log10", "log2", "sign", "reverse", "cum_sum", "cum_min", "cum_max":
+		if len(args) != 0 {
+			return expr.Expr{}, fmt.Errorf("%s takes 0 arguments, got %d", method, len(args))
+		}
+	}
 	switch method {
 	case "sum":
 		return base.Sum(), nil

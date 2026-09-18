@@ -116,6 +116,23 @@ func TestModelRightArrowAcceptsGhost(t *testing.T) {
 	}
 }
 
+func TestModelUnicodeEditing(t *testing.T) {
+	m := newTestModel(SuggesterFunc(func(string) (string, string) { return "é", "" }), nil)
+	m.ti.SetValue("é中 tail")
+	m.ti.SetCursor(3)
+	m.handleKey(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	if got := m.ti.Value(); got != "tail" {
+		t.Fatalf("Ctrl+U: got %q", got)
+	}
+	m.ti.SetValue("é中")
+	m.ti.CursorEnd()
+	m.refreshGhost()
+	handled, _, _ := m.handleKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if !handled || m.ti.Value() != "é中é" {
+		t.Fatalf("completion: handled=%v value=%q", handled, m.ti.Value())
+	}
+}
+
 func TestModelRightArrowMidLinePassesThrough(t *testing.T) {
 	// If caret isn't at end, right-arrow should move the cursor, not
 	// accept a ghost.

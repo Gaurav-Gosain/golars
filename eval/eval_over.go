@@ -34,6 +34,13 @@ func evalOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *datafram
 	if fast, err := tryScalarAggOver(ctx, ec, n, df); fast != nil || err != nil {
 		return fast, err
 	}
+	// Fast path: cumulative sum over groups. Rows are counting-sorted
+	// by group once, the value column is gathered once, and a single
+	// segmented scan with per-group resets replaces the per-group
+	// Take-and-eval loop.
+	if fast, ok, err := tryCumSumOver(ctx, ec, n, df); ok || err != nil {
+		return fast, err
+	}
 	height := df.Height()
 	// Build per-row group key and a per-group row list.
 	keyCols := make([]*series.Series, len(n.Keys))
@@ -44,22 +51,38 @@ func evalOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *datafram
 		}
 		keyCols[i] = c
 	}
-	groups := map[string][]int{}
-	order := []string{}
-	for r := range height {
-		key := overKey(keyCols, r)
-		if _, ok := groups[key]; !ok {
-			order = append(order, key)
-		}
-		groups[key] = append(groups[key], r)
+	// Assign a group id per row, then bucket rows into exact-size lists
+	// (no append-growth waste). Binary tuple keys avoid the per-row
+	// decimal formatting and fresh string of overKey.
+	var groupIDs []int
+	var numGroups int
+	if dataframe.SupportedKeyTuple(keyCols) {
+		groupIDs, numGroups = assignOverGroupsBinary(keyCols, height)
+	} else {
+		groupIDs, numGroups = assignOverGroupsString(keyCols, height)
 	}
-	// Compose the output buffer; use float64 to accept mixed numeric
-	// intermediate dtypes. String and bool inners hit a separate path.
-	out := make([]outValue, height)
-	var outDType string
-	for _, key := range order {
-		rows := groups[key]
-		sub, err := gatherGroupFrame(ctx, df, rows)
+	counts := make([]int, numGroups)
+	for _, gid := range groupIDs {
+		counts[gid]++
+	}
+	groupRows := make([][]int, numGroups)
+	for gi, c := range counts {
+		groupRows[gi] = make([]int, 0, c)
+	}
+	for r, gid := range groupIDs {
+		groupRows[gid] = append(groupRows[gid], r)
+	}
+	// Only gather columns the inner reads; unknown shapes keep the full
+	// frame. Sub-frames keep every row (Take preserves length), so row-
+	// sensitive inners are unaffected.
+	gatherNames := df.Schema().Names()
+	if needed, ok := expr.ReferencedColumns(n.Inner); ok && len(needed) > 0 {
+		gatherNames = needed
+	}
+	var out overOut
+	out.height = height
+	for _, rows := range groupRows {
+		sub, err := gatherGroupFrameCols(ctx, df, rows, gatherNames)
 		if err != nil {
 			return nil, err
 		}
@@ -71,51 +94,185 @@ func evalOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *datafram
 		resLen := res.Len()
 		switch resLen {
 		case 1:
-			broadcastToOut(res.Chunk(0), rows, out, &outDType)
+			out.broadcast(res.Chunk(0), rows)
 		default:
 			if resLen != len(rows) {
 				res.Release()
 				return nil, fmt.Errorf("eval: over() inner produced len %d for %d rows", resLen, len(rows))
 			}
-			scatterToOut(res.Chunk(0), rows, out, &outDType)
+			out.scatter(res.Chunk(0), rows)
 		}
 		res.Release()
 	}
-	// Materialise based on dominant dtype.
-	switch outDType {
-	case "float":
-		vals := make([]float64, height)
-		valid := make([]bool, height)
-		for i := range out {
-			if out[i].kind == 1 {
-				vals[i] = out[i].f
-				valid[i] = true
-			}
-		}
-		return series.FromFloat64(n.String(), vals, valid, seriesAllocOpt(ec))
-	case "string":
-		vals := make([]string, height)
-		valid := make([]bool, height)
-		for i := range out {
-			if out[i].kind == 2 {
-				vals[i] = out[i].s
-				valid[i] = true
-			}
-		}
-		return series.FromString(n.String(), vals, valid, seriesAllocOpt(ec))
-	case "bool":
-		vals := make([]bool, height)
-		valid := make([]bool, height)
-		for i := range out {
-			if out[i].kind == 3 {
-				vals[i] = out[i].b
-				valid[i] = true
-			}
-		}
-		return series.FromBool(n.String(), vals, valid, seriesAllocOpt(ec))
+	return out.materialize(n.String(), seriesAllocOpt(ec))
+}
+
+// tryCumSumOver recognises pl.col("v").cum_sum().over(keys...): one
+// counting sort by group, one gather of the value column, one
+// segmented scan. Returns ok=false for any other shape (or key/value
+// dtypes outside the binary encoding) so the generic path handles it.
+func tryCumSumOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *dataframe.DataFrame) (*series.Series, bool, error) {
+	fn, ok := n.Inner.Node().(expr.FunctionNode)
+	if !ok || fn.Name != "cum_sum" || len(fn.Args) != 1 {
+		return nil, false, nil
 	}
-	// All-null fallback (empty input).
-	return series.FromFloat64(n.String(), make([]float64, height), make([]bool, height), seriesAllocOpt(ec))
+	col, ok := fn.Args[0].Node().(expr.ColNode)
+	if !ok {
+		return nil, false, nil
+	}
+	valCol, err := df.Column(col.Name)
+	if err != nil {
+		return nil, true, err
+	}
+	if valCol.NumChunks() != 1 {
+		return nil, false, nil
+	}
+	// Streaming fused path: single int64 key without nulls. One pass
+	// keeps a running total per group and writes each row in input
+	// order: no permutation, no gather, no scatter-back.
+	if len(n.Keys) == 1 {
+		if fast, ok, err := tryCumSumOverSingleInt64(ctx, ec, n, df, col.Name); ok || err != nil {
+			return fast, ok, err
+		}
+	}
+	height := df.Height()
+	keyCols := make([]*series.Series, len(n.Keys))
+	for i, k := range n.Keys {
+		c, err := df.Column(k)
+		if err != nil {
+			return nil, true, err
+		}
+		keyCols[i] = c
+	}
+	if !dataframe.SupportedKeyTuple(keyCols) {
+		return nil, false, nil
+	}
+	groupIDs, numGroups := assignOverGroupsBinary(keyCols, height)
+	// Counting sort rows by group: offsets, then a single fill pass.
+	counts := make([]int, numGroups)
+	for _, gid := range groupIDs {
+		counts[gid]++
+	}
+	offsets := make([]int, numGroups+1)
+	for g, c := range counts {
+		offsets[g+1] = offsets[g] + c
+	}
+	perm := make([]int, height)
+	next := append([]int(nil), offsets[:numGroups]...)
+	for r, gid := range groupIDs {
+		perm[next[gid]] = r
+		next[gid]++
+	}
+	// Gather values once in group order (fresh offset-0 array), then a
+	// fused segmented scan scatters results to original positions.
+	gathered, err := compute.Take(ctx, valCol, perm, compute.WithAllocator(ec.Alloc))
+	if err != nil {
+		return nil, true, err
+	}
+	defer gathered.Release()
+	gArr := gathered.Chunk(0)
+	outName := n.String()
+	switch a := gArr.(type) {
+	case *array.Int64:
+		vals := a.Int64Values()
+		hasNulls := a.NullN() > 0
+		res, err := series.BuildFloat64DirectFused(outName, height, ec.Alloc, func(out []float64, validBits []byte) int {
+			nulls := 0
+			for g := range numGroups {
+				var acc float64
+				for i := offsets[g]; i < offsets[g+1]; i++ {
+					if hasNulls && !a.IsValid(i) {
+						nulls++
+						continue
+					}
+					acc += float64(vals[i])
+					out[perm[i]] = acc
+					validBits[perm[i]>>3] |= 1 << uint(perm[i]&7)
+				}
+			}
+			return nulls
+		})
+		return res, true, err
+	case *array.Float64:
+		vals := a.Float64Values()
+		hasNulls := a.NullN() > 0
+		res, err := series.BuildFloat64DirectFused(outName, height, ec.Alloc, func(out []float64, validBits []byte) int {
+			nulls := 0
+			for g := range numGroups {
+				var acc float64
+				for i := offsets[g]; i < offsets[g+1]; i++ {
+					if hasNulls && !a.IsValid(i) {
+						nulls++
+						continue
+					}
+					acc += vals[i]
+					out[perm[i]] = acc
+					validBits[perm[i]>>3] |= 1 << uint(perm[i]&7)
+				}
+			}
+			return nulls
+		})
+		return res, true, err
+	case *array.Int32:
+		vals := a.Int32Values()
+		hasNulls := a.NullN() > 0
+		res, err := series.BuildFloat64DirectFused(outName, height, ec.Alloc, func(out []float64, validBits []byte) int {
+			nulls := 0
+			for g := range numGroups {
+				var acc float64
+				for i := offsets[g]; i < offsets[g+1]; i++ {
+					if hasNulls && !a.IsValid(i) {
+						nulls++
+						continue
+					}
+					acc += float64(vals[i])
+					out[perm[i]] = acc
+					validBits[perm[i]>>3] |= 1 << uint(perm[i]&7)
+				}
+			}
+			return nulls
+		})
+		return res, true, err
+	}
+	return nil, false, nil
+}
+
+// assignOverGroupsBinary maps rows to first-seen group ids with binary
+// tuple keys. Map reads of string(buf) allocate nothing; only new
+// groups copy into the table.
+func assignOverGroupsBinary(keyCols []*series.Series, height int) ([]int, int) {
+	groupIDs := make([]int, height)
+	table := make(map[string]int)
+	var buf []byte
+	for r := range height {
+		buf, _ = dataframe.AppendKeyTuple(buf[:0], keyCols, r)
+		if id, ok := table[string(buf)]; ok {
+			groupIDs[r] = id
+		} else {
+			id := len(table)
+			table[string(buf)] = id
+			groupIDs[r] = id
+		}
+	}
+	return groupIDs, len(table)
+}
+
+// assignOverGroupsString is the fallback for key dtypes outside the
+// binary encoding.
+func assignOverGroupsString(keyCols []*series.Series, height int) ([]int, int) {
+	groupIDs := make([]int, height)
+	table := make(map[string]int)
+	for r := range height {
+		key := overKey(keyCols, r)
+		if id, ok := table[key]; ok {
+			groupIDs[r] = id
+		} else {
+			id := len(table)
+			table[key] = id
+			groupIDs[r] = id
+		}
+	}
+	return groupIDs, len(table)
 }
 
 // overKey formats a row's group tuple into a stable string.
@@ -164,10 +321,10 @@ func appendCell(buf []byte, chunk any, i int) []byte {
 	return buf
 }
 
-// gatherGroupFrame builds a sub-DataFrame containing only rows in the
-// given indices, one column at a time. Uses compute.Take per column.
-func gatherGroupFrame(ctx context.Context, df *dataframe.DataFrame, rows []int) (*dataframe.DataFrame, error) {
-	names := df.Schema().Names()
+// gatherGroupFrameCols builds a sub-DataFrame containing only rows in
+// the given indices for the named columns, one column at a time. Uses
+// compute.Take per column.
+func gatherGroupFrameCols(ctx context.Context, df *dataframe.DataFrame, rows []int, names []string) (*dataframe.DataFrame, error) {
 	cols := make([]*series.Series, 0, len(names))
 	for _, name := range names {
 		c, err := df.Column(name)
@@ -189,76 +346,118 @@ func gatherGroupFrame(ctx context.Context, df *dataframe.DataFrame, rows []int) 
 	return dataframe.New(cols...)
 }
 
-type outValue struct {
-	f    float64
-	s    string
-	b    bool
-	kind byte // 0=null, 1=float, 2=str, 3=bool
+// overOut accumulates per-group results into typed output buffers. The
+// buffers are allocated on first touch and the dtype pins then
+// (first-wins, values of any later different dtype are dropped),
+// exactly mirroring the old dominant-dtype scan.
+type overOut struct {
+	height int
+	dtype  string // "", "float", "string", "bool"
+	fVals  []float64
+	sVals  []string
+	bVals  []bool
+	valid  []bool
+	filled int // valid values written; height when dense
 }
 
-func broadcastToOut(chunk any, rows []int, out []outValue, dominantDT *string) {
+func (o *overOut) ensure(dtype string) {
+	if o.dtype != "" {
+		return
+	}
+	o.dtype = dtype
+	o.valid = make([]bool, o.height)
+	switch dtype {
+	case "float":
+		o.fVals = make([]float64, o.height)
+	case "string":
+		o.sVals = make([]string, o.height)
+	case "bool":
+		o.bVals = make([]bool, o.height)
+	}
+}
+
+func (o *overOut) broadcast(chunk any, rows []int) {
 	for _, r := range rows {
-		writeOut(chunk, 0, r, out, dominantDT)
+		o.write(chunk, 0, r)
 	}
 }
 
-func scatterToOut(chunk any, rows []int, out []outValue, dominantDT *string) {
+func (o *overOut) scatter(chunk any, rows []int) {
 	for i, r := range rows {
-		writeOut(chunk, i, r, out, dominantDT)
+		o.write(chunk, i, r)
 	}
 }
 
-func writeOut(chunk any, src int, dst int, out []outValue, dominantDT *string) {
+func (o *overOut) write(chunk any, src int, dst int) {
 	switch a := chunk.(type) {
 	case *array.Float64:
-		if *dominantDT == "" {
-			*dominantDT = "float"
-		}
-		if !a.IsValid(src) {
+		o.ensure("float")
+		if o.dtype != "float" || !a.IsValid(src) {
 			return
 		}
-		out[dst] = outValue{f: a.Value(src), kind: 1}
+		o.fVals[dst] = a.Value(src)
+		o.valid[dst] = true
+		o.filled++
 	case *array.Float32:
-		if *dominantDT == "" {
-			*dominantDT = "float"
-		}
-		if !a.IsValid(src) {
+		o.ensure("float")
+		if o.dtype != "float" || !a.IsValid(src) {
 			return
 		}
-		out[dst] = outValue{f: float64(a.Value(src)), kind: 1}
+		o.fVals[dst] = float64(a.Value(src))
+		o.valid[dst] = true
+		o.filled++
 	case *array.Int64:
-		if *dominantDT == "" {
-			*dominantDT = "float"
-		}
-		if !a.IsValid(src) {
+		o.ensure("float")
+		if o.dtype != "float" || !a.IsValid(src) {
 			return
 		}
-		out[dst] = outValue{f: float64(a.Value(src)), kind: 1}
+		o.fVals[dst] = float64(a.Value(src))
+		o.valid[dst] = true
+		o.filled++
 	case *array.Int32:
-		if *dominantDT == "" {
-			*dominantDT = "float"
-		}
-		if !a.IsValid(src) {
+		o.ensure("float")
+		if o.dtype != "float" || !a.IsValid(src) {
 			return
 		}
-		out[dst] = outValue{f: float64(a.Value(src)), kind: 1}
+		o.fVals[dst] = float64(a.Value(src))
+		o.valid[dst] = true
+		o.filled++
 	case *array.Boolean:
-		if *dominantDT == "" {
-			*dominantDT = "bool"
-		}
-		if !a.IsValid(src) {
+		o.ensure("bool")
+		if o.dtype != "bool" || !a.IsValid(src) {
 			return
 		}
-		out[dst] = outValue{b: a.Value(src), kind: 3}
+		o.bVals[dst] = a.Value(src)
+		o.valid[dst] = true
+		o.filled++
 	case *array.String:
-		if *dominantDT == "" {
-			*dominantDT = "string"
-		}
-		if !a.IsValid(src) {
+		o.ensure("string")
+		if o.dtype != "string" || !a.IsValid(src) {
 			return
 		}
-		out[dst] = outValue{s: a.Value(src), kind: 2}
+		o.sVals[dst] = a.Value(src)
+		o.valid[dst] = true
+		o.filled++
 	}
+}
+
+func (o *overOut) materialize(name string, opt series.Option) (*series.Series, error) {
+	// Dense output skips the validity bitmap, mirroring compactValid in
+	// the groupby kernels.
+	var valid []bool
+	if o.filled != o.height {
+		valid = o.valid
+	}
+	switch o.dtype {
+	case "float":
+		return series.FromFloat64(name, o.fVals, valid, opt)
+	case "string":
+		return series.FromString(name, o.sVals, valid, opt)
+	case "bool":
+		return series.FromBool(name, o.bVals, valid, opt)
+	}
+	// All-null fallback (empty input).
+	return series.FromFloat64(name, make([]float64, o.height), make([]bool, o.height), opt)
 }
 
 // seriesAllocOpt returns the allocator option matching ec.
