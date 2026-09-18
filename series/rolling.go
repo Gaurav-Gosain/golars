@@ -346,9 +346,6 @@ func (s *Series) rollingMinMax(opts RollingOptions, callerOpts []Option, isMin b
 	case *array.Int64:
 		vals := a.Int64Values()
 		off := a.Data().Offset()
-		if off > 0 {
-			vals = vals[off:]
-		}
 		if a.NullN() == 0 {
 			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
 		}
@@ -356,9 +353,6 @@ func (s *Series) rollingMinMax(opts RollingOptions, callerOpts []Option, isMin b
 	case *array.Float64:
 		vals := a.Float64Values()
 		off := a.Data().Offset()
-		if off > 0 {
-			vals = vals[off:]
-		}
 		if a.NullN() == 0 {
 			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
 		}
@@ -366,9 +360,6 @@ func (s *Series) rollingMinMax(opts RollingOptions, callerOpts []Option, isMin b
 	case *array.Int32:
 		vals := a.Int32Values()
 		off := a.Data().Offset()
-		if off > 0 {
-			vals = vals[off:]
-		}
 		if a.NullN() == 0 {
 			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
 		}

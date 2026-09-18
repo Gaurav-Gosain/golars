@@ -116,6 +116,54 @@ func TestRollingMeanFastMatchesGeneric(t *testing.T) {
 	}
 }
 
+// TestRollingOnSlice guards offset-chunk handling: arrow pre-slices
+// value buffers, so kernels must index them directly (a second manual
+// slice corrupts every read).
+func TestRollingOnSlice(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer alloc.AssertSize(t, 0)
+
+	s, _ := series.FromInt64("x", []int64{9, 9, 3, 1, 4, 1, 5}, nil, series.WithAllocator(alloc))
+	defer s.Release()
+	sub, err := s.Slice(2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Release()
+
+	mn, err := sub.RollingMin(series.RollingOptions{WindowSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mn.Release()
+	mnArr := mn.Chunk(0).(*array.Float64)
+	// Windows over [3,1,4,1,5]: [3,1]=1, [1,4]=1, [4,1]=1, [1,5]=1.
+	for i := 1; i < 5; i++ {
+		if !mnArr.IsValid(i) || mnArr.Value(i) != 1 {
+			t.Fatalf("min idx %d: got valid=%v value=%v want 1",
+				i, mnArr.IsValid(i), mnArr.Value(i))
+		}
+	}
+
+	mean, err := sub.RollingMean(series.RollingOptions{WindowSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mean.Release()
+	meanArr := mean.Chunk(0).(*array.Float64)
+	for i, w := range []float64{0, 2, 2.5, 2.5, 3} {
+		if i == 0 {
+			if meanArr.IsValid(i) {
+				t.Fatalf("mean idx 0: expected null")
+			}
+			continue
+		}
+		if !meanArr.IsValid(i) || math.Abs(meanArr.Value(i)-w) > 1e-12 {
+			t.Fatalf("mean idx %d: got %v want %v", i, meanArr.Value(i), w)
+		}
+	}
+}
+
 func TestRollingMinMaxNulls(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer alloc.AssertSize(t, 0)

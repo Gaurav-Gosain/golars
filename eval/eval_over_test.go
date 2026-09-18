@@ -167,6 +167,44 @@ func TestOverGenericPath(t *testing.T) {
 	}
 }
 
+// TestOverCumSumOnSlice guards offset handling in the fused path:
+// value buffers arrive pre-sliced, so no manual re-slicing.
+func TestOverCumSumOnSlice(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer alloc.AssertSize(t, 0)
+
+	k, _ := series.FromInt64("k", []int64{9, 1, 2, 1, 2, 1, 9}, nil, series.WithAllocator(alloc))
+	defer k.Release()
+	v, _ := series.FromInt64("v", []int64{0, 10, 20, 30, 40, 50, 0}, nil, series.WithAllocator(alloc))
+	defer v.Release()
+	df, _ := dataframe.New(k, v)
+	defer df.Release()
+	sub, err := df.Slice(1, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Release()
+
+	out, err := lazy.FromDataFrame(sub).
+		Select(expr.Col("v").CumSum().Over("k").Alias("cum")).
+		Collect(context.Background(), lazy.WithExecAllocator(alloc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Release()
+	col, _ := out.Column("cum")
+	arr := col.Chunk(0).(*array.Float64)
+	// Rows (k,v): (1,10),(2,20),(1,30),(2,40),(1,50).
+	// Group 1: 10,40,90. Group 2: 20,60.
+	want := []float64{10, 20, 40, 60, 90}
+	for i, w := range want {
+		if !arr.IsValid(i) || arr.Value(i) != w {
+			t.Fatalf("idx %d: got valid=%v value=%v want %v",
+				i, arr.IsValid(i), arr.Value(i), w)
+		}
+	}
+}
+
 func TestOverCumSumByGroup(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer alloc.AssertSize(t, 0)

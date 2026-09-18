@@ -40,9 +40,6 @@ func tryCumSumOverSingleInt64(
 		return nil, false, nil
 	}
 	keys := keyArr.Int64Values()
-	if off := keyArr.Data().Offset(); off > 0 {
-		keys = keys[off:]
-	}
 	height := df.Height()
 	outName := n.String()
 	type slot struct {
@@ -110,9 +107,6 @@ func tryCumSumOverSingleInt64(
 	switch v := valCol.Chunk(0).(type) {
 	case *array.Int64:
 		vals := v.Int64Values()
-		if off := v.Data().Offset(); off > 0 {
-			vals = vals[off:]
-		}
 		valNullN := v.NullN()
 		return run(func(i int) (float64, bool) {
 			if valNullN > 0 && !v.IsValid(i) {
@@ -122,9 +116,6 @@ func tryCumSumOverSingleInt64(
 		})
 	case *array.Float64:
 		vals := v.Float64Values()
-		if off := v.Data().Offset(); off > 0 {
-			vals = vals[off:]
-		}
 		valNullN := v.NullN()
 		return run(func(i int) (float64, bool) {
 			if valNullN > 0 && !v.IsValid(i) {
@@ -134,9 +125,6 @@ func tryCumSumOverSingleInt64(
 		})
 	case *array.Int32:
 		vals := v.Int32Values()
-		if off := v.Data().Offset(); off > 0 {
-			vals = vals[off:]
-		}
 		valNullN := v.NullN()
 		return run(func(i int) (float64, bool) {
 			if valNullN > 0 && !v.IsValid(i) {
