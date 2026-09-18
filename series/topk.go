@@ -324,7 +324,8 @@ func sortHeapInt64(h []int, vals []int64, descending bool) {
 	})
 }
 
-// sortHeapFloat64 mirrors sortHeapInt64 with NaN largest.
+// sortHeapFloat64 mirrors sortHeapInt64 with NaN ranking largest:
+// first for descending, last for ascending.
 func sortHeapFloat64(h []int, vals []float64, descending bool) {
 	slices.SortFunc(h, func(x, y int) int {
 		xv, yv := vals[x], vals[y]
@@ -332,9 +333,15 @@ func sortHeapFloat64(h []int, vals []float64, descending bool) {
 		switch {
 		case xNaN && yNaN:
 		case xNaN:
-			return -1
-		case yNaN:
+			if descending {
+				return -1
+			}
 			return 1
+		case yNaN:
+			if descending {
+				return 1
+			}
+			return -1
 		case xv != yv:
 			if descending {
 				if xv > yv {

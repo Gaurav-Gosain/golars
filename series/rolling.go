@@ -376,9 +376,10 @@ type rollingOrdered interface {
 // rollingMinMaxNoNull is the O(1)-amortised deque driver for columns
 // without nulls. The deque holds window indices with monotonic
 // values, so the front is always the current min (or max) and both
-// insert and age-eviction are index operations. NaN compares false
-// against everything, so a NaN only surfaces while it is the oldest
-// entry, matching the scalar scan it replaces.
+// insert and age-eviction are index operations. NaN never enters the
+// deque (an incomparable entry would barrier later minima); a NaN
+// surfaces exactly while it is the oldest entry, matching the scalar
+// scan it replaces.
 func rollingMinMaxNoNull[T rollingOrdered](
 	name string, vals []T, n, w, mp int, isMin bool, alloc memory.Allocator,
 ) (*Series, error) {
@@ -386,6 +387,8 @@ func rollingMinMaxNoNull[T rollingOrdered](
 		if n == 0 {
 			return 0
 		}
+		var zero T
+		_, isFloat := any(zero).(float64)
 		dq := make([]int, 0, min(w, n)+1)
 		nulls := 0
 		for i := range n {
@@ -393,46 +396,7 @@ func rollingMinMaxNoNull[T rollingOrdered](
 				dq = dq[1:]
 			}
 			vi := vals[i]
-			if isMin {
-				for len(dq) > 0 && vals[dq[len(dq)-1]] >= vi {
-					dq = dq[:len(dq)-1]
-				}
-			} else {
-				for len(dq) > 0 && vals[dq[len(dq)-1]] <= vi {
-					dq = dq[:len(dq)-1]
-				}
-			}
-			dq = append(dq, i)
-			if i+1 >= mp {
-				out[i] = float64(vals[dq[0]])
-				validBits[i>>3] |= 1 << uint(i&7)
-			} else {
-				nulls++
-			}
-		}
-		return nulls
-	})
-}
-
-// rollingMinMaxNullable is the deque driver for columns with nulls.
-// Only valid indices enter the deque, so eviction stays O(1) and
-// matches the window exactly.
-func rollingMinMaxNullable[T rollingOrdered](
-	name string, vals []T, nullBits []byte, off, n, w, mp int, isMin bool, alloc memory.Allocator,
-) (*Series, error) {
-	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
-		if n == 0 {
-			return 0
-		}
-		dq := make([]int, 0, min(w, n)+1)
-		count := 0
-		nulls := 0
-		for i := range n {
-			if ev := i - w; len(dq) > 0 && dq[0] <= ev {
-				dq = dq[1:]
-			}
-			if nullBits[(i+off)>>3]&(1<<uint((i+off)&7)) != 0 {
-				vi := vals[i]
+			if !isFloat || !math.IsNaN(float64(vi)) {
 				if isMin {
 					for len(dq) > 0 && vals[dq[len(dq)-1]] >= vi {
 						dq = dq[:len(dq)-1]
@@ -443,17 +407,72 @@ func rollingMinMaxNullable[T rollingOrdered](
 					}
 				}
 				dq = append(dq, i)
-				count++
 			}
-			// The expiring index leaves the window whether or not it
-			// survived in the deque: back-popped entries are still
-			// live for the count until they age out. Looking the
-			// expiring slot up in the bitmap keeps the count exact.
-			if i >= w && nullBits[(i-w+off)>>3]&(1<<uint((i-w+off)&7)) != 0 {
-				count--
+			if i+1 >= mp {
+				oldest := i - w + 1
+				if oldest < 0 {
+					oldest = 0
+				}
+				if isFloat && math.IsNaN(float64(vals[oldest])) {
+					out[i] = math.NaN()
+				} else {
+					out[i] = float64(vals[dq[0]])
+				}
+				validBits[i>>3] |= 1 << uint(i&7)
+			} else {
+				nulls++
 			}
-			if count >= mp {
-				out[i] = float64(vals[dq[0]])
+		}
+		return nulls
+	})
+}
+
+// rollingMinMaxNullable is the deque driver for columns with nulls.
+// Only non-NaN valid indices enter the deque; a separate FIFO tracks
+// valid indices in age order so the oldest is always known. A NaN
+// surfaces exactly while it is the oldest valid entry.
+func rollingMinMaxNullable[T rollingOrdered](
+	name string, vals []T, nullBits []byte, off, n, w, mp int, isMin bool, alloc memory.Allocator,
+) (*Series, error) {
+	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
+		if n == 0 {
+			return 0
+		}
+		var zero T
+		_, isFloat := any(zero).(float64)
+		dq := make([]int, 0, min(w, n)+1)
+		order := make([]int, 0, min(w, n)+1)
+		nulls := 0
+		for i := range n {
+			ev := i - w
+			if len(dq) > 0 && dq[0] <= ev {
+				dq = dq[1:]
+			}
+			if len(order) > 0 && order[0] <= ev {
+				order = order[1:]
+			}
+			if nullBits[(i+off)>>3]&(1<<uint((i+off)&7)) != 0 {
+				order = append(order, i)
+				vi := vals[i]
+				if !isFloat || !math.IsNaN(float64(vi)) {
+					if isMin {
+						for len(dq) > 0 && vals[dq[len(dq)-1]] >= vi {
+							dq = dq[:len(dq)-1]
+						}
+					} else {
+						for len(dq) > 0 && vals[dq[len(dq)-1]] <= vi {
+							dq = dq[:len(dq)-1]
+						}
+					}
+					dq = append(dq, i)
+				}
+			}
+			if len(order) >= mp {
+				if oldest := order[0]; isFloat && math.IsNaN(float64(vals[oldest])) {
+					out[i] = math.NaN()
+				} else {
+					out[i] = float64(vals[dq[0]])
+				}
 				validBits[i>>3] |= 1 << uint(i&7)
 			} else {
 				nulls++
