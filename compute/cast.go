@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strconv"
 	"sync"
 
@@ -592,7 +593,7 @@ func castInt64ToFloat64(out []float64, src []int64) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	// Large-N path: AVX2 uses streaming stores (VMOVNTPD) to bypass
@@ -617,8 +618,8 @@ func castInt64ToFloat64(out []float64, src []int64) {
 			defer wg.Done()
 			start := w * chunkSize
 			end := min(start+chunkSize, n)
-			for i := start; i < end; i++ {
-				out[i] = float64(src[i])
+			if start < end {
+				simdCastInt64ToFloat64AVX2(out[start:end], src[start:end])
 			}
 		}(w)
 	}
@@ -633,7 +634,7 @@ func castInt32ToFloat64(out []float64, src []int32) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	for w := range k {
@@ -658,7 +659,7 @@ func castUint64ToFloat64(out []float64, src []uint64) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	for w := range k {
@@ -683,7 +684,7 @@ func castFloat32ToFloat64(out []float64, src []float32) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	for w := range k {
