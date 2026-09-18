@@ -504,6 +504,19 @@ def bench_top_k(rows: int, k: int) -> Result:
     return Result(f"TopK(k={k})", rows, t, rows * 8 / t * 1000.0)
 
 
+def bench_rank(rows: int) -> Result:
+    """Rank over an int64 column (average method)."""
+    rng = np.random.default_rng(42)
+    vals = rng.integers(0, 1 << 20, size=rows, dtype=np.int64)
+    df = pl.DataFrame({"x": vals})
+
+    def run():
+        _ = df.select(pl.col("x").rank())
+
+    t = time_ns(run)
+    return Result("RankInt64", rows, t, rows * 8 / t * 1000.0)
+
+
 def bench_cumsum_int64(rows: int) -> Result:
     """Cumulative sum along an int64 column."""
     rng = np.random.default_rng(42)
@@ -610,6 +623,7 @@ def main() -> int:
     for n in (16_384, 262_144):
         out.append(vars(bench_unique_int64(n)))
         out.append(vars(bench_top_k(n, 10)))
+        out.append(vars(bench_rank(n)))
 
     for n in SIZES:
         out.append(vars(bench_cumsum_int64(n)))

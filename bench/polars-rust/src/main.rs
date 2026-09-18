@@ -5,6 +5,7 @@
 
 use polars::lazy::frame::OptFlags;
 use polars::prelude::*;
+use polars_ops::series::{RankMethod, RankOptions};
 use rand::distributions::Uniform;
 use rand::prelude::*;
 use rand_pcg::Pcg64;
@@ -872,6 +873,32 @@ fn bench_top_k(n: usize, k: usize) -> Result {
     }
 }
 
+fn bench_rank(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rank(
+                RankOptions {
+                    method: RankMethod::Average,
+                    descending: false,
+                },
+                None,
+            )])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RankInt64".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
 fn bench_cumsum_int64(n: usize) -> Result {
     let vals = rand_i64(n, 1 << 16);
     let df = df!("x" => vals).unwrap();
@@ -1006,6 +1033,7 @@ fn main() {
     for &n in &[16_384usize, 262_144] {
         out.push(bench_unique_int64(n));
         out.push(bench_top_k(n, 10));
+        out.push(bench_rank(n));
     }
 
     for &n in &sizes {

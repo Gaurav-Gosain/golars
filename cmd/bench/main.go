@@ -598,6 +598,22 @@ func benchRollingMax(ctx context.Context, rows int) result {
 	return result{Name: "RollingMax(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
 }
 
+func benchRank(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.Rank(series.RankAverage)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RankInt64", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
 func benchTopK(ctx context.Context, rows, k int) result {
 	vals := randInt64s(rows, 42, 1<<20)
 	s, _ := series.FromInt64("x", vals, nil)
@@ -937,7 +953,7 @@ func main() {
 		runs = append(runs, benchMaxHorizontal(ctx, n))
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs, benchUniqueInt64(ctx, n), benchTopK(ctx, n, 10))
+		runs = append(runs, benchUniqueInt64(ctx, n), benchTopK(ctx, n, 10), benchRank(ctx, n))
 	}
 	for _, n := range sizes {
 		runs = append(runs,

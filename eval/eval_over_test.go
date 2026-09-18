@@ -197,6 +197,66 @@ func TestOverEmptyFrame(t *testing.T) {
 	}
 }
 
+// TestOverCumSumPathAgreement runs the same logical groups through
+// int64 keys (fused path) and string keys (segmented path) and
+// requires identical output, including nulls and NaNs.
+func TestOverCumSumPathAgreement(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer alloc.AssertSize(t, 0)
+
+	keys := []int64{3, 1, 3, 2, 1, 3, 2, 1}
+	skeys := []string{"c", "a", "c", "b", "a", "c", "b", "a"}
+	vals := []float64{1, 2, math.NaN(), 4, 5, 6, 7, 8}
+	valid := []bool{true, true, false, true, true, true, true, true}
+
+	build := func(ks *series.Series) *dataframe.DataFrame {
+		v, _ := series.FromFloat64("v", vals, valid, series.WithAllocator(alloc))
+		df, _ := dataframe.New(ks, v)
+		return df
+	}
+	ki, _ := series.FromInt64("k", keys, nil, series.WithAllocator(alloc))
+	defer ki.Release()
+	ks, _ := series.FromString("k", skeys, nil, series.WithAllocator(alloc))
+	defer ks.Release()
+
+	run := func(df *dataframe.DataFrame) []float64 {
+		defer df.Release()
+		out, err := lazy.FromDataFrame(df).
+			Select(expr.Col("v").CumSum().Over("k").Alias("cum")).
+			Collect(context.Background(), lazy.WithExecAllocator(alloc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer out.Release()
+		col, _ := out.Column("cum")
+		arr := col.Chunk(0).(*array.Float64)
+		got := make([]float64, arr.Len())
+		for i := range got {
+			if arr.IsValid(i) {
+				got[i] = arr.Value(i)
+			} else {
+				got[i] = math.NaN()
+			}
+		}
+		return got
+	}
+	a, b := run(build(ki)), run(build(ks))
+	if len(a) != len(b) {
+		t.Fatalf("len %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		// Nulls surface as NaN from run(); NaN payloads may differ
+		// in the low bits across paths, so compare by class.
+		an, bn := math.IsNaN(a[i]), math.IsNaN(b[i])
+		if an != bn {
+			t.Fatalf("idx %d: %v vs %v (NaN class differs)", i, a[i], b[i])
+		}
+		if !an && a[i] != b[i] {
+			t.Fatalf("idx %d: %v vs %v", i, a[i], b[i])
+		}
+	}
+}
+
 // TestOverCumSumOnSlice guards offset handling in the fused path:
 // value buffers arrive pre-sliced, so no manual re-slicing.
 func TestOverCumSumOnSlice(t *testing.T) {
