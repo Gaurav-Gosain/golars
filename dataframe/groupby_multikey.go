@@ -255,20 +255,6 @@ func (u *keyUniques) appendValue(c multiKeyCol, i int) {
 	}
 }
 
-// arr returns the column's arrow array for encoding.
-func (c multiKeyCol) arr() arrow.Array {
-	switch {
-	case c.i64 != nil:
-		return c.i64
-	case c.i32 != nil:
-		return c.i32
-	case c.str != nil:
-		return c.str
-	default:
-		return c.bl
-	}
-}
-
 // encodeKeyTuple appends the encoded tuple of row i to buf. It
 // switches on the concrete column fields directly (no interface
 // round-trip) since this runs once per row per column.
