@@ -138,6 +138,35 @@ func TestOverCumSumIntKeyWithNulls(t *testing.T) {
 	}
 }
 
+// TestOverGenericPath exercises the generic per-group loop with a
+// non-scalar, non-cumsum inner that no fast path claims.
+func TestOverGenericPath(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer alloc.AssertSize(t, 0)
+
+	k, _ := series.FromString("k", []string{"a", "a", "b", "a", "b"}, nil, series.WithAllocator(alloc))
+	v, _ := series.FromInt64("v", []int64{1, -2, 3, -4, 5}, nil, series.WithAllocator(alloc))
+	df, _ := dataframe.New(k, v)
+	defer df.Release()
+
+	out, err := lazy.FromDataFrame(df).
+		Select(expr.Col("v").Abs().Over("k").Alias("av")).
+		Collect(context.Background(), lazy.WithExecAllocator(alloc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Release()
+	col, _ := out.Column("av")
+	arr := col.Chunk(0).(*array.Float64)
+	want := []float64{1, 2, 3, 4, 5}
+	for i, w := range want {
+		if !arr.IsValid(i) || arr.Value(i) != w {
+			t.Fatalf("idx %d: got valid=%v value=%v want %v",
+				i, arr.IsValid(i), arr.Value(i), w)
+		}
+	}
+}
+
 func TestOverCumSumByGroup(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer alloc.AssertSize(t, 0)
