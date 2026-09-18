@@ -167,6 +167,36 @@ func TestOverGenericPath(t *testing.T) {
 	}
 }
 
+// TestOverEmptyFrame guards the degenerate paths (no rows exercise
+// group assignment, bucketing or output materialization loops).
+func TestOverEmptyFrame(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer alloc.AssertSize(t, 0)
+
+	k, _ := series.FromInt64("k", nil, nil, series.WithAllocator(alloc))
+	v, _ := series.FromInt64("v", nil, nil, series.WithAllocator(alloc))
+	df, _ := dataframe.New(k, v)
+	defer df.Release()
+
+	for _, inner := range []expr.Expr{
+		expr.Col("v").Sum(),
+		expr.Col("v").CumSum(),
+		expr.Col("v").Abs(),
+	} {
+		out, err := lazy.FromDataFrame(df).
+			Select(inner.Over("k").Alias("o")).
+			Collect(context.Background(), lazy.WithExecAllocator(alloc))
+		if err != nil {
+			t.Fatalf("%v: %v", inner, err)
+		}
+		col, _ := out.Column("o")
+		if col.Len() != 0 {
+			t.Fatalf("%v: len = %d, want 0", inner, col.Len())
+		}
+		out.Release()
+	}
+}
+
 // TestOverCumSumOnSlice guards offset handling in the fused path:
 // value buffers arrive pre-sliced, so no manual re-slicing.
 func TestOverCumSumOnSlice(t *testing.T) {
