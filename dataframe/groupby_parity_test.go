@@ -4,8 +4,7 @@
 // polars scenario catalog; no code copied.
 //
 // Scenarios NOT ported (feature-gated on polars-only behaviour):
-//   - Quantile / Median                 (no Quantile kernel yet)
-//   - Rolling aggregations              (no Rolling ops)
+//   - List / Struct / Categorical keys  (no such dtypes)
 //   - List / Struct / Categorical keys  (no such dtypes)
 //   - DynamicGroupBy / GroupByRolling   (time-windowed groupby)
 //   - Expression-based agg filters      (no .filter() inside agg)
