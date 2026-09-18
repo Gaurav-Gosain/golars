@@ -3,6 +3,7 @@ package lazy
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -31,6 +32,14 @@ func resolveExec(opts []ExecOption) execConfig {
 	c := execConfig{alloc: memory.DefaultAllocator}
 	for _, o := range opts {
 		o(&c)
+	}
+	if c.workers <= 0 {
+		// Parallel streaming stages by default: inter-morsel work is
+		// independent and ordered output is preserved. Explicit
+		// WithStreamingWorkers(1) still selects the serial stages.
+		// Capped like the other fan-outs so in-flight morsels stay
+		// memory-bounded.
+		c.workers = min(runtime.GOMAXPROCS(0), 8)
 	}
 	return c
 }
