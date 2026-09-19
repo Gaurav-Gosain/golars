@@ -255,55 +255,6 @@ func (u *keyUniques) appendValue(c multiKeyCol, i int) {
 	}
 }
 
-// encodeKeyTuple appends the encoded tuple of row i to buf. It
-// switches on the concrete column fields directly (no interface
-// round-trip) since this runs once per row per column.
-func encodeKeyTuple(buf []byte, cols []multiKeyCol, i int) []byte {
-	var tmp [8]byte
-	for _, c := range cols {
-		switch {
-		case c.i64 != nil:
-			if c.i64.IsNull(i) {
-				buf = append(buf, 0x00)
-				continue
-			}
-			buf = append(buf, 0x01)
-			binary.LittleEndian.PutUint64(tmp[:], uint64(c.i64.Value(i)))
-			buf = append(buf, tmp[:]...)
-		case c.i32 != nil:
-			if c.i32.IsNull(i) {
-				buf = append(buf, 0x00)
-				continue
-			}
-			buf = append(buf, 0x01)
-			binary.LittleEndian.PutUint32(tmp[:4], uint32(c.i32.Value(i)))
-			buf = append(buf, tmp[:4]...)
-		case c.str != nil:
-			if c.str.IsNull(i) {
-				buf = append(buf, 0x00)
-				continue
-			}
-			buf = append(buf, 0x01)
-			s := c.str.Value(i)
-			binary.LittleEndian.PutUint32(tmp[:4], uint32(len(s)))
-			buf = append(buf, tmp[:4]...)
-			buf = append(buf, s...)
-		default:
-			if c.bl.IsNull(i) {
-				buf = append(buf, 0x00)
-				continue
-			}
-			buf = append(buf, 0x01)
-			if c.bl.Value(i) {
-				buf = append(buf, 0x01)
-			} else {
-				buf = append(buf, 0x00)
-			}
-		}
-	}
-	return buf
-}
-
 // rowKeyNull reports whether row i of column c holds a null key.
 func rowKeyNull(c multiKeyCol, i int) bool {
 	switch {
@@ -385,10 +336,57 @@ func assignGroupsMultiKeyRange(cols []multiKeyCol, start, end int) ([]int, []*ke
 // adaptive sample can continue serially without repeated work. Lookups
 // use string(buf) directly in the map index, which skips the conversion
 // allocation on hits; only first-seen tuples copy.
+//
+// NOTE: the tuple encoding is inlined here rather than calling
+// encodeKeyTuple because that helper exceeds the inliner budget and a
+// call per row costs ~10% on this loop. The dtype branches predict
+// perfectly (fixed columns), so the inline form keeps only the work.
 func assignRangeInto(cols []multiKeyCol, start, end int, table map[string]int, uniques []*keyUniques, out []int) {
+	var tmp [8]byte
 	buf := make([]byte, 0, 32*len(cols))
 	for i := start; i < end; i++ {
-		buf = encodeKeyTuple(buf[:0], cols, i)
+		buf = buf[:0]
+		for _, c := range cols {
+			switch {
+			case c.i64 != nil:
+				if c.i64.IsNull(i) {
+					buf = append(buf, 0x00)
+					continue
+				}
+				buf = append(buf, 0x01)
+				binary.LittleEndian.PutUint64(tmp[:], uint64(c.i64.Value(i)))
+				buf = append(buf, tmp[:]...)
+			case c.i32 != nil:
+				if c.i32.IsNull(i) {
+					buf = append(buf, 0x00)
+					continue
+				}
+				buf = append(buf, 0x01)
+				binary.LittleEndian.PutUint32(tmp[:4], uint32(c.i32.Value(i)))
+				buf = append(buf, tmp[:4]...)
+			case c.str != nil:
+				if c.str.IsNull(i) {
+					buf = append(buf, 0x00)
+					continue
+				}
+				buf = append(buf, 0x01)
+				s := c.str.Value(i)
+				binary.LittleEndian.PutUint32(tmp[:4], uint32(len(s)))
+				buf = append(buf, tmp[:4]...)
+				buf = append(buf, s...)
+			default:
+				if c.bl.IsNull(i) {
+					buf = append(buf, 0x00)
+					continue
+				}
+				buf = append(buf, 0x01)
+				if c.bl.Value(i) {
+					buf = append(buf, 0x01)
+				} else {
+					buf = append(buf, 0x00)
+				}
+			}
+		}
 		id, ok := table[string(buf)]
 		if !ok {
 			id = len(table)

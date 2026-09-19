@@ -194,6 +194,9 @@ func assignGroupsInt64(arr *array.Int64, name string, mem memory.Allocator) ([]i
 	var uniqueKeys []int64
 	nullGroupID := -1
 
+	// NOTE: the insert body stays inline in both loops (rather than a
+	// shared helper) because it sits just above the inliner budget;
+	// a call per row costs ~2ns on a ~5ns/row hot loop.
 	if hasNulls {
 		for i := range n {
 			if arr.IsNull(i) {
@@ -204,11 +207,21 @@ func assignGroupsInt64(arr *array.Int64, name string, mem memory.Allocator) ([]i
 				groupIDs[i] = nullGroupID
 				continue
 			}
-			groupIDs[i] = assignInt64Key(table, &uniqueKeys, vals[i])
+			k := vals[i]
+			id, inserted := table.InsertOrGet(k, int32(len(uniqueKeys)))
+			if inserted {
+				uniqueKeys = append(uniqueKeys, k)
+			}
+			groupIDs[i] = int(id)
 		}
 	} else {
 		for i := range n {
-			groupIDs[i] = assignInt64Key(table, &uniqueKeys, vals[i])
+			k := vals[i]
+			id, inserted := table.InsertOrGet(k, int32(len(uniqueKeys)))
+			if inserted {
+				uniqueKeys = append(uniqueKeys, k)
+			}
+			groupIDs[i] = int(id)
 		}
 	}
 
@@ -222,15 +235,6 @@ func assignGroupsInt64(arr *array.Int64, name string, mem memory.Allocator) ([]i
 	}
 	keyOut, err := series.FromInt64(name, uniqueKeys, valid, series.WithAllocator(mem))
 	return groupIDs, len(uniqueKeys), keyOut, err
-}
-
-// assignInt64Key maps one key to its group id, recording first-seen keys.
-func assignInt64Key(table *intmap.Int64, uniqueKeys *[]int64, k int64) int {
-	id, inserted := table.InsertOrGet(k, int32(len(*uniqueKeys)))
-	if inserted {
-		*uniqueKeys = append(*uniqueKeys, k)
-	}
-	return int(id)
 }
 
 // parallelAssignInt64 implements a two-phase group-id assignment with the
