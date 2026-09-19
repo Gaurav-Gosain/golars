@@ -26,15 +26,15 @@ func simdAddInt64(a, b, out []int64) {
 	i := 0
 	if archsimd.X86.AVX512() {
 		for ; i+8 <= n; i += 8 {
-			va := archsimd.LoadInt64x8Slice(a[i:])
-			vb := archsimd.LoadInt64x8Slice(b[i:])
-			va.Add(vb).StoreSlice(out[i:])
+			va := archsimd.LoadInt64x8(a[i:])
+			vb := archsimd.LoadInt64x8(b[i:])
+			va.Add(vb).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		for ; i+4 <= n; i += 4 {
-			va := archsimd.LoadInt64x4Slice(a[i:])
-			vb := archsimd.LoadInt64x4Slice(b[i:])
-			va.Add(vb).StoreSlice(out[i:])
+			va := archsimd.LoadInt64x4(a[i:])
+			vb := archsimd.LoadInt64x4(b[i:])
+			va.Add(vb).Store(out[i:])
 		}
 	}
 	for ; i < n; i++ {
@@ -48,15 +48,15 @@ func simdAddFloat64(a, b, out []float64) {
 	i := 0
 	if archsimd.X86.AVX512() {
 		for ; i+8 <= n; i += 8 {
-			va := archsimd.LoadFloat64x8Slice(a[i:])
-			vb := archsimd.LoadFloat64x8Slice(b[i:])
-			va.Add(vb).StoreSlice(out[i:])
+			va := archsimd.LoadFloat64x8(a[i:])
+			vb := archsimd.LoadFloat64x8(b[i:])
+			va.Add(vb).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		for ; i+4 <= n; i += 4 {
-			va := archsimd.LoadFloat64x4Slice(a[i:])
-			vb := archsimd.LoadFloat64x4Slice(b[i:])
-			va.Add(vb).StoreSlice(out[i:])
+			va := archsimd.LoadFloat64x4(a[i:])
+			vb := archsimd.LoadFloat64x4(b[i:])
+			va.Add(vb).Store(out[i:])
 		}
 	}
 	for ; i < n; i++ {
@@ -78,34 +78,34 @@ func simdSumInt64(a []int64) int64 {
 	if archsimd.X86.AVX512() {
 		var a0, a1, a2, a3 archsimd.Int64x8
 		for ; i+32 <= n; i += 32 {
-			a0 = a0.Add(archsimd.LoadInt64x8Slice(a[i:]))
-			a1 = a1.Add(archsimd.LoadInt64x8Slice(a[i+8:]))
-			a2 = a2.Add(archsimd.LoadInt64x8Slice(a[i+16:]))
-			a3 = a3.Add(archsimd.LoadInt64x8Slice(a[i+24:]))
+			a0 = a0.Add(archsimd.LoadInt64x8(a[i:]))
+			a1 = a1.Add(archsimd.LoadInt64x8(a[i+8:]))
+			a2 = a2.Add(archsimd.LoadInt64x8(a[i+16:]))
+			a3 = a3.Add(archsimd.LoadInt64x8(a[i+24:]))
 		}
 		acc := a0.Add(a1).Add(a2.Add(a3))
 		for ; i+8 <= n; i += 8 {
-			acc = acc.Add(archsimd.LoadInt64x8Slice(a[i:]))
+			acc = acc.Add(archsimd.LoadInt64x8(a[i:]))
 		}
 		var tmp [8]int64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		for _, x := range tmp {
 			total += x
 		}
 	} else if archsimd.X86.AVX2() {
 		var a0, a1, a2, a3 archsimd.Int64x4
 		for ; i+16 <= n; i += 16 {
-			a0 = a0.Add(archsimd.LoadInt64x4Slice(a[i:]))
-			a1 = a1.Add(archsimd.LoadInt64x4Slice(a[i+4:]))
-			a2 = a2.Add(archsimd.LoadInt64x4Slice(a[i+8:]))
-			a3 = a3.Add(archsimd.LoadInt64x4Slice(a[i+12:]))
+			a0 = a0.Add(archsimd.LoadInt64x4(a[i:]))
+			a1 = a1.Add(archsimd.LoadInt64x4(a[i+4:]))
+			a2 = a2.Add(archsimd.LoadInt64x4(a[i+8:]))
+			a3 = a3.Add(archsimd.LoadInt64x4(a[i+12:]))
 		}
 		acc := a0.Add(a1).Add(a2.Add(a3))
 		for ; i+4 <= n; i += 4 {
-			acc = acc.Add(archsimd.LoadInt64x4Slice(a[i:]))
+			acc = acc.Add(archsimd.LoadInt64x4(a[i:]))
 		}
 		var tmp [4]int64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		for _, x := range tmp {
 			total += x
 		}
@@ -128,16 +128,16 @@ func simdMinFloat64(vals []float64) (float64, bool) {
 	}
 	i := 0
 	if archsimd.X86.AVX512() && n >= 8 {
-		acc := archsimd.LoadFloat64x8Slice(vals[:8])
+		acc := archsimd.LoadFloat64x8(vals[:8])
 		anyNaN := acc.IsNaN()
 		i = 8
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadFloat64x8Slice(vals[i:])
+			v := archsimd.LoadFloat64x8(vals[i:])
 			anyNaN = anyNaN.Or(v.IsNaN())
 			acc = acc.Min(v)
 		}
 		var tmp [8]float64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		hasNaN := anyNaN.ToBits() != 0
 		best := tmp[0]
 		for _, x := range tmp[1:] {
@@ -158,16 +158,16 @@ func simdMinFloat64(vals []float64) (float64, bool) {
 		return best, hasNaN
 	}
 	if archsimd.X86.AVX2() && n >= 4 {
-		acc := archsimd.LoadFloat64x4Slice(vals[:4])
+		acc := archsimd.LoadFloat64x4(vals[:4])
 		anyNaN := acc.IsNaN()
 		i = 4
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadFloat64x4Slice(vals[i:])
+			v := archsimd.LoadFloat64x4(vals[i:])
 			anyNaN = anyNaN.Or(v.IsNaN())
 			acc = acc.Min(v)
 		}
 		var tmp [4]float64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		hasNaN := anyNaN.ToBits() != 0
 		best := tmp[0]
 		for _, x := range tmp[1:] {
@@ -209,16 +209,16 @@ func simdMaxFloat64(vals []float64) (float64, bool) {
 	}
 	i := 0
 	if archsimd.X86.AVX512() && n >= 8 {
-		acc := archsimd.LoadFloat64x8Slice(vals[:8])
+		acc := archsimd.LoadFloat64x8(vals[:8])
 		anyNaN := acc.IsNaN()
 		i = 8
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadFloat64x8Slice(vals[i:])
+			v := archsimd.LoadFloat64x8(vals[i:])
 			anyNaN = anyNaN.Or(v.IsNaN())
 			acc = acc.Max(v)
 		}
 		var tmp [8]float64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		hasNaN := anyNaN.ToBits() != 0
 		best := tmp[0]
 		for _, x := range tmp[1:] {
@@ -239,16 +239,16 @@ func simdMaxFloat64(vals []float64) (float64, bool) {
 		return best, hasNaN
 	}
 	if archsimd.X86.AVX2() && n >= 4 {
-		acc := archsimd.LoadFloat64x4Slice(vals[:4])
+		acc := archsimd.LoadFloat64x4(vals[:4])
 		anyNaN := acc.IsNaN()
 		i = 4
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadFloat64x4Slice(vals[i:])
+			v := archsimd.LoadFloat64x4(vals[i:])
 			anyNaN = anyNaN.Or(v.IsNaN())
 			acc = acc.Max(v)
 		}
 		var tmp [4]float64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		hasNaN := anyNaN.ToBits() != 0
 		best := tmp[0]
 		for _, x := range tmp[1:] {
@@ -294,8 +294,8 @@ func simdCompareInt64(av, bv []int64, bits []byte, op compareOp) int {
 	if archsimd.X86.AVX512() {
 		// 8 lanes per iteration → one byte per iteration. n/8 full bytes.
 		for ; i+8 <= n; i += 8 {
-			va := archsimd.LoadInt64x8Slice(av[i:])
-			vb := archsimd.LoadInt64x8Slice(bv[i:])
+			va := archsimd.LoadInt64x8(av[i:])
+			vb := archsimd.LoadInt64x8(bv[i:])
 			var m archsimd.Mask64x8
 			switch op {
 			case opGt:
@@ -317,10 +317,10 @@ func simdCompareInt64(av, bv []int64, bits []byte, op compareOp) int {
 		// 4 lanes per iteration → 4 bits. Pair two iterations to fill a
 		// byte so the write pattern still maps cleanly to the bitmap.
 		for ; i+8 <= n; i += 8 {
-			la := archsimd.LoadInt64x4Slice(av[i:])
-			lb := archsimd.LoadInt64x4Slice(bv[i:])
-			ha := archsimd.LoadInt64x4Slice(av[i+4:])
-			hb := archsimd.LoadInt64x4Slice(bv[i+4:])
+			la := archsimd.LoadInt64x4(av[i:])
+			lb := archsimd.LoadInt64x4(bv[i:])
+			ha := archsimd.LoadInt64x4(av[i+4:])
+			hb := archsimd.LoadInt64x4(bv[i+4:])
 			var ml, mh archsimd.Mask64x4
 			switch op {
 			case opGt:
@@ -354,8 +354,8 @@ func simdCompareFloat64(av, bv []float64, bits []byte, op compareOp) int {
 	i := 0
 	if archsimd.X86.AVX512() {
 		for ; i+8 <= n; i += 8 {
-			va := archsimd.LoadFloat64x8Slice(av[i:])
-			vb := archsimd.LoadFloat64x8Slice(bv[i:])
+			va := archsimd.LoadFloat64x8(av[i:])
+			vb := archsimd.LoadFloat64x8(bv[i:])
 			var m archsimd.Mask64x8
 			switch op {
 			case opGt:
@@ -375,10 +375,10 @@ func simdCompareFloat64(av, bv []float64, bits []byte, op compareOp) int {
 		}
 	} else if archsimd.X86.AVX2() {
 		for ; i+8 <= n; i += 8 {
-			la := archsimd.LoadFloat64x4Slice(av[i:])
-			lb := archsimd.LoadFloat64x4Slice(bv[i:])
-			ha := archsimd.LoadFloat64x4Slice(av[i+4:])
-			hb := archsimd.LoadFloat64x4Slice(bv[i+4:])
+			la := archsimd.LoadFloat64x4(av[i:])
+			lb := archsimd.LoadFloat64x4(bv[i:])
+			ha := archsimd.LoadFloat64x4(av[i+4:])
+			hb := archsimd.LoadFloat64x4(bv[i+4:])
 			var ml, mh archsimd.Mask64x4
 			switch op {
 			case opGt:
@@ -419,9 +419,9 @@ func simdBlendInt64(condBits []byte, aVals, bVals, out []int64) {
 		// 8 lanes per iteration - one byte of the bitmap per step.
 		for ; i+8 <= n; i += 8 {
 			m := archsimd.Mask64x8FromBits(condBits[i>>3])
-			va := archsimd.LoadInt64x8Slice(aVals[i:])
-			vb := archsimd.LoadInt64x8Slice(bVals[i:])
-			va.Merge(vb, m).StoreSlice(out[i:])
+			va := archsimd.LoadInt64x8(aVals[i:])
+			vb := archsimd.LoadInt64x8(bVals[i:])
+			va.Merge(vb, m).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		// Delegate to the AVX2 asm kernel (4 int64s per iteration
@@ -442,9 +442,9 @@ func simdBlendFloat64(condBits []byte, aVals, bVals, out []float64) {
 	if archsimd.X86.AVX512() {
 		for ; i+8 <= n; i += 8 {
 			m := archsimd.Mask64x8FromBits(condBits[i>>3])
-			va := archsimd.LoadFloat64x8Slice(aVals[i:])
-			vb := archsimd.LoadFloat64x8Slice(bVals[i:])
-			va.Merge(vb, m).StoreSlice(out[i:])
+			va := archsimd.LoadFloat64x8(aVals[i:])
+			vb := archsimd.LoadFloat64x8(bVals[i:])
+			va.Merge(vb, m).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		// Int64 bit-blend works on float64 bit patterns too.
@@ -471,7 +471,7 @@ func simdCompareInt64Lit(av []int64, lit int64, bits []byte, op compareOp) int {
 	if archsimd.X86.AVX512() {
 		litVec := archsimd.BroadcastInt64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			va := archsimd.LoadInt64x8Slice(av[i:])
+			va := archsimd.LoadInt64x8(av[i:])
 			var m archsimd.Mask64x8
 			switch op {
 			case opGt:
@@ -492,8 +492,8 @@ func simdCompareInt64Lit(av []int64, lit int64, bits []byte, op compareOp) int {
 	} else if archsimd.X86.AVX2() {
 		litVec := archsimd.BroadcastInt64x4(lit)
 		for ; i+8 <= n; i += 8 {
-			la := archsimd.LoadInt64x4Slice(av[i:])
-			ha := archsimd.LoadInt64x4Slice(av[i+4:])
+			la := archsimd.LoadInt64x4(av[i:])
+			ha := archsimd.LoadInt64x4(av[i+4:])
 			var ml, mh archsimd.Mask64x4
 			switch op {
 			case opGt:
@@ -528,7 +528,7 @@ func simdCompareFloat64Lit(av []float64, lit float64, bits []byte, op compareOp)
 	if archsimd.X86.AVX512() {
 		litVec := archsimd.BroadcastFloat64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			va := archsimd.LoadFloat64x8Slice(av[i:])
+			va := archsimd.LoadFloat64x8(av[i:])
 			var m archsimd.Mask64x8
 			switch op {
 			case opGt:
@@ -549,8 +549,8 @@ func simdCompareFloat64Lit(av []float64, lit float64, bits []byte, op compareOp)
 	} else if archsimd.X86.AVX2() {
 		litVec := archsimd.BroadcastFloat64x4(lit)
 		for ; i+8 <= n; i += 8 {
-			la := archsimd.LoadFloat64x4Slice(av[i:])
-			ha := archsimd.LoadFloat64x4Slice(av[i+4:])
+			la := archsimd.LoadFloat64x4(av[i:])
+			ha := archsimd.LoadFloat64x4(av[i+4:])
 			var ml, mh archsimd.Mask64x4
 			switch op {
 			case opGt:
@@ -587,14 +587,14 @@ func simdAddLitInt64(src []int64, lit int64, out []int64) int {
 	if archsimd.X86.AVX512() {
 		litV := archsimd.BroadcastInt64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadInt64x8Slice(src[i:])
-			v.Add(litV).StoreSlice(out[i:])
+			v := archsimd.LoadInt64x8(src[i:])
+			v.Add(litV).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		litV := archsimd.BroadcastInt64x4(lit)
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadInt64x4Slice(src[i:])
-			v.Add(litV).StoreSlice(out[i:])
+			v := archsimd.LoadInt64x4(src[i:])
+			v.Add(litV).Store(out[i:])
 		}
 	}
 	return i
@@ -606,14 +606,14 @@ func simdSubLitInt64(src []int64, lit int64, out []int64) int {
 	if archsimd.X86.AVX512() {
 		litV := archsimd.BroadcastInt64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadInt64x8Slice(src[i:])
-			v.Sub(litV).StoreSlice(out[i:])
+			v := archsimd.LoadInt64x8(src[i:])
+			v.Sub(litV).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		litV := archsimd.BroadcastInt64x4(lit)
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadInt64x4Slice(src[i:])
-			v.Sub(litV).StoreSlice(out[i:])
+			v := archsimd.LoadInt64x4(src[i:])
+			v.Sub(litV).Store(out[i:])
 		}
 	}
 	return i
@@ -625,14 +625,14 @@ func simdAddLitFloat64(src []float64, lit float64, out []float64) int {
 	if archsimd.X86.AVX512() {
 		litV := archsimd.BroadcastFloat64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadFloat64x8Slice(src[i:])
-			v.Add(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x8(src[i:])
+			v.Add(litV).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		litV := archsimd.BroadcastFloat64x4(lit)
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadFloat64x4Slice(src[i:])
-			v.Add(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x4(src[i:])
+			v.Add(litV).Store(out[i:])
 		}
 	}
 	return i
@@ -644,14 +644,14 @@ func simdSubLitFloat64(src []float64, lit float64, out []float64) int {
 	if archsimd.X86.AVX512() {
 		litV := archsimd.BroadcastFloat64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadFloat64x8Slice(src[i:])
-			v.Sub(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x8(src[i:])
+			v.Sub(litV).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		litV := archsimd.BroadcastFloat64x4(lit)
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadFloat64x4Slice(src[i:])
-			v.Sub(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x4(src[i:])
+			v.Sub(litV).Store(out[i:])
 		}
 	}
 	return i
@@ -663,14 +663,14 @@ func simdMulLitFloat64(src []float64, lit float64, out []float64) int {
 	if archsimd.X86.AVX512() {
 		litV := archsimd.BroadcastFloat64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadFloat64x8Slice(src[i:])
-			v.Mul(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x8(src[i:])
+			v.Mul(litV).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		litV := archsimd.BroadcastFloat64x4(lit)
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadFloat64x4Slice(src[i:])
-			v.Mul(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x4(src[i:])
+			v.Mul(litV).Store(out[i:])
 		}
 	}
 	return i
@@ -682,14 +682,14 @@ func simdDivLitFloat64(src []float64, lit float64, out []float64) int {
 	if archsimd.X86.AVX512() {
 		litV := archsimd.BroadcastFloat64x8(lit)
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadFloat64x8Slice(src[i:])
-			v.Div(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x8(src[i:])
+			v.Div(litV).Store(out[i:])
 		}
 	} else if archsimd.X86.AVX2() {
 		litV := archsimd.BroadcastFloat64x4(lit)
 		for ; i+4 <= n; i += 4 {
-			v := archsimd.LoadFloat64x4Slice(src[i:])
-			v.Div(litV).StoreSlice(out[i:])
+			v := archsimd.LoadFloat64x4(src[i:])
+			v.Div(litV).Store(out[i:])
 		}
 	}
 	return i
@@ -707,34 +707,34 @@ func simdSumFloat64(a []float64) float64 {
 	if archsimd.X86.AVX512() {
 		var a0, a1, a2, a3 archsimd.Float64x8
 		for ; i+32 <= n; i += 32 {
-			a0 = a0.Add(archsimd.LoadFloat64x8Slice(a[i:]))
-			a1 = a1.Add(archsimd.LoadFloat64x8Slice(a[i+8:]))
-			a2 = a2.Add(archsimd.LoadFloat64x8Slice(a[i+16:]))
-			a3 = a3.Add(archsimd.LoadFloat64x8Slice(a[i+24:]))
+			a0 = a0.Add(archsimd.LoadFloat64x8(a[i:]))
+			a1 = a1.Add(archsimd.LoadFloat64x8(a[i+8:]))
+			a2 = a2.Add(archsimd.LoadFloat64x8(a[i+16:]))
+			a3 = a3.Add(archsimd.LoadFloat64x8(a[i+24:]))
 		}
 		acc := a0.Add(a1).Add(a2.Add(a3))
 		for ; i+8 <= n; i += 8 {
-			acc = acc.Add(archsimd.LoadFloat64x8Slice(a[i:]))
+			acc = acc.Add(archsimd.LoadFloat64x8(a[i:]))
 		}
 		var tmp [8]float64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		for _, x := range tmp {
 			total += x
 		}
 	} else if archsimd.X86.AVX2() {
 		var a0, a1, a2, a3 archsimd.Float64x4
 		for ; i+16 <= n; i += 16 {
-			a0 = a0.Add(archsimd.LoadFloat64x4Slice(a[i:]))
-			a1 = a1.Add(archsimd.LoadFloat64x4Slice(a[i+4:]))
-			a2 = a2.Add(archsimd.LoadFloat64x4Slice(a[i+8:]))
-			a3 = a3.Add(archsimd.LoadFloat64x4Slice(a[i+12:]))
+			a0 = a0.Add(archsimd.LoadFloat64x4(a[i:]))
+			a1 = a1.Add(archsimd.LoadFloat64x4(a[i+4:]))
+			a2 = a2.Add(archsimd.LoadFloat64x4(a[i+8:]))
+			a3 = a3.Add(archsimd.LoadFloat64x4(a[i+12:]))
 		}
 		acc := a0.Add(a1).Add(a2.Add(a3))
 		for ; i+4 <= n; i += 4 {
-			acc = acc.Add(archsimd.LoadFloat64x4Slice(a[i:]))
+			acc = acc.Add(archsimd.LoadFloat64x4(a[i:]))
 		}
 		var tmp [4]float64
-		acc.StoreSlice(tmp[:])
+		acc.Store(tmp[:])
 		for _, x := range tmp {
 			total += x
 		}

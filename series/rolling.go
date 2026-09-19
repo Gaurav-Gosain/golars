@@ -195,17 +195,291 @@ func rollingSumFloat64NoNull(
 
 // RollingMean returns the rolling average.
 func (s *Series) RollingMean(opts RollingOptions, callerOpts ...Option) (*Series, error) {
+	w, mp, err := opts.resolve()
+	if err != nil {
+		return nil, err
+	}
+	cfg := resolve(callerOpts)
+	chunk := s.Chunk(0)
+	n := chunk.Len()
+	// No-null fast paths mirror the sum specialisation, dividing by the
+	// window count. Totals accumulate in float64 like meanReducer; the
+	// fused slide matches it to float tolerance (same caveat as the
+	// sum specialisation, which also fuses add/remove).
+	switch a := chunk.(type) {
+	case *array.Int64:
+		if a.NullN() == 0 {
+			return rollingMeanInt64NoNull(s.Name(), a.Int64Values(), n, w, mp, cfg.alloc)
+		}
+	case *array.Float64:
+		if a.NullN() == 0 {
+			return rollingMeanFloat64NoNull(s.Name(), a.Float64Values(), n, w, mp, cfg.alloc)
+		}
+	}
 	return s.rollingReduce(opts, callerOpts, rollingMeanReducer, "RollingMean")
+}
+
+// rollingMeanInt64NoNull slides a float64 total over int64 values,
+// dividing by the full window once warm.
+func rollingMeanInt64NoNull(
+	name string, vals []int64, n, w, mp int, alloc memory.Allocator,
+) (*Series, error) {
+	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
+		if n == 0 {
+			return 0
+		}
+		var total float64
+		nulls := 0
+		warm := min(w, n)
+		for i := 0; i < warm; i++ {
+			total += float64(vals[i])
+			count := i + 1
+			if count >= mp {
+				out[i] = total / float64(count)
+				validBits[i>>3] |= 1 << uint(i&7)
+			} else {
+				nulls++
+			}
+		}
+		fw := float64(w)
+		i := warm
+		for ; i+4 <= n; i += 4 {
+			d0 := float64(vals[i+0]) - float64(vals[i+0-w])
+			d1 := float64(vals[i+1]) - float64(vals[i+1-w])
+			d2 := float64(vals[i+2]) - float64(vals[i+2-w])
+			d3 := float64(vals[i+3]) - float64(vals[i+3-w])
+			total += d0
+			out[i+0] = total / fw
+			total += d1
+			out[i+1] = total / fw
+			total += d2
+			out[i+2] = total / fw
+			total += d3
+			out[i+3] = total / fw
+			validBits[(i+0)>>3] |= 1 << uint((i+0)&7)
+			validBits[(i+1)>>3] |= 1 << uint((i+1)&7)
+			validBits[(i+2)>>3] |= 1 << uint((i+2)&7)
+			validBits[(i+3)>>3] |= 1 << uint((i+3)&7)
+		}
+		for ; i < n; i++ {
+			total += float64(vals[i]) - float64(vals[i-w])
+			out[i] = total / fw
+			validBits[i>>3] |= 1 << uint(i&7)
+		}
+		return nulls
+	})
+}
+
+func rollingMeanFloat64NoNull(
+	name string, vals []float64, n, w, mp int, alloc memory.Allocator,
+) (*Series, error) {
+	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
+		if n == 0 {
+			return 0
+		}
+		var total float64
+		nulls := 0
+		warm := min(w, n)
+		for i := 0; i < warm; i++ {
+			total += vals[i]
+			count := i + 1
+			if count >= mp {
+				out[i] = total / float64(count)
+				validBits[i>>3] |= 1 << uint(i&7)
+			} else {
+				nulls++
+			}
+		}
+		fw := float64(w)
+		i := warm
+		for ; i+4 <= n; i += 4 {
+			d0 := vals[i+0] - vals[i+0-w]
+			d1 := vals[i+1] - vals[i+1-w]
+			d2 := vals[i+2] - vals[i+2-w]
+			d3 := vals[i+3] - vals[i+3-w]
+			total += d0
+			out[i+0] = total / fw
+			total += d1
+			out[i+1] = total / fw
+			total += d2
+			out[i+2] = total / fw
+			total += d3
+			out[i+3] = total / fw
+			validBits[(i+0)>>3] |= 1 << uint((i+0)&7)
+			validBits[(i+1)>>3] |= 1 << uint((i+1)&7)
+			validBits[(i+2)>>3] |= 1 << uint((i+2)&7)
+			validBits[(i+3)>>3] |= 1 << uint((i+3)&7)
+		}
+		for ; i < n; i++ {
+			total += vals[i] - vals[i-w]
+			out[i] = total / fw
+			validBits[i>>3] |= 1 << uint(i&7)
+		}
+		return nulls
+	})
 }
 
 // RollingMin returns the rolling minimum.
 func (s *Series) RollingMin(opts RollingOptions, callerOpts ...Option) (*Series, error) {
-	return s.rollingReduce(opts, callerOpts, rollingMinReducer, "RollingMin")
+	return s.rollingMinMax(opts, callerOpts, true)
 }
 
 // RollingMax returns the rolling maximum.
 func (s *Series) RollingMax(opts RollingOptions, callerOpts ...Option) (*Series, error) {
-	return s.rollingReduce(opts, callerOpts, rollingMaxReducer, "RollingMax")
+	return s.rollingMinMax(opts, callerOpts, false)
+}
+
+// rollingMinMax dispatches to the monotonic-deque drivers below.
+func (s *Series) rollingMinMax(opts RollingOptions, callerOpts []Option, isMin bool) (*Series, error) {
+	w, mp, err := opts.resolve()
+	if err != nil {
+		return nil, err
+	}
+	name := "RollingMin"
+	if !isMin {
+		name = "RollingMax"
+	}
+	cfg := resolve(callerOpts)
+	chunk := s.Chunk(0)
+	n := chunk.Len()
+	switch a := chunk.(type) {
+	case *array.Int64:
+		vals := a.Int64Values()
+		off := a.Data().Offset()
+		if a.NullN() == 0 {
+			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
+		}
+		return rollingMinMaxNullable(s.Name(), vals, a.NullBitmapBytes(), off, n, w, mp, isMin, cfg.alloc)
+	case *array.Float64:
+		vals := a.Float64Values()
+		off := a.Data().Offset()
+		if a.NullN() == 0 {
+			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
+		}
+		return rollingMinMaxNullable(s.Name(), vals, a.NullBitmapBytes(), off, n, w, mp, isMin, cfg.alloc)
+	case *array.Int32:
+		vals := a.Int32Values()
+		off := a.Data().Offset()
+		if a.NullN() == 0 {
+			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
+		}
+		return rollingMinMaxNullable(s.Name(), vals, a.NullBitmapBytes(), off, n, w, mp, isMin, cfg.alloc)
+	}
+	return nil, fmt.Errorf("series: %s unsupported for dtype %s", name, s.DType())
+}
+
+// rollingOrdered covers the dtypes with deque min/max drivers.
+type rollingOrdered interface {
+	~int64 | ~float64 | ~int32
+}
+
+// rollingMinMaxNoNull is the O(1)-amortised deque driver for columns
+// without nulls. The deque holds window indices with monotonic
+// values, so the front is always the current min (or max) and both
+// insert and age-eviction are index operations. NaN never enters the
+// deque (an incomparable entry would barrier later minima); a NaN
+// surfaces exactly while it is the oldest entry, matching the scalar
+// scan it replaces.
+func rollingMinMaxNoNull[T rollingOrdered](
+	name string, vals []T, n, w, mp int, isMin bool, alloc memory.Allocator,
+) (*Series, error) {
+	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
+		if n == 0 {
+			return 0
+		}
+		var zero T
+		_, isFloat := any(zero).(float64)
+		dq := make([]int, 0, min(w, n)+1)
+		nulls := 0
+		for i := range n {
+			if ev := i - w; len(dq) > 0 && dq[0] <= ev {
+				dq = dq[1:]
+			}
+			vi := vals[i]
+			if !isFloat || !math.IsNaN(float64(vi)) {
+				if isMin {
+					for len(dq) > 0 && vals[dq[len(dq)-1]] >= vi {
+						dq = dq[:len(dq)-1]
+					}
+				} else {
+					for len(dq) > 0 && vals[dq[len(dq)-1]] <= vi {
+						dq = dq[:len(dq)-1]
+					}
+				}
+				dq = append(dq, i)
+			}
+			if i+1 >= mp {
+				oldest := i - w + 1
+				if oldest < 0 {
+					oldest = 0
+				}
+				if isFloat && math.IsNaN(float64(vals[oldest])) {
+					out[i] = math.NaN()
+				} else {
+					out[i] = float64(vals[dq[0]])
+				}
+				validBits[i>>3] |= 1 << uint(i&7)
+			} else {
+				nulls++
+			}
+		}
+		return nulls
+	})
+}
+
+// rollingMinMaxNullable is the deque driver for columns with nulls.
+// Only non-NaN valid indices enter the deque; a separate FIFO tracks
+// valid indices in age order so the oldest is always known. A NaN
+// surfaces exactly while it is the oldest valid entry.
+func rollingMinMaxNullable[T rollingOrdered](
+	name string, vals []T, nullBits []byte, off, n, w, mp int, isMin bool, alloc memory.Allocator,
+) (*Series, error) {
+	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
+		if n == 0 {
+			return 0
+		}
+		var zero T
+		_, isFloat := any(zero).(float64)
+		dq := make([]int, 0, min(w, n)+1)
+		order := make([]int, 0, min(w, n)+1)
+		nulls := 0
+		for i := range n {
+			ev := i - w
+			if len(dq) > 0 && dq[0] <= ev {
+				dq = dq[1:]
+			}
+			if len(order) > 0 && order[0] <= ev {
+				order = order[1:]
+			}
+			if nullBits[(i+off)>>3]&(1<<uint((i+off)&7)) != 0 {
+				order = append(order, i)
+				vi := vals[i]
+				if !isFloat || !math.IsNaN(float64(vi)) {
+					if isMin {
+						for len(dq) > 0 && vals[dq[len(dq)-1]] >= vi {
+							dq = dq[:len(dq)-1]
+						}
+					} else {
+						for len(dq) > 0 && vals[dq[len(dq)-1]] <= vi {
+							dq = dq[:len(dq)-1]
+						}
+					}
+					dq = append(dq, i)
+				}
+			}
+			if len(order) >= mp {
+				if oldest := order[0]; isFloat && math.IsNaN(float64(vals[oldest])) {
+					out[i] = math.NaN()
+				} else {
+					out[i] = float64(vals[dq[0]])
+				}
+				validBits[i>>3] |= 1 << uint(i&7)
+			} else {
+				nulls++
+			}
+		}
+		return nulls
+	})
 }
 
 // RollingStd returns the rolling sample standard deviation (ddof=1).
@@ -283,42 +557,6 @@ func (r *meanReducer) result(count int) float64 {
 	return r.total / float64(count)
 }
 
-type minMaxReducer struct {
-	// We keep a sorted multi-map as a simple sorted slice for correctness
-	// first. Future: monotonic deque for O(1) amortised updates.
-	vals  []float64
-	isMin bool
-}
-
-func (r *minMaxReducer) reset() { r.vals = r.vals[:0] }
-func (r *minMaxReducer) add(v float64) {
-	r.vals = append(r.vals, v)
-}
-func (r *minMaxReducer) remove(v float64) {
-	for i, x := range r.vals {
-		if x == v {
-			r.vals = append(r.vals[:i], r.vals[i+1:]...)
-			return
-		}
-	}
-}
-func (r *minMaxReducer) result(count int) float64 {
-	if count == 0 || len(r.vals) == 0 {
-		return math.NaN()
-	}
-	out := r.vals[0]
-	for _, v := range r.vals[1:] {
-		if r.isMin {
-			if v < out {
-				out = v
-			}
-		} else if v > out {
-			out = v
-		}
-	}
-	return out
-}
-
 type varReducer struct {
 	sum, sumSq float64
 	ddof       int
@@ -356,8 +594,6 @@ func (r *stdReducer) result(count int) float64 {
 }
 
 func rollingMeanReducer() rollingReducer { return &meanReducer{} }
-func rollingMinReducer() rollingReducer  { return &minMaxReducer{isMin: true} }
-func rollingMaxReducer() rollingReducer  { return &minMaxReducer{isMin: false} }
 func rollingStdReducer() rollingReducer  { return &stdReducer{v: varReducer{ddof: 1}} }
 func rollingVarReducer() rollingReducer  { return &varReducer{ddof: 1} }
 
@@ -394,8 +630,8 @@ func rollingReduceFused(
 }
 
 // rollingReduceFusedWithReducer is the general driver using the
-// rollingReducer interface. Slower than the sum specialisation but
-// handles min/max/std/var.
+// rollingReducer interface. Slower than the sum/min/max
+// specialisations but handles mean/std/var.
 func rollingReduceFusedWithReducer(
 	out []float64, validBits []byte, n, w, mp int,
 	get func(i int) (float64, bool),

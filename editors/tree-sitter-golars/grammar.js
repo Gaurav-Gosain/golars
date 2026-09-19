@@ -16,7 +16,11 @@ module.exports = grammar({
 
   externals: $ => [],
 
-  conflicts: $ => [],
+  conflicts: $ => [
+    [$._arg, $._expr_operand],
+    [$._arg, $._expr_operand, $.method_call],
+    [$._expr_operand, $.method_call],
+  ],
 
   rules: {
     source_file: $ => repeat(choice(
@@ -74,7 +78,33 @@ module.exports = grammar({
       $.boolean,
       $.agg_spec,
       $.identifier,
+      $.expr,
+      '=',
+      '.',
+      '(', ')', ',', '/', '%', '+', '*', '!', '&', '|',
     ),
+
+    expr: $ => choice(
+      prec.left(1, seq($._expr_operand, repeat1(seq(
+        choice('+', '-', '*', '/', '%'),
+        $._expr_operand,
+      )))),
+      $._expr_operand,
+    ),
+    _expr_operand: $ => choice(
+      prec(1, $.method_call),
+      $.number,
+      $.string,
+      $.boolean,
+      $.identifier,
+      seq('(', $.expr, ')'),
+      seq('-', $._expr_operand),
+    ),
+    method_call: $ => prec.left(seq(
+      field('receiver', $.identifier),
+      repeat(seq('.', field('method', $.identifier))),
+      '(', optional(seq($.expr, repeat(seq(',', $.expr)))), ')',
+    )),
 
     // Structural keywords.
     keyword: $ => choice(

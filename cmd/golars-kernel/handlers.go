@@ -130,27 +130,31 @@ func (k *kernel) errorReply(msg message, count int64, name, evalue string) {
 // suggestions are limited to commands and structural keywords. Worth
 // a follow-up: let kernel-host expose a `complete` request.
 func (k *kernel) handleComplete(msg message) {
-	code, _ := msg.Content["code"].(string)
+	text, _ := msg.Content["code"].(string)
+	code := []rune(text)
 	posF, _ := msg.Content["cursor_pos"].(float64)
-	pos := int(posF)
-	pos = min(pos, len(code))
+	pos := max(0, min(int(posF), len(code)))
 
 	// Walk back to the start of the current word.
 	start := pos
 	for start > 0 {
 		c := code[start-1]
-		if !isIdentByte(c) && c != '.' {
+		if !isIdentRune(c) && c != '.' {
 			break
 		}
 		start--
 	}
-	prefix := code[start:pos]
+	prefix := string(code[start:pos])
+	dot := ""
+	if strings.HasPrefix(prefix, ".") {
+		dot = "."
+	}
 	prefix = strings.TrimPrefix(prefix, ".")
 
 	matches := []string{}
 	for _, c := range script.Commands {
 		if strings.HasPrefix(c.Name, prefix) {
-			matches = append(matches, c.Name)
+			matches = append(matches, dot+c.Name)
 		}
 	}
 
@@ -183,24 +187,24 @@ func (k *kernel) handleIsComplete(msg message) {
 // handleInspect: docs lookup keyed off the word at cursor_pos. Returns
 // the CommandSpec long doc as text/markdown when available.
 func (k *kernel) handleInspect(msg message) {
-	code, _ := msg.Content["code"].(string)
+	text, _ := msg.Content["code"].(string)
+	code := []rune(text)
 	posF, _ := msg.Content["cursor_pos"].(float64)
-	pos := int(posF)
-	pos = min(pos, len(code))
+	pos := max(0, min(int(posF), len(code)))
 	// Word under cursor: scan both directions across identifier chars.
 	left, right := pos, pos
-	for left > 0 && (isIdentByte(code[left-1]) || code[left-1] == '.') {
+	for left > 0 && (isIdentRune(code[left-1]) || code[left-1] == '.') {
 		left--
 	}
-	for right < len(code) && (isIdentByte(code[right]) || code[right] == '.') {
+	for right < len(code) && (isIdentRune(code[right]) || code[right] == '.') {
 		right++
 	}
-	word := strings.TrimPrefix(code[left:right], ".")
+	word := strings.TrimPrefix(string(code[left:right]), ".")
 
 	content := map[string]any{
-		"status": "ok",
-		"found":  false,
-		"data":   map[string]any{},
+		"status":   "ok",
+		"found":    false,
+		"data":     map[string]any{},
 		"metadata": map[string]any{},
 	}
 	if spec := script.FindCommand(word); spec != nil {
@@ -213,7 +217,7 @@ func (k *kernel) handleInspect(msg message) {
 	_ = k.send(k.shell, reply(msg, "inspect_reply", content))
 }
 
-func isIdentByte(c byte) bool {
+func isIdentRune(c rune) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
 		(c >= '0' && c <= '9') || c == '_'
 }

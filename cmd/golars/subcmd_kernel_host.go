@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/jupyter/render"
+	"github.com/Gaurav-Gosain/golars/script"
 )
 
 // ansiCSI matches CSI sequences (colour, cursor moves) so the
@@ -52,12 +53,12 @@ type kernelRequest struct {
 // of stdout, since the auto-display HTML covers the same data.
 func lastLineIsDisplayCommand(code string) bool {
 	for _, raw := range reverse(strings.Split(code, "\n")) {
-		l := strings.TrimSpace(raw)
+		l := script.Normalize(raw)
 		if l == "" || strings.HasPrefix(l, "#") {
 			continue
 		}
 		l = strings.TrimPrefix(l, ".")
-		first, _, _ := strings.Cut(l, " ")
+		first := strings.ToLower(strings.Fields(l)[0])
 		switch first {
 		case "show", "head", "tail", "collect", "describe":
 			return true
@@ -105,11 +106,11 @@ func stripTrailingTable(text string) string {
 }
 
 type kernelResponse struct {
-	ID     string `json:"id"`
-	Text   string `json:"text"`
-	Stderr string `json:"stderr"`
-	HTML   string `json:"html"`
-	Error  string `json:"error,omitempty"`
+	ID     string  `json:"id"`
+	Text   string  `json:"text"`
+	Stderr string  `json:"stderr"`
+	HTML   string  `json:"html"`
+	Error  string  `json:"error,omitempty"`
 	Shape  *[2]int `json:"shape,omitempty"`
 }
 
@@ -200,17 +201,8 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 	// state from a previous cell.
 	startDF := s.df
 	startLF := s.lf
-	var execErr error
-	for _, raw := range strings.Split(req.Code, "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if err := s.handle(line); err != nil {
-			execErr = err
-			break
-		}
-	}
+	runner := script.Runner{Exec: script.ExecutorFunc(s.handle)}
+	execErr := runner.Run(strings.NewReader(req.Code), "<cell>")
 	focusChanged := s.df != startDF || s.lf != startLF
 
 	stdoutW.Close()
@@ -232,16 +224,18 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 	// pay full Collect() cost just for a preview. Skip entirely when
 	// the cell didn't touch the focus (pure `load X as NAME` cells, or
 	// REPL-only commands).
-	if focusChanged {
+	if focusChanged && execErr == nil && !lastLineIsDisplayCommand(req.Code) {
 		display := s.df
 		var collected *dataframe.DataFrame
 		if s.lf != nil {
 			preview := s.lf.Limit(200)
 			out, err := preview.Collect(s.ctx)
-			if err == nil {
-				collected = out
-				display = out
+			if err != nil {
+				resp.Error = err.Error()
+				return resp
 			}
+			collected = out
+			display = out
 		}
 		if display != nil {
 			resp.HTML = render.HTML(display)

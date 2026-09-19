@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -98,6 +99,64 @@ func (p *framedPipe) readFrame(t *testing.T) map[string]any {
 func runServer(p *framedPipe) {
 	srv := newServer(p.toServer, p.fromServer, io.Discard)
 	srv.Run() // #nosec: errors surface as test failures via readFrame
+}
+
+func TestLSPDefensiveFraming(t *testing.T) {
+	for _, input := range []string{
+		"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+		fmt.Sprintf("Content-Length: %d\r\n\r\n", maxMessageBytes+1),
+		strings.Repeat("X", maxHeaderBytes+1),
+		"Content-Length: 2\r\n\r\n",
+		"Content-Length:",
+	} {
+		s := newServer(strings.NewReader(input), io.Discard, io.Discard)
+		if err := s.Run(); err == nil {
+			t.Fatal("expected framing error")
+		}
+	}
+}
+
+type failedWriter struct{}
+
+func (failedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestLSPWriteFailure(t *testing.T) {
+	p := newFramedPipe()
+	p.writeFrame("initialize", 1, map[string]any{})
+	s := newServer(p.toServer, failedWriter{}, io.Discard)
+	if err := s.Run(); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("got %v, want closed pipe", err)
+	}
+}
+
+func TestLSPInlayRangesOutsideDocument(t *testing.T) {
+	d := newDocStore().set("untitled:test", "select a\n# ^?", 1)
+	for _, rng := range []lspRange{
+		{Start: position{Line: 4}, End: position{Line: 6}},
+		{Start: position{Line: 1}, End: position{Line: 0}},
+		{Start: position{Character: 5}, End: position{Character: 2}},
+	} {
+		if got := collectInlayHints(d, rng); len(got) != 0 {
+			t.Fatalf("unexpected hints: %v", got)
+		}
+	}
+}
+
+func TestLSPProbeUsesStaticSchema(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	d := newDocStore().set("untitled:test", "select alpha,beta\n# ^?", 1)
+	if got := renderProbeTooltip(d, 1); !strings.Contains(got, "cols(alpha, beta)") {
+		t.Fatalf("static tooltip = %q", got)
+	}
+	for _, line := range []int{-1, 2} {
+		if got := renderProbeTooltip(d, line); got != "" {
+			t.Fatalf("unexpected tooltip: %q", got)
+		}
+	}
+	hints := collectInlayHints(d, lspRange{End: position{Line: 1, Character: 4}})
+	if len(hints) != 2 || hints[1].Tooltip == nil || hints[1].Tooltip.Kind != "plaintext" {
+		t.Fatalf("unexpected static hints: %v", hints)
+	}
 }
 
 func TestLSPInitialize(t *testing.T) {

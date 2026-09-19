@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -175,9 +176,7 @@ func (s *state) handle(line string) error {
 	// Accept both ".cmd args..." (REPL style) and "cmd args..."
 	// (script style). Strip inline comments so pasted script lines
 	// work in the REPL too.
-	if i := strings.IndexByte(line, '#'); i >= 0 {
-		line = strings.TrimSpace(line[:i])
-	}
+	line = script.Normalize(line)
 	if line == "" {
 		return nil
 	}
@@ -1028,9 +1027,10 @@ func parseNat(s string) (int, bool) {
 		if c < '0' || c > '9' {
 			return 0, false
 		}
-		n = n*10 + int(c-'0')
 	}
-	return n, true
+	var err error
+	n, err = strconv.Atoi(s)
+	return n, err == nil
 }
 
 func printErr(err error) {

@@ -66,7 +66,7 @@ func newFmtCmd() *cobra.Command {
 // intact).
 func formatGlr(src string) string {
 	var buf strings.Builder
-	for raw := range strings.SplitSeq(src, "\n") {
+	for raw := range strings.SplitSeq(strings.TrimSuffix(src, "\n"), "\n") {
 		line := raw
 		trimmed := strings.TrimSpace(line)
 		// Empty or comment line: preserve original whitespace.
@@ -102,15 +102,24 @@ func formatGlr(src string) string {
 func splitKeepQuoted(s string) []string {
 	var out []string
 	var cur strings.Builder
-	inQuote := false
+	inQuote := byte(0)
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c == '"' {
-			inQuote = !inQuote
-			cur.WriteByte(c)
+		if c == '\\' && i+1 < len(s) {
+			cur.WriteString(s[i : i+2])
+			i++
 			continue
 		}
-		if !inQuote && (c == ' ' || c == '\t') {
+		if c == '#' && inQuote == 0 {
+			cur.WriteString(s[i:])
+			break
+		}
+		if c == inQuote {
+			inQuote = 0
+		} else if inQuote == 0 && (c == '"' || c == '\'') {
+			inQuote = c
+		}
+		if inQuote == 0 && (c == ' ' || c == '\t') {
 			if cur.Len() > 0 {
 				out = append(out, cur.String())
 				cur.Reset()

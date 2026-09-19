@@ -60,8 +60,8 @@ func CompleteFromList(current string, items []string, sep rune) string {
 	}
 	prefix := current
 	if sep != 0 {
-		if i := strings.LastIndexByte(current, byte(sep)); i >= 0 {
-			prefix = strings.TrimLeft(current[i+1:], " \t")
+		if i := strings.LastIndex(current, string(sep)); i >= 0 {
+			prefix = strings.TrimLeft(current[i+len(string(sep)):], " \t")
 		}
 	}
 	if prefix == "" {
@@ -100,7 +100,7 @@ func CompletePath(current, cwd string) string {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if len(name) > len(base) && strings.HasPrefix(name, base) {
+		if strings.HasPrefix(name, base) && (len(name) > len(base) || e.IsDir()) {
 			suffix := name[len(base):]
 			if e.IsDir() {
 				suffix += "/"

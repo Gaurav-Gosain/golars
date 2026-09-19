@@ -89,15 +89,9 @@ type trans struct {
 }
 
 func (t *trans) walk() error {
-	for line := range splitLines(t.src) {
-		raw := line
-		stmt := script.Normalize(raw)
-		if stmt == "" {
-			continue
-		}
-		if err := t.handle(stmt); err != nil {
-			return fmt.Errorf("line %q: %w", raw, err)
-		}
+	runner := script.Runner{Exec: script.ExecutorFunc(t.handle)}
+	if err := runner.Run(strings.NewReader(t.src), "<script>"); err != nil {
+		return err
 	}
 	// Implicit display when the script never materialised: flush any
 	// pending chain into focus, then print.
@@ -115,7 +109,7 @@ func (t *trans) walk() error {
 
 func (t *trans) handle(stmt string) error {
 	parts := strings.Fields(stmt)
-	cmd := strings.TrimPrefix(parts[0], ".")
+	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "."))
 	args := parts[1:]
 	rest := strings.TrimSpace(strings.TrimPrefix(stmt, parts[0]))
 

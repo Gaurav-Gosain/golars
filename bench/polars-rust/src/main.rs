@@ -5,6 +5,7 @@
 
 use polars::lazy::frame::OptFlags;
 use polars::prelude::*;
+use polars_ops::series::{RankMethod, RankOptions};
 use rand::distributions::Uniform;
 use rand::prelude::*;
 use rand_pcg::Pcg64;
@@ -406,6 +407,30 @@ fn bench_groupby_sum(n: usize, groups: i64) -> Result {
     }
 }
 
+fn bench_groupby_sum_multikey(n: usize) -> Result {
+    const REGIONS: [&str; 8] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
+    let regions: Vec<&str> = (0..n).map(|i| REGIONS[i % 8]).collect();
+    let years: Vec<i64> = (0..n).map(|i| 2020 + (i % 5) as i64).collect();
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("region" => regions, "year" => years, "v" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .group_by([col("region"), col("year")])
+            .agg([col("v").sum().alias("s")])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "GroupBySumMultiKey".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 24, t),
+    }
+}
+
 fn bench_groupby_mean(n: usize, groups: i64) -> Result {
     let mut r = rng(SEED);
     let d = Uniform::new(0i64, groups);
@@ -580,6 +605,87 @@ fn bench_rolling_sum(n: usize) -> Result {
     }
 }
 
+fn bench_rolling_min(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let opts = RollingOptionsFixedWindow {
+        window_size: 32,
+        min_periods: 32,
+        weights: None,
+        center: false,
+        fn_params: None,
+    };
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rolling_min(opts.clone())])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RollingMin(w=32)".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
+fn bench_rolling_max(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let opts = RollingOptionsFixedWindow {
+        window_size: 32,
+        min_periods: 32,
+        weights: None,
+        center: false,
+        fn_params: None,
+    };
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rolling_max(opts.clone())])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RollingMax(w=32)".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
+fn bench_rolling_mean(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let opts = RollingOptionsFixedWindow {
+        window_size: 32,
+        min_periods: 32,
+        weights: None,
+        center: false,
+        fn_params: None,
+    };
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rolling_mean(opts.clone())])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RollingMean(w=32)".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
 fn bench_when_then(n: usize) -> Result {
     let a = rand_i64(n, 1 << 20);
     let mut r = rng(SEED ^ 1);
@@ -623,6 +729,29 @@ fn bench_over_sum(n: usize) -> Result {
     });
     Result {
         name: "SumOverGroup".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 16, t),
+    }
+}
+
+fn bench_cumsum_over_group(n: usize) -> Result {
+    let mut r = rng(SEED);
+    let d = Uniform::new(0i64, 64);
+    let keys: Vec<i64> = (0..n).map(|_| r.sample(d)).collect();
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("k" => keys, "v" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("v").cum_sum(false).over([col("k")]).alias("cum")])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "CumSumOverGroup".into(),
         rows: n,
         median_ns: t,
         throughput_mbps: mbps(n * 16, t),
@@ -718,6 +847,52 @@ fn bench_unique_int64(n: usize) -> Result {
     });
     Result {
         name: "UniqueInt64".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
+fn bench_top_k(n: usize, k: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").top_k(lit(k as u32))])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: format!("TopK(k={})", k),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
+fn bench_rank(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rank(
+                RankOptions {
+                    method: RankMethod::Average,
+                    descending: false,
+                },
+                None,
+            )])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RankInt64".into(),
         rows: n,
         median_ns: t,
         throughput_mbps: mbps(n * 8, t),
@@ -835,6 +1010,7 @@ fn main() {
             out.push(bench_groupby_mean(n, g));
             out.push(bench_groupby_multi_agg(n, g));
         }
+        out.push(bench_groupby_sum_multikey(n));
     }
 
     for &n in &[16_384usize, 262_144] {
@@ -856,6 +1032,8 @@ fn main() {
 
     for &n in &[16_384usize, 262_144] {
         out.push(bench_unique_int64(n));
+        out.push(bench_top_k(n, 10));
+        out.push(bench_rank(n));
     }
 
     for &n in &sizes {
@@ -871,11 +1049,15 @@ fn main() {
 
     for &n in &sizes {
         out.push(bench_rolling_sum(n));
+        out.push(bench_rolling_min(n));
+        out.push(bench_rolling_max(n));
+        out.push(bench_rolling_mean(n));
     }
 
     for &n in &[16_384usize, 262_144] {
         out.push(bench_when_then(n));
         out.push(bench_over_sum(n));
+        out.push(bench_cumsum_over_group(n));
     }
 
     #[derive(Serialize)]

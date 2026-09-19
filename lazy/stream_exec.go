@@ -37,7 +37,8 @@ func WithStreamingMorselRows(n int) ExecOption {
 
 // WithStreamingWorkers sets the number of worker goroutines inside each
 // streaming stage. Values <= 1 use the serial stage. Output order is
-// preserved regardless of worker count.
+// preserved regardless of worker count. Unset (the default) uses
+// min(GOMAXPROCS, 8).
 func WithStreamingWorkers(n int) ExecOption {
 	return func(c *execConfig) {
 		if n > 0 {
@@ -67,6 +68,11 @@ func executeMaybeStreaming(ctx context.Context, cfg execConfig, plan Node) (*dat
 // errStreamNotApplicable if any node in the chain is a blocker.
 func executeStreaming(ctx context.Context, cfg execConfig, plan Node) (*dataframe.DataFrame, error) {
 	streamCfg := buildStreamConfig(cfg)
+	if h, ok := scanHeight(plan); ok && h <= streamCfg.MorselRows {
+		// Single morsel: the pipeline (channels, goroutines, concat)
+		// costs more than it parallelises. Same kernels, same result.
+		return executeNode(ctx, cfg, plan)
+	}
 	src, stages, ok := compilePipeline(plan, streamCfg, cfg.workers)
 	if !ok {
 		return nil, errStreamNotApplicable
@@ -203,6 +209,35 @@ func withColumnsStage(cfg stream.Config, exprs []expr.Expr, workers int) stream.
 		return stream.ParallelWithColumnsStage(cfg, exprs, workers)
 	}
 	return stream.WithColumnsStage(cfg, exprs)
+}
+
+// scanHeight returns the source frame height when the plan bottoms
+// out at a single DataFrameScan, which every streaming-friendly plan
+// does (compilePipeline rejects anything else).
+func scanHeight(plan Node) (int, bool) {
+	for {
+		switch n := plan.(type) {
+		case DataFrameScan:
+			if n.Source == nil {
+				return 0, false
+			}
+			return n.Source.Height(), true
+		case Projection:
+			plan = n.Input
+		case WithColumns:
+			plan = n.Input
+		case Filter:
+			plan = n.Input
+		case Rename:
+			plan = n.Input
+		case Drop:
+			plan = n.Input
+		case SliceNode:
+			plan = n.Input
+		default:
+			return 0, false
+		}
+	}
 }
 
 func buildStreamConfig(cfg execConfig) stream.Config {

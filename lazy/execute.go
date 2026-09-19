@@ -3,6 +3,7 @@ package lazy
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -11,6 +12,7 @@ import (
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/eval"
 	"github.com/Gaurav-Gosain/golars/expr"
+	"github.com/Gaurav-Gosain/golars/internal/pool"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -30,6 +32,14 @@ func resolveExec(opts []ExecOption) execConfig {
 	c := execConfig{alloc: memory.DefaultAllocator}
 	for _, o := range opts {
 		o(&c)
+	}
+	if c.workers <= 0 {
+		// Parallel streaming stages by default: inter-morsel work is
+		// independent and ordered output is preserved. Explicit
+		// WithStreamingWorkers(1) still selects the serial stages.
+		// Capped like the other fan-outs so in-flight morsels stay
+		// memory-bounded.
+		c.workers = min(runtime.GOMAXPROCS(0), 8)
 	}
 	return c
 }
@@ -205,6 +215,37 @@ func executeProjection(ctx context.Context, cfg execConfig, p Projection) (*data
 	defer input.Release()
 
 	cols := make([]*series.Series, len(p.Exprs))
+	if len(p.Exprs) >= parallelSelectMinExprs {
+		// Fan out independent column evaluations. Each worker writes
+		// its own slot; on error every completed slot is released.
+		// WithColumns stays serial: later exprs observe earlier ones.
+		g := pool.NewGroup(ctx, 0)
+		for i, e := range p.Exprs {
+			g.Go(func(gctx context.Context) error {
+				s, err := eval.Eval(gctx, eval.EvalContext{Alloc: cfg.alloc}, e, input)
+				if err != nil {
+					return fmt.Errorf("projection %s: %w", e, err)
+				}
+				name := expr.OutputName(e)
+				if s.Name() != name {
+					renamed := s.Rename(name)
+					s.Release()
+					s = renamed
+				}
+				cols[i] = s
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			for _, c := range cols {
+				if c != nil {
+					c.Release()
+				}
+			}
+			return nil, err
+		}
+		return dataframe.New(cols...)
+	}
 	for i, e := range p.Exprs {
 		s, err := eval.Eval(ctx, eval.EvalContext{Alloc: cfg.alloc}, e, input)
 		if err != nil {
@@ -225,6 +266,12 @@ func executeProjection(ctx context.Context, cfg execConfig, p Projection) (*data
 	}
 	return dataframe.New(cols...)
 }
+
+// parallelSelectMinExprs is the minimum projection width that pays for
+// goroutine fan-out. Below this the errgroup setup exceeds the win;
+// kernels also parallelize rows internally at large heights, so width
+// is the gating dimension.
+const parallelSelectMinExprs = 8
 
 func executeWithColumns(ctx context.Context, cfg execConfig, w WithColumns) (*dataframe.DataFrame, error) {
 	input, err := executeNode(ctx, cfg, w.Input)

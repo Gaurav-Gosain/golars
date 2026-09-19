@@ -1,0 +1,54 @@
+================================================================================
+Pipeline with filter and expression
+================================================================================
+
+load data.csv
+filter age > 30 and name like "a%"
+with total = (price + fee) * 1.1
+show
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    command: (command)
+    args: (identifier))
+  (statement
+    command: (command)
+    args: (identifier)
+    args: (operator)
+    args: (number)
+    args: (keyword)
+    args: (identifier)
+    args: (identifier)
+    args: (string))
+  (statement
+    command: (command)
+    args: (identifier)
+    args: (expr
+      (expr
+        (identifier)
+        (identifier))
+      (number)))
+  (statement
+    command: (command)))
+
+================================================================================
+REPL dot form and method call
+================================================================================
+
+.HELP
+with u = name.str.upper()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    command: (command
+      (identifier)))
+  (statement
+    command: (command)
+    args: (identifier)
+    args: (expr
+      (method_call
+        receiver: (identifier)))))

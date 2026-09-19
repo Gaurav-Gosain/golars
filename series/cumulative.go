@@ -30,17 +30,20 @@ func (s *Series) CumSum(opts ...Option) (*Series, error) {
 				}
 			})
 		}
-		out := make([]int64, n)
-		valid := make([]bool, n)
-		var acc int64
-		for i := range n {
-			if a.IsValid(i) {
-				acc += raw[i]
-				out[i] = acc
-				valid[i] = true
+		return BuildInt64DirectFused(s.Name(), n, cfg.alloc, func(out []int64, validBits []byte) int {
+			var acc int64
+			nulls := 0
+			for i := range n {
+				if a.IsValid(i) {
+					acc += raw[i]
+					out[i] = acc
+					validBits[i>>3] |= 1 << uint(i&7)
+				} else {
+					nulls++
+				}
 			}
-		}
-		return FromInt64(s.Name(), out, valid, WithAllocator(cfg.alloc))
+			return nulls
+		})
 	case *array.Float64:
 		raw := a.Float64Values()
 		if a.NullN() == 0 {
@@ -52,17 +55,20 @@ func (s *Series) CumSum(opts ...Option) (*Series, error) {
 				}
 			})
 		}
-		out := make([]float64, n)
-		valid := make([]bool, n)
-		var acc float64
-		for i := range n {
-			if a.IsValid(i) {
-				acc += raw[i]
-				out[i] = acc
-				valid[i] = true
+		return BuildFloat64DirectFused(s.Name(), n, cfg.alloc, func(out []float64, validBits []byte) int {
+			var acc float64
+			nulls := 0
+			for i := range n {
+				if a.IsValid(i) {
+					acc += raw[i]
+					out[i] = acc
+					validBits[i>>3] |= 1 << uint(i&7)
+				} else {
+					nulls++
+				}
 			}
-		}
-		return FromFloat64(s.Name(), out, valid, WithAllocator(cfg.alloc))
+			return nulls
+		})
 	case *array.Int32:
 		raw := a.Int32Values()
 		out := make([]int32, n)
@@ -74,15 +80,19 @@ func (s *Series) CumSum(opts ...Option) (*Series, error) {
 			}
 			return FromInt32(s.Name(), out, nil, WithAllocator(cfg.alloc))
 		}
-		valid := make([]bool, n)
-		for i := range n {
-			if a.IsValid(i) {
-				acc += raw[i]
-				out[i] = acc
-				valid[i] = true
+		return BuildInt32DirectFused(s.Name(), n, cfg.alloc, func(out []int32, validBits []byte) int {
+			nulls := 0
+			for i := range n {
+				if a.IsValid(i) {
+					acc += raw[i]
+					out[i] = acc
+					validBits[i>>3] |= 1 << uint(i&7)
+				} else {
+					nulls++
+				}
 			}
-		}
-		return FromInt32(s.Name(), out, valid, WithAllocator(cfg.alloc))
+			return nulls
+		})
 	}
 	return nil, fmt.Errorf("series: CumSum unsupported for dtype %s", s.DType())
 }
@@ -105,67 +115,88 @@ func (s *Series) Diff(periods int, opts ...Option) (*Series, error) {
 	switch a := chunk.(type) {
 	case *array.Int64:
 		raw := a.Int64Values()
-		out := make([]int64, n)
-		valid := make([]bool, n)
-		if periods > 0 {
-			for i := periods; i < n; i++ {
-				if a.IsValid(i) && a.IsValid(i-periods) {
-					out[i] = raw[i] - raw[i-periods]
-					valid[i] = true
+		return BuildInt64DirectFused(s.Name(), n, cfg.alloc, func(out []int64, validBits []byte) int {
+			nulls := 0
+			if periods > 0 {
+				nulls = periods
+				for i := periods; i < n; i++ {
+					if a.IsValid(i) && a.IsValid(i-periods) {
+						out[i] = raw[i] - raw[i-periods]
+						validBits[i>>3] |= 1 << uint(i&7)
+					} else {
+						nulls++
+					}
+				}
+			} else {
+				off := -periods
+				nulls = off
+				for i := 0; i < n-off; i++ {
+					if a.IsValid(i) && a.IsValid(i+off) {
+						out[i] = raw[i] - raw[i+off]
+						validBits[i>>3] |= 1 << uint(i&7)
+					} else {
+						nulls++
+					}
 				}
 			}
-		} else {
-			off := -periods
-			for i := 0; i < n-off; i++ {
-				if a.IsValid(i) && a.IsValid(i+off) {
-					out[i] = raw[i] - raw[i+off]
-					valid[i] = true
-				}
-			}
-		}
-		return FromInt64(s.Name(), out, valid, WithAllocator(cfg.alloc))
+			return nulls
+		})
 	case *array.Float64:
 		raw := a.Float64Values()
-		out := make([]float64, n)
-		valid := make([]bool, n)
-		if periods > 0 {
-			for i := periods; i < n; i++ {
-				if a.IsValid(i) && a.IsValid(i-periods) {
-					out[i] = raw[i] - raw[i-periods]
-					valid[i] = true
+		return BuildFloat64DirectFused(s.Name(), n, cfg.alloc, func(out []float64, validBits []byte) int {
+			nulls := 0
+			if periods > 0 {
+				nulls = periods
+				for i := periods; i < n; i++ {
+					if a.IsValid(i) && a.IsValid(i-periods) {
+						out[i] = raw[i] - raw[i-periods]
+						validBits[i>>3] |= 1 << uint(i&7)
+					} else {
+						nulls++
+					}
+				}
+			} else {
+				off := -periods
+				nulls = off
+				for i := 0; i < n-off; i++ {
+					if a.IsValid(i) && a.IsValid(i+off) {
+						out[i] = raw[i] - raw[i+off]
+						validBits[i>>3] |= 1 << uint(i&7)
+					} else {
+						nulls++
+					}
 				}
 			}
-		} else {
-			off := -periods
-			for i := 0; i < n-off; i++ {
-				if a.IsValid(i) && a.IsValid(i+off) {
-					out[i] = raw[i] - raw[i+off]
-					valid[i] = true
-				}
-			}
-		}
-		return FromFloat64(s.Name(), out, valid, WithAllocator(cfg.alloc))
+			return nulls
+		})
 	case *array.Int32:
 		raw := a.Int32Values()
-		out := make([]int32, n)
-		valid := make([]bool, n)
-		if periods > 0 {
-			for i := periods; i < n; i++ {
-				if a.IsValid(i) && a.IsValid(i-periods) {
-					out[i] = raw[i] - raw[i-periods]
-					valid[i] = true
+		return BuildInt32DirectFused(s.Name(), n, cfg.alloc, func(out []int32, validBits []byte) int {
+			nulls := 0
+			if periods > 0 {
+				nulls = periods
+				for i := periods; i < n; i++ {
+					if a.IsValid(i) && a.IsValid(i-periods) {
+						out[i] = raw[i] - raw[i-periods]
+						validBits[i>>3] |= 1 << uint(i&7)
+					} else {
+						nulls++
+					}
+				}
+			} else {
+				off := -periods
+				nulls = off
+				for i := 0; i < n-off; i++ {
+					if a.IsValid(i) && a.IsValid(i+off) {
+						out[i] = raw[i] - raw[i+off]
+						validBits[i>>3] |= 1 << uint(i&7)
+					} else {
+						nulls++
+					}
 				}
 			}
-		} else {
-			off := -periods
-			for i := 0; i < n-off; i++ {
-				if a.IsValid(i) && a.IsValid(i+off) {
-					out[i] = raw[i] - raw[i+off]
-					valid[i] = true
-				}
-			}
-		}
-		return FromInt32(s.Name(), out, valid, WithAllocator(cfg.alloc))
+			return nulls
+		})
 	}
 	return nil, fmt.Errorf("series: Diff unsupported for dtype %s", s.DType())
 }

@@ -1369,7 +1369,7 @@ func gatherNullable(ctx context.Context, src *series.Series, indices []int, n in
 				return nc
 			}
 			if nIdx >= 64*1024 {
-				k := 8
+				k := min(8, runtime.GOMAXPROCS(0))
 				bytesPerWorker := (nBytes + k - 1) / k
 				partialNulls := make([]int, k)
 				var wg sync.WaitGroup
@@ -1437,7 +1437,7 @@ func gatherNullable(ctx context.Context, src *series.Series, indices []int, n in
 				return nc
 			}
 			if nIdx >= 64*1024 {
-				k := 8
+				k := min(8, runtime.GOMAXPROCS(0))
 				bytesPerWorker := (nBytes + k - 1) / k
 				partialNulls := make([]int, k)
 				var wg sync.WaitGroup

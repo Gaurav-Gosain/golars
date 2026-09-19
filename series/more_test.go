@@ -42,6 +42,46 @@ func TestRankMethods(t *testing.T) {
 	}
 }
 
+func TestRankWithNulls(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer alloc.AssertSize(t, 0)
+
+	s, _ := series.FromInt64("v", []int64{3, 0, 2, 0, 2},
+		[]bool{true, false, true, false, true}, series.WithAllocator(alloc))
+	defer s.Release()
+
+	// Valid values [3,2,2] with a tie; nulls stay null.
+	cases := []struct {
+		m    series.RankMethod
+		want []float64
+	}{
+		{series.RankAverage, []float64{3, 0, 1.5, 0, 1.5}},
+		{series.RankMin, []float64{3, 0, 1, 0, 1}},
+		{series.RankMax, []float64{3, 0, 2, 0, 2}},
+		{series.RankDense, []float64{2, 0, 1, 0, 1}},
+		{series.RankOrdinal, []float64{3, 0, 1, 0, 2}},
+	}
+	for _, c := range cases {
+		got, err := s.Rank(c.m, series.WithAllocator(alloc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		arr := got.Chunk(0).(*array.Float64)
+		for i, w := range c.want {
+			if i == 1 || i == 3 {
+				if arr.IsValid(i) {
+					t.Errorf("method=%d [%d] should be null", c.m, i)
+				}
+				continue
+			}
+			if !arr.IsValid(i) || arr.Value(i) != w {
+				t.Errorf("method=%d [%d] = %v, want %v", c.m, i, arr.Value(i), w)
+			}
+		}
+		got.Release()
+	}
+}
+
 func TestSearchSortedAndIndexOf(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer alloc.AssertSize(t, 0)

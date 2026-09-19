@@ -221,10 +221,15 @@ func cellString(s *series.Series, i int, maxRune int) (string, bool) {
 	if s == nil || s.Len() == 0 {
 		return "", false
 	}
-	arr := s.Chunk(0)
-	if arr == nil {
+	if i < 0 || i >= s.Len() {
 		return "", false
 	}
+	chunk := 0
+	for i >= s.Chunk(chunk).Len() {
+		i -= s.Chunk(chunk).Len()
+		chunk++
+	}
+	arr := s.Chunk(chunk)
 	if n, ok := arr.(interface{ IsNull(int) bool }); ok && n.IsNull(i) {
 		return "null", true
 	}

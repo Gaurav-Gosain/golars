@@ -20,8 +20,11 @@ polars = { version = "0.53", features = [
     "timezones",
     "cum_agg",
     "dtype-full",
+    "top_k",
+    "rank",
 ] }
 polars-core = "0.53"
+polars-ops = "0.53"
 rand = "0.8"
 rand_pcg = "0.3"
 serde = { version = "1", features = ["derive"] }

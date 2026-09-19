@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -46,7 +47,7 @@ func init() {
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{"type": "string", "description": "Absolute path to the data file."},
-					"n":    map[string]any{"type": "integer", "default": 10, "description": "Number of rows to return (default 10)."},
+					"n":    map[string]any{"type": "integer", "minimum": 0, "default": 10, "description": "Number of rows to return (default 10)."},
 				},
 				"required": []string{"path"},
 			},
@@ -123,6 +124,13 @@ func findTool(name string) *Tool {
 // cmd/golars/subcmd_inspect.go but kept self-contained so the MCP
 // binary doesn't import the main-package.
 func loadByExt(ctx context.Context, path string) (*dataframe.DataFrame, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("data path must be a regular file")
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".csv", ".tsv":
@@ -200,6 +208,9 @@ func runHead(args json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if n < 0 {
+		return nil, fmt.Errorf("argument %q must be non-negative", "n")
+	}
 	df, err := loadByExt(context.Background(), path)
 	if err != nil {
 		return nil, err
@@ -257,6 +268,17 @@ func runSQL(args json.RawMessage) (any, error) {
 	files, err := asStringSlice(args, "files")
 	if err != nil {
 		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("argument %q must contain at least one file", "files")
+	}
+	names := make(map[string]bool, len(files))
+	for _, f := range files {
+		name := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+		if names[name] {
+			return nil, fmt.Errorf("duplicate table name %q", name)
+		}
+		names[name] = true
 	}
 	ctx := context.Background()
 	session := sql.NewSession()
