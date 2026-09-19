@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
 // RankMethod controls how ties are broken in Rank. Polars-compatible
@@ -36,21 +37,34 @@ func (s *Series) Rank(method RankMethod, opts ...Option) (*Series, error) {
 		return nil, err
 	}
 	n := s.Len()
+	chunk := s.Chunk(0)
+	// Fast paths: no-null inputs walk raw values directly instead of
+	// the dispatched eqAt comparator, and skip the validity bitmap.
+	if chunk.NullN() == 0 {
+		switch a := chunk.(type) {
+		case *array.Int64:
+			return rankSortedInt64(s.Name(), a.Int64Values(), idx, n, method, cfg.alloc)
+		case *array.Float64:
+			return rankSortedFloat64(s.Name(), a.Float64Values(), idx, n, method, cfg.alloc)
+		}
+	}
 	ranks := make([]float64, n)
 	valid := make([]bool, n)
-	chunk := s.Chunk(0)
+	hasNulls := chunk.NullN() > 0
 	// Walk the sorted permutation; within ties (determined by comparing
-	// raw values), assign rank per `method`.
+	// raw values), assign rank per `method`. Dense ranks count distinct
+	// groups with a running counter (linear, not quadratic).
+	dense := 0
 	i := 0
 	for i < n {
 		// Skip any nulls at the tail of the sorted order.
-		if chunk.NullN() > 0 && !chunk.IsValid(idx[i]) {
+		if hasNulls && !chunk.IsValid(idx[i]) {
 			i++
 			continue
 		}
 		j := i + 1
 		for j < n {
-			if chunk.NullN() > 0 && !chunk.IsValid(idx[j]) {
+			if hasNulls && !chunk.IsValid(idx[j]) {
 				break
 			}
 			if !eqAt(chunk, idx[i], idx[j]) {
@@ -58,28 +72,123 @@ func (s *Series) Rank(method RankMethod, opts ...Option) (*Series, error) {
 			}
 			j++
 		}
-		tieSize := j - i
-		for k := i; k < j; k++ {
-			pos := idx[k]
-			valid[pos] = true
-			switch method {
-			case RankAverage:
-				// +1 so ranks are 1-based (polars default).
-				ranks[pos] = float64(i+1) + float64(tieSize-1)/2
-			case RankMin:
-				ranks[pos] = float64(i + 1)
-			case RankMax:
-				ranks[pos] = float64(j)
-			case RankDense:
-				// Dense: distinct-value counter.
-				ranks[pos] = float64(denseCountBefore(chunk, idx, i)) + 1
-			case RankOrdinal:
-				ranks[pos] = float64(k + 1)
-			}
-		}
+		fillRanks(ranks, valid, idx, i, j, dense, method)
+		dense++
 		i = j
 	}
 	return FromFloat64(s.Name(), ranks, validOrNil(valid), WithAllocator(cfg.alloc))
+}
+
+// fillRanks writes one tie group's ranks. The method switch runs once
+// per group rather than once per row.
+func fillRanks(ranks []float64, valid []bool, idx []int, i, j, dense int, method RankMethod) {
+	if method == RankOrdinal {
+		for k := i; k < j; k++ {
+			pos := idx[k]
+			ranks[pos] = float64(k + 1)
+			valid[pos] = true
+		}
+		return
+	}
+	var rv float64
+	switch method {
+	case RankAverage:
+		// +1 so ranks are 1-based (polars default).
+		rv = float64(i+1) + float64(j-i-1)/2
+	case RankMin:
+		rv = float64(i + 1)
+	case RankMax:
+		rv = float64(j)
+	default: // RankDense: distinct-value counter.
+		rv = float64(dense + 1)
+	}
+	for k := i; k < j; k++ {
+		pos := idx[k]
+		ranks[pos] = rv
+		valid[pos] = true
+	}
+}
+
+// rankSortedInt64 assigns ranks over a no-null int64 column given its
+// ascending stable permutation. Output has no validity bitmap.
+func rankSortedInt64(name string, vals []int64, idx []int, n int, method RankMethod, alloc memory.Allocator) (*Series, error) {
+	ranks := make([]float64, n)
+	dense := 0
+	i := 0
+	for i < n {
+		j := i + 1
+		for j < n && vals[idx[j]] == vals[idx[i]] {
+			j++
+		}
+		if method == RankOrdinal {
+			for k := i; k < j; k++ {
+				ranks[idx[k]] = float64(k + 1)
+			}
+		} else {
+			var rv float64
+			switch method {
+			case RankAverage:
+				rv = float64(i+1) + float64(j-i-1)/2
+			case RankMin:
+				rv = float64(i + 1)
+			case RankMax:
+				rv = float64(j)
+			default:
+				rv = float64(dense + 1)
+			}
+			for k := i; k < j; k++ {
+				ranks[idx[k]] = rv
+			}
+		}
+		dense++
+		i = j
+	}
+	return FromFloat64(name, ranks, nil, WithAllocator(alloc))
+}
+
+// rankSortedFloat64 mirrors rankSortedInt64 with NaNs tied together.
+func rankSortedFloat64(name string, vals []float64, idx []int, n int, method RankMethod, alloc memory.Allocator) (*Series, error) {
+	ranks := make([]float64, n)
+	dense := 0
+	i := 0
+	for i < n {
+		vi := vals[idx[i]]
+		j := i + 1
+		for j < n {
+			vj := vals[idx[j]]
+			if math.IsNaN(vi) || math.IsNaN(vj) {
+				if !(math.IsNaN(vi) && math.IsNaN(vj)) {
+					break
+				}
+			} else if vj != vi {
+				break
+			}
+			j++
+		}
+		if method == RankOrdinal {
+			for k := i; k < j; k++ {
+				ranks[idx[k]] = float64(k + 1)
+			}
+		} else {
+			var rv float64
+			switch method {
+			case RankAverage:
+				rv = float64(i+1) + float64(j-i-1)/2
+			case RankMin:
+				rv = float64(i + 1)
+			case RankMax:
+				rv = float64(j)
+			default:
+				rv = float64(dense + 1)
+			}
+			for k := i; k < j; k++ {
+				ranks[idx[k]] = rv
+			}
+		}
+		dense++
+		i = j
+	}
+	return FromFloat64(name, ranks, nil, WithAllocator(alloc))
 }
 
 // eqAt compares the value at positions a and b of chunk. Used by Rank
@@ -110,18 +219,6 @@ func eqAt(chunk any, a, b int) bool {
 		return arr.Value(a) == arr.Value(b)
 	}
 	return false
-}
-
-// denseCountBefore returns the count of distinct non-null values that
-// appear before position i in the sorted order. Used by RankDense.
-func denseCountBefore(chunk any, idx []int, i int) int {
-	count := 0
-	for k := 1; k <= i; k++ {
-		if !eqAt(chunk, idx[k-1], idx[k]) {
-			count++
-		}
-	}
-	return count
 }
 
 // SearchSorted returns the insertion index for v such that the
