@@ -249,13 +249,30 @@ func structure(src string) string {
 	f := Parse(src)
 	var b strings.Builder
 	for _, st := range f.Stmts {
-		b.WriteString(describeParts(st))
+		if len(st.Diags) > 0 {
+			// Broken statements are kept as written (trimmed).
+			fmt.Fprintf(&b, "broken %q\n", strings.Join(strings.Fields(st.Text), " "))
+			continue
+		}
+		b.WriteString(st.Cmd.Value)
 		for _, p := range st.Parts {
-			if p.Expr != nil {
+			if p.Kind == PartExpr {
 				b.WriteString(" {" + dumpExpr(p) + "}")
+				continue
+			}
+			if p.Kind == PartList {
+				// `a b` and `a, b` name the same columns.
+				for _, it := range p.Items {
+					fmt.Fprintf(&b, " item:%s", it.Value)
+				}
+				continue
+			}
+			fmt.Fprintf(&b, " %d:%s", p.Kind, formatPart(p))
+			for _, it := range p.Items {
+				fmt.Fprintf(&b, "/%s", it.Value)
 			}
 		}
-		fmt.Fprintf(&b, " diags=%d\n", len(st.Diags))
+		b.WriteByte('\n')
 	}
 	return b.String()
 }

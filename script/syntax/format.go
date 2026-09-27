@@ -174,8 +174,19 @@ func formatStmt(st *Stmt) []string {
 		b.WriteString(body)
 	}
 	line := b.String()
+	if strings.HasSuffix(line, "\\") {
+		// A trailing backslash would read as a continuation.
+		return keepAsWritten(st)
+	}
 	if st.EndLine == st.Line {
 		return []string{line}
+	}
+	for _, p := range st.Parts {
+		if p.Kind != PartExpr && strings.ContainsAny(p.Text, " \t") {
+			// A break inside one argument would change it; keep the
+			// statement on one line.
+			return []string{line}
+		}
 	}
 	return rebreak(st, line)
 }
@@ -183,16 +194,8 @@ func formatStmt(st *Stmt) []string {
 // keepAsWritten returns the statement's physical lines trimmed.
 func keepAsWritten(st *Stmt) []string {
 	var out []string
-	for k, sg := range st.segs {
-		text := st.Text[sg.off : sg.off+sg.n]
-		text = strings.TrimSpace(text)
-		if k < len(st.segs)-1 {
-			text += " \\"
-		}
-		out = append(out, text)
-	}
-	if len(out) > 0 {
-		out[0] = strings.TrimPrefix(out[0], ".")
+	for _, sg := range st.segs {
+		out = append(out, strings.Trim(sg.raw, " \t"))
 	}
 	return out
 }

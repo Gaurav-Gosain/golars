@@ -104,7 +104,7 @@ func dump(n *Node) string {
 		return "nil"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "(%d %q %#v %q %q p%d c%t", n.Kind, n.Name, n.Lit, n.NS, n.Infix, n.Parens, n.CallParens)
+	fmt.Fprintf(&b, "(%d %q %#v %q %q p%d", n.Kind, n.Name, n.Lit, n.NS, n.Infix, n.Parens)
 	if n.Recv != nil {
 		b.WriteString(" recv=" + dump(n.Recv))
 	}
@@ -128,7 +128,7 @@ func TestFormatCanonical(t *testing.T) {
 		`WHEN a THEN 1 OTHERWISE 2`:      `when a then 1 otherwise 2`,
 		`cut( x ,[0,10],labels = ["a"])`: `cut(x, [0, 10], labels=["a"])`,
 		`ts . dt . year ( )`:             `ts.dt.year()`,
-		`price.sum`:                      `price.sum`,
+		`price.sum`:                      `price.sum()`,
 		`- 1`:                            `-1`,
 		`(a+b)  .abs()`:                  `(a + b).abs()`,
 		`x is_null AND y IS_NOT_NULL`:    `x is_null and y is_not_null`,

@@ -16,7 +16,7 @@ func FormatSource(s string) (string, error) {
 }
 
 // Format prints a syntax tree in canonical form. Parsing the result
-// gives the same tree.
+// gives the same tree, except that every call has parentheses.
 func Format(n *Node) string {
 	var b strings.Builder
 	writeNode(&b, n)
@@ -105,14 +105,23 @@ func writeCall(b *strings.Builder, n *Node) {
 	}
 	if n.Recv != nil {
 		writeNode(b, n.Recv)
+		if r := n.Recv; r.Kind == KindLit && r.Parens == 0 && isNumber(r.Lit) {
+			// `1.abs()` would read `1.` as a float.
+			b.WriteByte(' ')
+		}
 		b.WriteByte('.')
 	}
 	if n.NS != "" {
 		b.WriteString(n.NS)
 		b.WriteByte('.')
 	}
+	// Calls always get parentheses: `price.sum` prints as
+	// `price.sum()`, which cannot be mistaken for a column named
+	// price.sum.
 	b.WriteString(n.Name)
-	if !n.CallParens {
+	if !n.CallParens && n.NS == "" && n.Recv != nil && n.Recv.Kind == KindCol && n.Recv.Parens == 0 && IsNamespace(n.Recv.Name) {
+		// `str.x()` would read as the str namespace function x; a
+		// column named str keeps `str.x`.
 		return
 	}
 	b.WriteByte('(')
@@ -131,4 +140,12 @@ func writeCall(b *strings.Builder, n *Node) {
 		writeNode(b, k.Val)
 	}
 	b.WriteByte(')')
+}
+
+func isNumber(v any) bool {
+	switch v.(type) {
+	case int64, float64:
+		return true
+	}
+	return false
 }

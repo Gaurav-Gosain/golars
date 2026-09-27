@@ -59,7 +59,8 @@ type Stmt struct {
 type segment struct {
 	off  int // offset in Stmt.Text where this physical line starts
 	line int
-	n    int // bytes of the physical line copied into Text
+	n    int    // bytes of the physical line copied into Text
+	raw  string // the physical line without its comment
 }
 
 // Position maps a byte offset in s.Text to a 0-based physical line
@@ -171,7 +172,7 @@ func Parse(src string) *File {
 			}
 			cur = &Stmt{Line: i}
 		}
-		cur.segs = append(cur.segs, segment{off: text.Len(), line: i, n: len(trimmed)})
+		cur.segs = append(cur.segs, segment{off: text.Len(), line: i, n: len(trimmed), raw: body})
 		cur.EndLine = i
 		text.WriteString(trimmed)
 		if cont {

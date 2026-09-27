@@ -85,7 +85,7 @@ func splitArgs(text string, base int) []tok {
 		}
 		switch {
 		case quote != 0:
-			if c == '\\' {
+			if c == '\\' && i+1 < len(text) {
 				i++
 			} else if c == quote {
 				quote = 0
@@ -162,7 +162,7 @@ func listItems(t tok) []Part {
 		if i < len(t.text) {
 			c := t.text[i]
 			if quote != 0 {
-				if c == '\\' {
+				if c == '\\' && i+1 < len(t.text) {
 					i++
 				} else if c == quote {
 					quote = 0
@@ -280,7 +280,8 @@ func parseStmt(s *Stmt) {
 		j++
 	}
 	word := text[i:j]
-	s.Cmd = Part{Kind: PartCommand, Off: i, End: j, Text: word, Value: strings.ToLower(word)}
+	// Value is the spelling FindCommand resolves (`..h` is `.h`).
+	s.Cmd = Part{Kind: PartCommand, Off: i, End: j, Text: word, Value: strings.ToLower(strings.TrimPrefix(word, "."))}
 	s.Spec = script.FindCommand(word)
 	rest, restOff := s.Rest()
 	if s.Spec == nil {
@@ -296,6 +297,19 @@ func parseStmt(s *Stmt) {
 		return
 	}
 	p := &stmtParser{s: s, rest: rest, restOff: restOff}
+	switch s.Spec.Grammar {
+	case "@select", "@filter", "@with", "@groupby", "@dynamic":
+		// Expressions report their own bracket errors.
+	default:
+		if at, what := unbalanced(rest); at >= 0 {
+			d := p.errAt(restOff+at, restOff+len(rest), "syntax", "unclosed %s", what)
+			d.Hint = "close it, or quote the name"
+			for _, t := range splitArgs(rest, restOff) {
+				s.Parts = append(s.Parts, Part{Kind: PartText, Off: t.off, End: t.end, Text: t.text, Value: unquote(t.text)})
+			}
+			return
+		}
+	}
 	switch s.Spec.Grammar {
 	case "@select":
 		p.parseSelect()
@@ -352,6 +366,15 @@ func (p *stmtParser) extra() {
 	}
 	d := p.errAt(first.off, last.end, "extra-argument", "unexpected argument %q", first.text)
 	d.Hint = "usage: " + p.s.Spec.Signature
+}
+
+// addList adds a comma list token, reporting one without columns.
+func (p *stmtParser) addList(t tok) {
+	items := listItems(t)
+	if len(items) == 0 {
+		p.errAt(t.off, t.end, "missing-argument", "expected a column, got %q", t.text)
+	}
+	p.add(Part{Kind: PartList, Off: t.off, End: t.end, Text: t.text, Value: t.text, Items: items})
 }
 
 func slotName(slot string) string {
@@ -513,6 +536,9 @@ func (p *stmtParser) slot(slot string, stop []string) {
 	case "collist":
 		part.Kind = PartList
 		part.Items = listItems(t)
+		if len(part.Items) == 0 {
+			p.errAt(t.off, t.end, "missing-argument", "expected a column, got %q", t.text)
+		}
 	case "cols":
 		// Greedy: every remaining token up to a keyword of a later
 		// item, each token a column or a comma list.
@@ -521,7 +547,7 @@ func (p *stmtParser) slot(slot string, stop []string) {
 			if slicesContainsFold(stop, t.text) {
 				break
 			}
-			p.add(Part{Kind: PartList, Off: t.off, End: t.end, Text: t.text, Value: t.text, Items: listItems(t)})
+			p.addList(t)
 			p.i++
 		}
 		return
@@ -651,7 +677,7 @@ func splitTop(text string) (items []string, offs []int) {
 			c := text[i]
 			switch {
 			case quote != 0:
-				if c == '\\' {
+				if c == '\\' && i+1 < len(text) {
 					i++
 				} else if c == quote {
 					quote = 0
@@ -725,8 +751,11 @@ func SelectIsPlain(rest string) bool {
 	if strings.ContainsAny(rest, "(=\"'+*/%<>![") {
 		return false
 	}
-	for f := range strings.FieldsSeq(rest) {
-		if f == "-" {
+	for f := range strings.FieldsSeq(strings.ReplaceAll(rest, ",", " ")) {
+		// A plain name starts like an identifier; `-x` or `2` is an
+		// expression.
+		c := f[0]
+		if !(c == '_' || c >= 0x80 || (c|0x20 >= 'a' && c|0x20 <= 'z')) {
 			return false
 		}
 	}
@@ -740,7 +769,7 @@ func (p *stmtParser) parseSelect() {
 	}
 	if SelectIsPlain(p.rest) {
 		for _, t := range splitArgs(p.rest, p.restOff) {
-			p.add(Part{Kind: PartList, Off: t.off, End: t.end, Text: t.text, Value: t.text, Items: listItems(t)})
+			p.addList(t)
 		}
 		return
 	}
@@ -764,7 +793,11 @@ func (p *stmtParser) parseSort() {
 	}
 	seenCol := false
 	for _, t := range p.toks {
-		for _, it := range listItems(t) {
+		items := listItems(t)
+		if len(items) == 0 {
+			p.errAt(t.off, t.end, "missing-argument", "expected a column, got %q", t.text)
+		}
+		for _, it := range items {
 			switch strings.ToLower(it.Value) {
 			case "asc", "desc":
 				it.Kind, it.Value = PartKeyword, strings.ToLower(it.Value)
@@ -801,6 +834,12 @@ func (p *stmtParser) parseAggs(text string, off int) {
 		rest := text[i:]
 		if rest[0] == '(' {
 			end := matchingParen(rest)
+			if end < 0 {
+				d := p.errAt(off+i, off+len(text), "bad-aggregation", "unclosed '(' in aggregation")
+				d.Hint = "as in (n = len())"
+				p.add(Part{Kind: PartText, Off: off + i, End: off + len(text), Text: rest, Value: rest})
+				return
+			}
 			inner := rest[1:end]
 			if !p.assignment(inner, off+i+1) {
 				d := p.errAt(off+i, off+i+end+1, "bad-aggregation", "expected (name = expr), got %q", rest[:min(end+1, len(rest))])
@@ -845,7 +884,7 @@ func matchingParen(s string) int {
 		c := s[i]
 		switch {
 		case quote != 0:
-			if c == '\\' {
+			if c == '\\' && i+1 < len(s) {
 				i++
 			} else if c == quote {
 				quote = 0
@@ -861,7 +900,7 @@ func matchingParen(s string) int {
 			}
 		}
 	}
-	return len(s) - 1
+	return -1
 }
 
 func (p *stmtParser) aggShorthand(word string, off int) {
@@ -898,7 +937,7 @@ func (p *stmtParser) parseGroupBy() {
 		return
 	}
 	keys := toks[0]
-	p.add(Part{Kind: PartList, Off: keys.off, End: keys.end, Text: keys.text, Value: keys.text, Items: listItems(keys)})
+	p.addList(keys)
 	aggOff := keys.end - p.restOff
 	if strings.TrimSpace(p.rest[aggOff:]) == "" {
 		p.missing("at least one aggregation")
@@ -935,6 +974,9 @@ func (p *stmtParser) parseDynamic() {
 		case "by":
 			val.Kind = PartList
 			val.Items = listItems(v)
+			if len(val.Items) == 0 {
+				p.errAt(v.off, v.end, "missing-argument", "expected a column, got %q", v.text)
+			}
 		case "closed":
 			val.Kind = PartOption
 			p.checkWord(v, []string{"left", "right", "both", "none"}, "closed")
@@ -1002,6 +1044,9 @@ func (p *stmtParser) parseAsof() {
 			part := Part{Kind: PartValue, Off: v.off, End: v.end, Text: v.text, Value: unquote(v.text)}
 			if w == "by" {
 				part.Kind, part.Items = PartList, listItems(v)
+				if len(part.Items) == 0 {
+					p.errAt(v.off, v.end, "missing-argument", "expected a column, got %q", v.text)
+				}
 			}
 			p.add(part)
 			p.i++
@@ -1016,4 +1061,38 @@ func (p *stmtParser) parseAsof() {
 			p.i++
 		}
 	}
+}
+
+// unbalanced returns the offset and a description of the first
+// bracket or quote in s that is never closed, or -1.
+func unbalanced(s string) (int, string) {
+	var stack []int
+	quote, qpos := byte(0), -1
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && i+1 < len(s) {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote, qpos = c, i
+		case c == '(' || c == '[':
+			stack = append(stack, i)
+		case c == ')' || c == ']':
+			if len(stack) == 0 {
+				return i, "unmatched " + string(c)
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	if quote != 0 {
+		return qpos, "string"
+	}
+	if len(stack) > 0 {
+		return stack[0], string(s[stack[0]])
+	}
+	return -1, ""
 }
