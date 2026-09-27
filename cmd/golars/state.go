@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
@@ -27,6 +28,12 @@ type state struct {
 	showTiming bool
 	startTime  time.Time
 	evalCount  int
+
+	// cont buffers a statement continued over several REPL lines.
+	cont strings.Builder
+	// completion caches what completion knows about the session,
+	// refreshed after each statement.
+	completion sessionCache
 }
 
 // namedFrame is a frame staged with `load PATH as NAME`, `scan_* PATH

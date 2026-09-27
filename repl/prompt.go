@@ -37,6 +37,9 @@ type Options struct {
 	// suggestions entirely.
 	Suggester Suggester
 
+	// Highlighter, if set, colours the input as it is typed.
+	Highlighter Highlighter
+
 	// GhostStyle styles the inline completion text. Defaults to a dim
 	// gray.
 	GhostStyle lipgloss.Style
@@ -215,11 +218,14 @@ func (p *Prompt) readLineTTY() (string, error) {
 		}
 
 		m := &model{
-			ti:         ti,
-			suggester:  p.opts.Suggester,
-			history:    p.history,
-			historyIdx: len(p.history),
-			hintStyle:  p.opts.HintStyle,
+			ti:          ti,
+			highlighter: p.opts.Highlighter,
+			ghostStyle:  p.opts.GhostStyle,
+			prompt:      ti.Prompt,
+			suggester:   p.opts.Suggester,
+			history:     p.history,
+			historyIdx:  len(p.history),
+			hintStyle:   p.opts.HintStyle,
 		}
 		m.refreshGhost()
 
@@ -241,7 +247,15 @@ func (p *Prompt) readLineTTY() (string, error) {
 			preserved = fin.ti.Value()
 			continue
 		}
-		return fin.ti.Value(), nil
+		// Bubbletea clears the input line when the program exits, so
+		// echo the accepted line to keep a readable transcript.
+		value := fin.ti.Value()
+		echo := value
+		if p.opts.Highlighter != nil {
+			echo = renderPlain(value, p.opts.Highlighter(value))
+		}
+		_, _ = io.WriteString(out, fin.prompt+echo+"\n")
+		return value, nil
 	}
 }
 

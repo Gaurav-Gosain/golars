@@ -9,15 +9,20 @@ import (
 // model is the tea.Model that drives a single ReadLine. It wraps
 // textinput with ghost-text completions and history navigation.
 type model struct {
-	ti         textinput.Model
-	suggester  Suggester
-	history    []string
-	historyIdx int // one past last when not browsing
-	ghost      string
-	hint       string
-	hintStyle  lipgloss.Style
-	canceled   bool
-	eof        bool
+	ti textinput.Model
+	// highlighter, when set, replaces the textinput rendering with a
+	// coloured one (prompt, styled value, cursor, ghost).
+	highlighter Highlighter
+	ghostStyle  lipgloss.Style
+	prompt      string
+	suggester   Suggester
+	history     []string
+	historyIdx  int // one past last when not browsing
+	ghost       string
+	hint        string
+	hintStyle   lipgloss.Style
+	canceled    bool
+	eof         bool
 	// clearReq is true when the user pressed Ctrl+L. The caller is
 	// expected to emit a real clear-screen ANSI sequence and restart
 	// the prompt with the input buffer intact; bubbletea v2's
@@ -107,6 +112,10 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 
 func (m *model) View() tea.View {
 	base := m.ti.View()
+	if m.highlighter != nil {
+		v := m.ti.Value()
+		base = m.prompt + renderHighlighted(v, m.highlighter(v), m.ti.Position(), m.ghost, m.ghostStyle)
+	}
 	if m.hint != "" {
 		base += "  " + m.hintStyle.Render(m.hint)
 	}

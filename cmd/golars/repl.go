@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/Gaurav-Gosain/golars/repl"
 	"github.com/Gaurav-Gosain/golars/script"
+	"github.com/Gaurav-Gosain/golars/script/analysis"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
 // runREPL is the shared entry point for `golars` and `golars repl`.
@@ -38,8 +41,9 @@ func (s *state) repl() error {
 	banner()
 
 	// A trailing `\` keeps reading the next line into the same
-	// statement, matching script files.
-	var cont strings.Builder
+	// statement, matching script files; so does an unclosed bracket
+	// or quote.
+	cont := &s.cont
 	for {
 		line, err := p.ReadLine()
 		if err != nil {
@@ -58,8 +62,13 @@ func (s *state) repl() error {
 			cont.WriteByte(' ')
 			continue
 		}
-		if cont.Len() > 0 {
+		if unclosed(cont.String() + line) {
 			cont.WriteString(line)
+			cont.WriteByte(' ')
+			continue
+		}
+		if cont.Len() > 0 {
+			cont.WriteString(strings.TrimLeft(line, " \t"))
 			line = cont.String()
 			cont.Reset()
 		}
@@ -88,6 +97,9 @@ func banner() {
 
 func prompt() string { return promptStyle.Render("golars") + dimStyle.Render(" » ") }
 
+// contPrompt marks a continuation line; it has the width of prompt.
+func contPrompt() string { return dimStyle.Render("     ... ") }
+
 func printErr(err error) {
 	fmt.Println(errStyle.Render("error:") + " " + errMsgStyle.Render(err.Error()))
 }
@@ -111,95 +123,159 @@ func newCLIPrompt(s *state) *repl.Prompt {
 		historyFile = filepath.Join(home, ".golars_history")
 	}
 	return repl.New(repl.Options{
-		PromptFunc:  prompt,
+		PromptFunc: func() string {
+			if s.cont.Len() > 0 {
+				return contPrompt()
+			}
+			return prompt()
+		},
 		HistoryPath: historyFile,
 		Suggester:   repl.SuggesterFunc(s.suggest),
+		Highlighter: highlightGlr,
 	})
 }
 
-// replCommands is every command and alias with its leading dot, for
-// prefix completion at the prompt.
-var replCommands = func() []string {
-	names := script.Names()
-	out := make([]string, len(names))
-	for i, n := range names {
-		out[i] = "." + n
-	}
-	return out
-}()
+// sessionCache holds the session's frames as the analyser sees them.
+// Reading a schema can collect zero rows of a lazy scan, so it is
+// refreshed once per statement rather than per keystroke.
+type sessionCache struct {
+	eval int
+	opts analysis.Options
+	ok   bool
+}
 
-// suggest returns the ghost text to append on Tab or Right, and an
-// optional hint shown to the right of the input. Argument completion
-// follows the command's spec ArgKind.
+// analysisOptions describes the focused and staged frames for
+// completion.
+func (s *state) analysisOptions() analysis.Options {
+	if s.completion.ok && s.completion.eval == s.evalCount {
+		return s.completion.opts
+	}
+	cwd, _ := os.Getwd()
+	opts := analysis.Options{Dir: cwd, Frames: map[string]analysis.Frame{}}
+	if s.hasFocus() {
+		f := analysis.Frame{Rows: -1}
+		if sch, err := s.schema(); err == nil {
+			f.Schema = sch
+		}
+		if s.lf == nil && s.df != nil {
+			f.Rows, f.Exact = s.df.Height(), true
+		}
+		opts.Focus = &f
+	}
+	for name, nf := range s.frames {
+		if nf.df != nil {
+			opts.Frames[name] = analysis.Frame{Schema: nf.df.Schema(), Rows: nf.df.Height(), Exact: true, Source: nf.path}
+		}
+	}
+	s.completion = sessionCache{eval: s.evalCount, opts: opts, ok: true}
+	return opts
+}
+
+// suggest returns ghost text for the line being typed (the rest of
+// the best completion) and a hint: the item's type or signature and
+// the other candidates. It uses the same analysis as golars-lsp, so
+// columns come from the live session and functions from the
+// expression API.
 func (s *state) suggest(line string) (string, string) {
 	if line == "" {
-		return "", "type .help for commands, tab to accept suggestions"
+		if s.cont.Len() > 0 {
+			return "", "continuing the statement; finish it or press ctrl+c"
+		}
+		return "", "type .help for commands, → or tab to accept a suggestion"
 	}
-	parts, trailingSpace := repl.SplitFields(line)
-	if len(parts) == 0 {
-		return "", ""
-	}
-	if !trailingSpace && len(parts) == 1 {
-		partial := "." + strings.ToLower(strings.TrimPrefix(parts[0], "."))
-		return repl.CompletePrefix(partial, replCommands), ""
-	}
-	spec := script.FindCommand(parts[0])
-	if spec == nil {
-		return "", ""
-	}
-	var current string
-	if !trailingSpace {
-		current = parts[len(parts)-1]
-	}
-	switch spec.ArgKind {
-	case "column":
-		if spec.Name == "filter" && strings.ContainsAny(line, "<>=!") {
-			return "", ""
+	src := s.cont.String() + line
+	r := analysis.Analyze(src, s.analysisOptions())
+	lastLine := strings.Count(src, "\n")
+	col := len(src) - strings.LastIndex(src, "\n") - 1
+	c := r.Complete(lastLine, col)
+	typed := src[len(src)-(col-c.From):]
+	var ghost, hint string
+	var others []string
+	firstKind := analysis.ItemKind(0)
+	for _, it := range c.Items {
+		text := it.Label
+		if it.Kind == analysis.ItemParam {
+			text = it.Insert
 		}
-		if g := repl.CompleteFromList(current, s.currentColumns(), ','); g != "" {
-			return g, ""
+		if !strings.HasPrefix(text, typed) || text == typed {
+			continue
 		}
-		if current == "" {
-			return "", "column name"
+		if ghost == "" {
+			ghost = text[len(typed):]
+			hint = it.Detail
+			firstKind = it.Kind
+			continue
 		}
-	case "frame":
-		if g := repl.CompleteFromList(current, s.frameNames(), ','); g != "" {
-			return g, ""
-		}
-		if spec.Name == "join" {
-			cwd, _ := os.Getwd()
-			return repl.CompletePath(current, cwd), ""
-		}
-	case "path":
-		cwd, _ := os.Getwd()
-		if g := repl.CompletePath(current, cwd); g != "" {
-			return g, ""
-		}
-	case "count":
-		if current == "" {
-			return "", "row count"
+		if len(others) < 4 {
+			others = append(others, text)
 		}
 	}
-	return "", ""
+	if sig, found := r.SignatureAt(lastLine, col); found && (ghost == "" || hint == "" || firstKind == analysis.ItemParam) {
+		hint = sig.Info.Label()
+	}
+	if len(others) > 0 {
+		if hint != "" {
+			hint += "  "
+		}
+		hint += "also: " + strings.Join(others, ", ")
+	}
+	return ghost, hint
 }
 
-// currentColumns returns the focused pipeline's column names.
-func (s *state) currentColumns() []string {
-	if !s.hasFocus() {
-		return nil
-	}
-	sch, err := s.schema()
-	if err != nil {
-		return nil
-	}
-	return sch.Names()
+// Highlight styles for REPL input.
+var tokenStyles = map[syntax.TokenClass]lipgloss.Style{
+	syntax.TokKeyword:    lipgloss.NewStyle().Foreground(warningColor),
+	syntax.TokFunction:   lipgloss.NewStyle().Foreground(infoColor),
+	syntax.TokMethod:     lipgloss.NewStyle().Foreground(infoColor),
+	syntax.TokNamespace:  lipgloss.NewStyle().Foreground(primaryColor),
+	syntax.TokParameter:  lipgloss.NewStyle().Foreground(primaryColor).Italic(true),
+	syntax.TokString:     lipgloss.NewStyle().Foreground(accentColor),
+	syntax.TokNumber:     lipgloss.NewStyle().Foreground(headerColor),
+	syntax.TokComment:    lipgloss.NewStyle().Foreground(dimColor).Italic(true),
+	syntax.TokType:       lipgloss.NewStyle().Foreground(primaryColor),
+	syntax.TokClass:      lipgloss.NewStyle().Foreground(primaryColor).Bold(true),
+	syntax.TokEnumMember: lipgloss.NewStyle().Foreground(warningColor),
+	syntax.TokOperator:   lipgloss.NewStyle().Foreground(dimColor),
 }
 
-func (s *state) frameNames() []string {
-	names := make([]string, 0, len(s.frames))
-	for n := range s.frames {
-		names = append(names, n)
+// highlightGlr colours a REPL line with the tokens golars-lsp sends
+// as semantic tokens.
+func highlightGlr(line string) []repl.Span {
+	f := syntax.Parse(line)
+	var out []repl.Span
+	for _, t := range f.Tokens() {
+		st, found := tokenStyles[t.Class]
+		if !found || t.Line != 0 {
+			continue
+		}
+		out = append(out, repl.Span{Start: t.Col, End: t.EndCol, Style: st})
 	}
-	slices.Sort(names)
-	return names
+	return out
+}
+
+// unclosed reports whether s ends inside an open bracket or quote,
+// so the REPL keeps reading the statement on the next line.
+func unclosed(s string) bool {
+	depth := 0
+	quote := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '#':
+			return depth > 0
+		case c == '(' || c == '[':
+			depth++
+		case c == ')' || c == ']':
+			depth--
+		}
+	}
+	return depth > 0 || quote != 0
 }
