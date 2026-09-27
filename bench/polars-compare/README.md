@@ -18,6 +18,17 @@ cd bench/polars-compare
 uv run python compare.py
 ```
 
+To run a subset, pass a regexp matched against workload names. It is
+forwarded to all four engines, so filtered-out workloads cost nothing:
+
+```sh
+uv run python compare.py --runs 3 --only '^(SortStr|Str|CSVRead)'
+```
+
+Each engine also takes the filter directly: `golars-bench -only RE`,
+`python bench.py --only RE`, `polars-rust-bench --only RE`. When
+`CARGO_TARGET_DIR` is set, `compare.py` looks for the Rust binary there.
+
 `compare.py` builds each binary on the fly (`go build`, `cargo build`).
 Make sure you have `uv`, a recent Go, and a Rust toolchain installed.
 

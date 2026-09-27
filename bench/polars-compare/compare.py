@@ -122,6 +122,8 @@ def parse_args():
     p.add_argument("--nice", type=int, default=0,
                    help="nice level for bench processes (negative = higher priority; "
                         "-5 requires root on most systems)")
+    p.add_argument("--only", default="",
+                   help="regexp; run only workloads whose name matches (passed to all engines)")
     return p.parse_args()
 
 
@@ -150,7 +152,9 @@ def main() -> int:
         )
 
     rust_dir = repo / "bench" / "polars-rust"
-    rust_bin = rust_dir / "target" / "release" / "polars-rust-bench"
+    # cargo honors CARGO_TARGET_DIR; look for the binary where cargo put it.
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR") or (rust_dir / "target"))
+    rust_bin = target_dir / "release" / "polars-rust-bench"
 
     nr = args.runs
 
@@ -161,11 +165,12 @@ def main() -> int:
     def wrap(cmd: list[str]) -> list[str]:
         return _noise_wrap(cmd, cores=args.pin_cores, nice=args.nice)
 
+    only = ["--only", args.only] if args.only else []
     engines = {
-        "py": (wrap(["uv", "run", "python", "bench.py"]), here),
-        "rs": (wrap([str(rust_bin)]), here),
-        "scalar": (wrap([str(bin_dir / "golars-bench")]), repo),
-        "simd": (wrap([str(bin_dir / "golars-bench-simd")]), repo),
+        "py": (wrap(["uv", "run", "python", "bench.py", *only]), here),
+        "rs": (wrap([str(rust_bin), *only]), here),
+        "scalar": (wrap([str(bin_dir / "golars-bench"), *only]), repo),
+        "simd": (wrap([str(bin_dir / "golars-bench-simd"), *only]), repo),
     }
     base = ["py", "rs", "scalar", "simd"]
     runs: dict[str, list] = {name: [] for name in base}

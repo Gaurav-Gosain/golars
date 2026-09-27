@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
@@ -31,8 +32,22 @@ func main() {
 		repeats     = flag.Int("repeats", 1, "run each query N times and report each timing")
 		outPath     = flag.String("out", "bench/pds-h/output/timings.csv", "csv path (appended)")
 		printOutput = flag.Bool("print", false, "print the result frame after each query (slow on large SFs)")
+		cpuProfile  = flag.String("cpuprofile", "", "write a CPU profile covering all runs to this file")
 	)
 	flag.Parse()
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			fatalf("cpu profile: %v", err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fatalf("cpu profile: %v", err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			f.Close()
+		}()
+	}
 	if *qFlag == "" || *dataDir == "" {
 		flag.Usage()
 		os.Exit(2)

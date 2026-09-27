@@ -59,6 +59,21 @@ The synthetic dataset is schema-compatible with tpchgen but drops
 the cross-table referential invariants. Good enough to validate the
 query compiles; not a real benchmark.
 
+## Comparing against polars
+
+`compare.py` runs the golars queries and their polars equivalents
+(same logical plan, including the stubbed shipdate predicates) on the
+same parquet files and prints per-query medians and the ratio:
+
+```sh
+go run ./bench/pds-h/gen -rows 6000000 -out /tmp/pdsh   # ~SF1 lineitem size
+uv run --project bench/polars-compare python bench/pds-h/compare.py \
+    --data /tmp/pdsh --runs 7
+```
+
+The pdsh binary is built into the data directory. `pdsh -cpuprofile
+FILE` writes a CPU profile covering every repetition.
+
 ## Query status
 
 | # | Name                        | Status | Blocker |

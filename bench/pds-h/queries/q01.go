@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	"github.com/Gaurav-Gosain/golars"
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/lazy"
 )
@@ -60,8 +61,8 @@ func Q1(dataDir string) (lazy.LazyFrame, error) {
 			discount.Mean().Alias("avg_disc"),
 			expr.Col("l_quantity").Count().Alias("count_order"),
 		).
-		Sort("l_returnflag", false).
-		Sort("l_linestatus", false)
+		SortBy([]string{"l_returnflag", "l_linestatus"},
+			[]compute.SortOptions{{}, {}})
 
 	return out, nil
 }
