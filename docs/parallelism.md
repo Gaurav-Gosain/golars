@@ -37,6 +37,8 @@ Primitives currently available:
 - `ParallelMapStage` is the combinator that turns a per-morsel function into an order-preserving fan-out. It tags morsels on ingress with a sequence number, dispatches to a small worker pool, and uses a reorder buffer on egress so downstream stages see input order regardless of worker count. `ParallelFilterStage`, `ParallelProjectStage`, `ParallelWithColumnsStage` are thin wrappers. Parallel stages are the default (`min(GOMAXPROCS, 8)` workers, `WithStreamingWorkers(1)` forces serial).
 - `CollectSink` concatenates morsel chunks column-wise into a single DataFrame. A single morsel skips the pipeline entirely and evaluates eagerly.
 
+Partial aggregation: without `WithStreaming`, an Aggregate (or a select of sum, min, max, count, len and mean) over filter, with_columns, select, rename and drop runs per morsel: parquet row groups, or 64K-row zero-copy slices of an in-memory frame of at least 128K rows. Each worker reduces its morsel to partial aggregates and only those are combined. This is faster (LazyPipeline -30%) and a single run's heap is unchanged, but with many workers holding morsel temporaries at once, peak RSS over repeated runs in one process is about 20% higher at the default GOGC (about 2x at GOGC=200).
+
 Hybrid execution: `lf.Collect(ctx, lazy.WithStreaming())` runs the longest streaming-friendly prefix through the pipeline executor. When a blocker node (Sort, Aggregate, Join) appears above that prefix, the upstream DataFrame is materialized first and the blocker runs eagerly. This keeps the surface simple (one `Collect` call) while letting streaming pay off for scan + filter + project chains and not regress for blockers.
 
 ```mermaid

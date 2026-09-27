@@ -190,6 +190,44 @@ func assertClose(t *testing.T, got, want *dataframe.DataFrame) {
 
 var _ = compute.SortOptions{}
 
+// A large in-memory frame aggregates in zero-copy slices. Head(height)
+// keeps the same rows but disables the batched path, giving the eager
+// reference.
+func TestMorselAggregateInMemoryFrame(t *testing.T) {
+	ctx := context.Background()
+	mem := testutil.NewCheckedAllocator(t)
+	n := 300_000
+	df := morselFrame(t, series.WithAllocator(mem), n)
+	defer df.Release()
+	x, k := expr.Col("x"), expr.Col("k")
+	build := func(lf lazy.LazyFrame) lazy.LazyFrame {
+		return lf.Filter(k.Ne(expr.LitInt64(2))).
+			WithColumns(x.Mul(expr.LitFloat64(3)).Alias("x3")).
+			GroupBy("g").
+			Agg(expr.Col("x3").Sum().Alias("s"), x.Mean().Alias("m"), x.Count().Alias("c"),
+				x.Min().Alias("lo"), x.Max().Alias("hi"), expr.Len().Alias("n"))
+	}
+	lf := build(lazy.FromDataFrame(df))
+	got, err := lf.Collect(ctx, lazy.WithExecAllocator(mem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Release()
+	want, err := build(lazy.FromDataFrame(df).Head(n)).Collect(ctx, lazy.WithExecAllocator(mem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Release()
+	if !sameSchema(got, want) {
+		t.Fatalf("schema %s, want %s", got.Schema(), want.Schema())
+	}
+	gs, _ := got.SortBy(ctx, []string{"g"}, nil)
+	defer gs.Release()
+	ws, _ := want.SortBy(ctx, []string{"g"}, nil)
+	defer ws.Release()
+	assertClose(t, gs, ws)
+}
+
 // Only string columns compared with literals in filters and dropped
 // before the fragment output are offered for dictionary reads.
 func TestMorselDictionaryColumns(t *testing.T) {

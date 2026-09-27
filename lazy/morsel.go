@@ -33,29 +33,37 @@ import (
 // the eager path.
 var errMorselNotApplicable = errors.New("lazy: not a morsel fragment")
 
-// morselFragment returns the batched source at the bottom of n when
-// every node from n down to it is row-local. ops counts the operators
-// above the source.
-func morselFragment(n Node) (src SourceFunc, ops int, ok bool) {
+// frameMorselRows is the batch height for in-memory frames, which are
+// cut into zero-copy slices.
+const frameMorselRows = 64 * 1024
+
+// morselFragment returns the leaf at the bottom of n when every node
+// from n down to it is row-local and the leaf can be read in batches: a
+// source with OpenBatches, or an in-memory scan of at least two batches
+// (only used for partial aggregation, see tryMorselAggregate). ops
+// counts the operators above the leaf.
+func morselFragment(n Node) (leaf Node, ops int, ok bool) {
 	for {
 		switch node := n.(type) {
 		case SourceFunc:
 			return node, ops, node.OpenBatches != nil
+		case DataFrameScan:
+			return node, ops, node.Source != nil && node.Length < 0 && node.Source.Height() >= 2*frameMorselRows
 		case Filter:
 			if !expr.IsElementwise(node.Predicate) {
-				return SourceFunc{}, 0, false
+				return nil, 0, false
 			}
 			n = node.Input
 		case WithColumns:
 			if !allElementwise(node.Exprs) {
-				return SourceFunc{}, 0, false
+				return nil, 0, false
 			}
 			n = node.Input
 		case Projection:
 			// A projection of literals only has one row in polars, not
 			// one per batch.
 			if !allElementwise(node.Exprs) || !everyExprReadsAColumn(node.Exprs) {
-				return SourceFunc{}, 0, false
+				return nil, 0, false
 			}
 			n = node.Input
 		case Rename:
@@ -63,11 +71,24 @@ func morselFragment(n Node) (src SourceFunc, ops int, ok bool) {
 		case Drop:
 			n = node.Input
 		default:
-			return SourceFunc{}, 0, false
+			return nil, 0, false
 		}
 		ops++
 	}
 }
+
+// frameBatches serves an in-memory frame as zero-copy row slices.
+type frameBatches struct {
+	df   *dataframe.DataFrame
+	size int
+}
+
+func (b frameBatches) NumBatches() int { return (b.df.Height() + b.size - 1) / b.size }
+func (b frameBatches) ReadBatch(_ context.Context, i int) (*dataframe.DataFrame, error) {
+	lo := i * b.size
+	return b.df.Slice(lo, min(b.size, b.df.Height()-lo))
+}
+func (b frameBatches) Close() error { return nil }
 
 func everyExprReadsAColumn(exprs []expr.Expr) bool {
 	for _, e := range exprs {
@@ -81,7 +102,8 @@ func everyExprReadsAColumn(exprs []expr.Expr) bool {
 // withLeaf rebuilds the row-local chain n with its source replaced by
 // leaf.
 func withLeaf(n Node, leaf Node) Node {
-	if _, ok := n.(SourceFunc); ok {
+	switch n.(type) {
+	case SourceFunc, DataFrameScan:
 		return leaf
 	}
 	return n.WithChildren([]Node{withLeaf(n.Children()[0], leaf)})
@@ -91,12 +113,27 @@ func withLeaf(n Node, leaf Node) Node {
 // of src and hands each result to reduce, returning the reduced results
 // in batch order. reduce may return its input. Workers are bounded by
 // GOMAXPROCS; each holds one batch at a time.
-func runMorsels(ctx context.Context, cfg execConfig, fragment Node, src SourceFunc,
+func runMorsels(ctx context.Context, cfg execConfig, fragment Node, leaf Node,
 	reduce func(context.Context, *dataframe.DataFrame) (*dataframe.DataFrame, error),
 ) ([]*dataframe.DataFrame, error) {
-	bs, err := src.OpenBatches(ctx, BatchOptions{Columns: src.Projection, Dictionary: dictColumns(fragment, src)})
-	if err != nil {
-		return nil, err
+	var (
+		bs     BatchSource
+		leafOf func(*dataframe.DataFrame) Node
+	)
+	switch l := leaf.(type) {
+	case SourceFunc:
+		var err error
+		bs, err = l.OpenBatches(ctx, BatchOptions{Columns: l.Projection, Dictionary: dictColumns(fragment, l)})
+		if err != nil {
+			return nil, err
+		}
+		leafOf = func(b *dataframe.DataFrame) Node { return DataFrameScan{Source: b, Length: -1} }
+	case DataFrameScan:
+		bs = frameBatches{df: l.Source, size: frameMorselRows}
+		// The slice inherits the scan's projection and predicate.
+		leafOf = func(b *dataframe.DataFrame) Node { s := l; s.Source = b; return s }
+	default:
+		return nil, errMorselNotApplicable
 	}
 	defer bs.Close()
 	nb := bs.NumBatches()
@@ -116,7 +153,7 @@ func runMorsels(ctx context.Context, cfg execConfig, fragment Node, src SourceFu
 				if i >= nb || ctx.Err() != nil {
 					return
 				}
-				out[i], errs[i] = runOneMorsel(ctx, cfg, fragment, bs, i, reduce)
+				out[i], errs[i] = runOneMorsel(ctx, cfg, fragment, bs, leafOf, i, reduce)
 				if errs[i] != nil {
 					cancel()
 					return
@@ -132,8 +169,8 @@ func runMorsels(ctx context.Context, cfg execConfig, fragment Node, src SourceFu
 	return out, nil
 }
 
-func runOneMorsel(ctx context.Context, cfg execConfig, fragment Node, bs BatchSource, i int,
-	reduce func(context.Context, *dataframe.DataFrame) (*dataframe.DataFrame, error),
+func runOneMorsel(ctx context.Context, cfg execConfig, fragment Node, bs BatchSource,
+	leafOf func(*dataframe.DataFrame) Node, i int, reduce func(context.Context, *dataframe.DataFrame) (*dataframe.DataFrame, error),
 ) (*dataframe.DataFrame, error) {
 	batch, err := bs.ReadBatch(ctx, i)
 	if err != nil {
@@ -143,7 +180,7 @@ func runOneMorsel(ctx context.Context, cfg execConfig, fragment Node, bs BatchSo
 	if err != nil {
 		return nil, err
 	}
-	res, err := executeNode(ctx, cfg, withLeaf(fragment, DataFrameScan{Source: batch, Length: -1}))
+	res, err := executeNode(ctx, cfg, withLeaf(fragment, leafOf(batch)))
 	batch.Release()
 	if err != nil || reduce == nil {
 		return res, err
@@ -197,11 +234,17 @@ func executeJoinInput(ctx context.Context, cfg execConfig, n Node) (*dataframe.D
 }
 
 func morselChain(ctx context.Context, cfg execConfig, n Node, contiguous bool) (*dataframe.DataFrame, bool, error) {
-	src, ops, ok := morselFragment(n)
+	leaf, ops, ok := morselFragment(n)
 	if !ok || ops == 0 {
 		return nil, false, nil
 	}
-	parts, err := runMorsels(ctx, cfg, n, src, nil)
+	// In-memory frames gain nothing from a batched filter or projection:
+	// the eager kernels already run in parallel and write contiguous
+	// output, which the batched path would have to copy together again.
+	if _, isSrc := leaf.(SourceFunc); !isSrc {
+		return nil, false, nil
+	}
+	parts, err := runMorsels(ctx, cfg, n, leaf, nil)
 	if errors.Is(err, errMorselNotApplicable) {
 		return nil, false, nil
 	}

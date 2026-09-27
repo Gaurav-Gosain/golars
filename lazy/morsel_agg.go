@@ -136,7 +136,7 @@ func splitAggs(exprs []expr.Expr, keys []string) (aggSplit, bool) {
 // with partial aggregation over a morsel fragment. ok is false when the
 // eager path should run instead.
 func tryMorselAggregate(ctx context.Context, cfg execConfig, input Node, keys []string, aggs []expr.Expr) (*dataframe.DataFrame, bool, error) {
-	src, _, ok := morselFragment(input)
+	leaf, _, ok := morselFragment(input)
 	if !ok {
 		return nil, false, nil
 	}
@@ -179,7 +179,7 @@ func tryMorselAggregate(ctx context.Context, cfg execConfig, input Node, keys []
 		})
 		return aggregate(ctx, df, sp.partial)
 	}
-	parts, err := runMorsels(ctx, cfg, input, src, reduce)
+	parts, err := runMorsels(ctx, cfg, input, leaf, reduce)
 	if errors.Is(err, errMorselNotApplicable) {
 		return nil, false, nil
 	}
