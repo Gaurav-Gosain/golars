@@ -82,7 +82,8 @@ func TestStatementParts(t *testing.T) {
 	}{
 		{`load data/x.csv as trades`, `cmd:load path:data/x.csv kw:as newframe:trades`},
 		{`.LOAD "my file.csv"`, `cmd:load path:my file.csv`},
-		{`join other on id left`, `cmd:join target:other kw:on col:id opt:left`},
+		{`join other on id left`, `cmd:join target:other kw:on list:[id] opt:left`},
+		{`join other on id,k full suffix _o`, `cmd:join target:other kw:on list:[id k] opt:full kw:suffix word:_o`},
 		{`drop a, b c`, `cmd:drop list:[a b] list:[c]`},
 		{`select a, b`, `cmd:select list:[a b]`},
 		{`select my-col other`, `cmd:select list:[my-col] list:[other]`},
@@ -152,7 +153,7 @@ func TestStatementDiagnostics(t *testing.T) {
 		{`filtet x > 1`, "filtet", `unknown command "filtet"`, "filter"},
 		{`load`, "", "load needs a file path", ""},
 		{`limit ten`, "ten", `expected a non-negative integer, got "ten"`, ""},
-		{`join x on id outer`, "outer", `unknown join option "outer"`, ""},
+		{`join x on id sideways`, "sideways", `unknown join option "sideways"`, ""},
 		{`join x on id lefft`, "lefft", `unknown join option "lefft"`, "left"},
 		{`join x id`, "id", "expected `on`", ""},
 		{`cast x i128`, "i128", `unknown dtype "i128"`, "i8"},

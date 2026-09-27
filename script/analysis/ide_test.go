@@ -38,8 +38,14 @@ func TestComplete(t *testing.T) {
 		{load + "with x = cut(amount, [1], la|", []string{"labels="}, nil},
 		{load + "sort amount |", []string{"asc", "desc", "name"}, nil},
 		{load + "groupby name amount:s|", []string{"sum", "std"}, []string{"max"}},
-		{load + "join x on name |", []string{"inner", "left", "cross"}, nil},
+		{load + "join x on name |", []string{"inner", "left", "right", "full", "semi", "anti", "cross", "suffix"}, nil},
 		{load + "cast amount f|", []string{"f32", "f64"}, nil},
+		// Multi-key full join: separate key columns with the suffix.
+		{"load examples/script/data/salaries.csv as s\n" + load + "join s on name,amount full suffix _s\nselect |",
+			[]string{"name", "amount", "name_s", "amount_s"}, nil},
+		// Semi joins keep only the focus columns.
+		{"load examples/script/data/salaries.csv as s\nwith x = 1\n" + load + "with y = 2\njoin s on name semi\nselect |",
+			[]string{"name", "y"}, []string{"x"}},
 		{"load examples/script/data/sal|", []string{"examples/script/data/salaries.csv"}, nil},
 		{"load examples/script/data/salaries.csv as s\nuse |", []string{"s"}, nil},
 		{load + "with m = amount / 12\nselect m|", []string{"m"}, nil},

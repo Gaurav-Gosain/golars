@@ -689,18 +689,39 @@ func (t *trans) join(args []string) error {
 		return fmt.Errorf("join: expected NAME on KEY [how]")
 	}
 	name := args[0]
-	key := args[2]
+	var keys []string
+	for k := range strings.SplitSeq(args[2], ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			keys = append(keys, fmt.Sprintf("%q", k))
+		}
+	}
 	how := "InnerJoin"
-	if len(args) >= 4 {
-		switch strings.ToLower(args[3]) {
+	suffix := ""
+	rest := args[3:]
+	for i := 0; i < len(rest); i++ {
+		switch strings.ToLower(rest[i]) {
 		case "inner":
 			how = "InnerJoin"
 		case "left":
 			how = "LeftJoin"
+		case "right":
+			how = "RightJoin"
+		case "full", "outer":
+			how = "FullJoin"
+		case "semi":
+			how = "SemiJoin"
+		case "anti":
+			how = "AntiJoin"
 		case "cross":
 			how = "CrossJoin"
+		case "suffix":
+			if i+1 >= len(rest) {
+				return fmt.Errorf("join: suffix needs a value")
+			}
+			i++
+			suffix = fmt.Sprintf(", dataframe.WithJoinSuffix(%q)", rest[i])
 		default:
-			return fmt.Errorf("join: unknown join type %q", args[3])
+			return fmt.Errorf("join: unknown join type %q", rest[i])
 		}
 	}
 	rhs, ok := t.frames[name]
@@ -708,7 +729,7 @@ func (t *trans) join(args []string) error {
 		return fmt.Errorf("join: unknown frame %q", name)
 	}
 	t.imports["github.com/Gaurav-Gosain/golars/dataframe"] = struct{}{}
-	t.pipe("Join", fmt.Sprintf("%s, []string{%q}, dataframe.%s", rhs, key, how))
+	t.pipe("Join", fmt.Sprintf("%s, []string{%s}, dataframe.%s%s", rhs, strings.Join(keys, ", "), how, suffix))
 	return nil
 }
 

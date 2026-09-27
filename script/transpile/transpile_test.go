@@ -65,6 +65,7 @@ select ts, user, amount, share = amount / amount.sum()
 show
 reset
 join_asof rates on ts by user forward tolerance 2h
+join rates on ts,user full suffix _r
 sort user asc ts desc
 group_by_dynamic ts every 1h by user amount:sum:total n=len()
 to_dummies user`,
@@ -75,6 +76,7 @@ to_dummies user`,
 				`.FloorDiv(expr.LitInt64(2))`,
 				`expr.Col("amount").Div(expr.Col("amount").Sum()).Alias("share")`,
 				`JoinAsof(rates, dataframe.AsofOptions{On: "ts", By: []string{"user"}, Strategy: dataframe.AsofForward, Tolerance: "2h"})`,
+				`Join(rates, []string{"ts", "user"}, dataframe.FullJoin, dataframe.WithJoinSuffix("_r"))`,
 				`SortBy([]string{"user", "ts"}, []compute.SortOptions{{Descending: false}, {Descending: true}})`,
 				`GroupByDynamic("ts", dataframe.DynamicGroupOptions{Every: "1h", GroupBy: []string{"user"}})`,
 				`expr.Len().Alias("n")`,

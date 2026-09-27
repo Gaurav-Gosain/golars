@@ -572,41 +572,57 @@ func (a *analyzer) otherFrame(p syntax.Part) Frame {
 
 func (a *analyzer) applyJoin(st *syntax.Stmt) {
 	target := parts(st, syntax.PartTarget)[0]
-	key := parts(st, syntax.PartColumn)[0]
+	var keys []syntax.Part
+	for _, l := range parts(st, syntax.PartList) {
+		keys = append(keys, l.Items...)
+	}
+	keys = append(keys, parts(st, syntax.PartColumn)...)
 	how := dataframe.InnerJoin
 	if o := parts(st, syntax.PartOption); len(o) == 1 {
-		switch o[0].Value {
-		case "left":
-			how = dataframe.LeftJoin
-		case "cross":
-			how = dataframe.CrossJoin
+		if t, err := dataframe.ParseJoinType(o[0].Value); err == nil {
+			how = t
 		}
+	}
+	var opts []dataframe.JoinOption
+	if w := parts(st, syntax.PartWord); len(w) == 1 {
+		opts = append(opts, dataframe.WithJoinSuffix(w[0].Value))
 	}
 	right := a.otherFrame(target)
 	leftRows := a.focus.Rows
-	good := a.refColumn(key, a.focus, true)
-	if right.Known() && !right.Schema.Contains(key.Value) {
-		d := a.errAt(key, "unknown-column", "join key %q is not a column of %s", key.Value, target.Value)
-		if best := closestName(key.Value, right.Schema.Names()); best != "" {
-			d.Hint = "did you mean \"" + best + "\"?"
-			d.Fix = &syntax.Fix{Title: "Change to " + best, Text: best}
+	good := len(keys) > 0
+	for _, key := range keys {
+		if !a.refColumn(key, a.focus, true) {
+			good = false
 		}
-		good = false
+		if right.Known() && !right.Schema.Contains(key.Value) {
+			d := a.errAt(key, "unknown-column", "join key %q is not a column of %s", key.Value, target.Value)
+			if best := closestName(key.Value, right.Schema.Names()); best != "" {
+				d.Hint = "did you mean \"" + best + "\"?"
+				d.Fix = &syntax.Fix{Title: "Change to " + best, Text: best}
+			}
+			good = false
+		}
 	}
 	add := map[string]Loc{}
-	for k, v := range right.Origins {
-		if _, taken := a.focus.Origins[k]; !taken {
-			add[k] = v
+	if how != dataframe.SemiJoin && how != dataframe.AntiJoin {
+		for k, v := range right.Origins {
+			if _, taken := a.focus.Origins[k]; !taken {
+				add[k] = v
+			}
 		}
 	}
 	if good && a.focus.Known() && right.Known() {
+		errAt := target
+		if len(keys) > 0 {
+			errAt = keys[0]
+		}
 		out, err := runEager(a.focus, true, func(df *dataframe.DataFrame) (*dataframe.DataFrame, error) {
 			r := probe(right, true)
 			defer r.Release()
-			return df.Join(bgCtx, r, []string{key.Value}, how)
+			return df.Join(bgCtx, r, values(keys), how, opts...)
 		})
 		if err != nil {
-			a.engineError(key, err, a.focus)
+			a.engineError(errAt, err, a.focus)
 			a.focus.Schema = nil
 		} else {
 			a.setFocus(out, a.focus.Rows, a.focus.Exact, add)
@@ -618,12 +634,17 @@ func (a *analyzer) applyJoin(st *syntax.Stmt) {
 	switch how {
 	case dataframe.LeftJoin:
 		a.focus.Rows = leftRows
+	case dataframe.RightJoin:
+		a.focus.Rows = right.Rows
 	case dataframe.CrossJoin:
 		a.focus.Rows = -1
 		if leftRows >= 0 && right.Rows >= 0 {
 			a.focus.Rows = leftRows * right.Rows
 		}
 	default:
+		// Inner, full, semi and anti joins change the row count in
+		// ways only the data decides.
+		a.focus.Rows = -1
 		a.focus.Exact = false
 	}
 	a.base = a.focus

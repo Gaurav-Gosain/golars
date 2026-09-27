@@ -189,13 +189,20 @@ var Commands = []CommandSpec{
 		},
 	},
 	{
-		Name: "join", Signature: "join <path|NAME> on <key> [inner|left|cross]", Grammar: "target 'on' col [inner|left|cross]",
-		Summary:  "Join focus with a file or named frame on KEY.",
+		Name: "join", Signature: "join <path|NAME> on <keys> [inner|left|right|full|semi|anti|cross] [suffix <s>]",
+		Grammar: "target 'on' collist [inner|left|right|full|outer|semi|anti|cross] ['suffix' word]",
+		Summary: "Join focus with a file or named frame on KEYS.",
+		LongDoc: "KEYS is one column or a comma separated list; both frames must have them." +
+			" The join type defaults to inner. `full` keeps every row of both sides with" +
+			" separate key columns; `semi` and `anti` keep the focus rows that do or do not" +
+			" match, with only the focus columns. Right columns whose name collides with a" +
+			" focus column get `suffix` (default `_right`).",
 		Category: "pipeline", ArgKind: "frame",
 		Examples: []string{
 			"load people.csv as people",
 			"load salaries.csv",
 			"join people on name inner",
+			"join people on name,dept left suffix _p",
 		},
 	},
 	{

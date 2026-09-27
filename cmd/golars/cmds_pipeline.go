@@ -352,25 +352,34 @@ func (s *state) otherFrame(target string) (*dataframe.DataFrame, error) {
 	return df, nil
 }
 
-// cmdJoin joins the focus with a staged frame NAME or a file PATH.
-// A staged name wins over a path of the same spelling. The join runs
-// eagerly: the result becomes the new focus.
+// cmdJoin joins the focus with a staged frame NAME or a file PATH on
+// one or more comma separated keys. A staged name wins over a path of
+// the same spelling. The join runs eagerly: the result becomes the new
+// focus.
 func cmdJoin(s *state, c *call) error {
-	if len(c.args) < 3 || len(c.args) > 4 || !strings.EqualFold(c.args[1], "on") {
+	if len(c.args) < 3 || !strings.EqualFold(c.args[1], "on") {
 		return c.usage()
 	}
-	target, key := c.args[0], c.args[2]
+	target := c.args[0]
+	keys := columnList(c.args[2:3])
+	key := strings.Join(keys, ",")
 	how := dataframe.InnerJoin
-	if len(c.args) == 4 {
-		switch strings.ToLower(c.args[3]) {
-		case "inner":
-		case "left":
-			how = dataframe.LeftJoin
-		case "cross":
-			how = dataframe.CrossJoin
-		default:
-			return fmt.Errorf("unknown join type %q: want inner, left or cross", c.args[3])
+	var opts []dataframe.JoinOption
+	rest := c.args[3:]
+	for i := 0; i < len(rest); i++ {
+		if strings.EqualFold(rest[i], "suffix") {
+			if i+1 >= len(rest) {
+				return fmt.Errorf("suffix needs a value")
+			}
+			i++
+			opts = append(opts, dataframe.WithJoinSuffix(rest[i]))
+			continue
 		}
+		t, err := dataframe.ParseJoinType(rest[i])
+		if err != nil {
+			return err
+		}
+		how = t
 	}
 	other, err := s.otherFrame(target)
 	if err != nil {
@@ -381,7 +390,7 @@ func cmdJoin(s *state, c *call) error {
 	if err != nil {
 		return err
 	}
-	joined, err := cur.Join(s.ctx, other, []string{key}, how)
+	joined, err := cur.Join(s.ctx, other, keys, how, opts...)
 	cur.Release()
 	if err != nil {
 		return err
