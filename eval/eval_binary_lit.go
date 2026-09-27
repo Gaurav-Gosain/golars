@@ -83,14 +83,16 @@ func evalBinaryLiteralFast(
 		// through SubLit. Flip was handled by toCompareOp for
 		// comparisons, but arithmetic requires the original sense.
 		if which != litRight {
-			return nil, false, nil
+			out, err = litLeftArith(ctx, ec, n, colSer, litVal, op, df)
+			break
 		}
 		out, err = compute.SubLit(ctx, colSer, litVal, opts...)
 	case opMul:
 		out, err = compute.MulLit(ctx, colSer, litVal, opts...)
 	case opDiv:
 		if which != litRight {
-			return nil, false, nil
+			out, err = litLeftArith(ctx, ec, n, colSer, litVal, op, df)
+			break
 		}
 		out, err = compute.DivLit(ctx, colSer, litVal, opts...)
 	default:
@@ -162,7 +164,10 @@ func toCompareOp(op expr.BinaryOp, flip bool) compareOp {
 			return opAdd // commutative
 		case expr.OpMul:
 			return opMul // commutative
-			// opSub / opDiv aren't symmetric; caller checks litRight.
+		case expr.OpSub:
+			return opSub // not symmetric: handled by revArithLit
+		case expr.OpDiv:
+			return opDiv // not symmetric: handled by revArithLit
 		}
 		return opInvalid
 	}

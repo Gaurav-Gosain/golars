@@ -47,6 +47,7 @@ func BenchmarkExprEval(b *testing.B) {
 		"str_contains": expr.Col("s").Str().Contains("green"),
 		"over_sum":     x.Sum().Over("g"),
 		"filter_pred":  x.Gt(expr.LitFloat64(50)).And(k.Lt(expr.LitInt64(900))),
+		"disc_price":   x.Mul(expr.LitFloat64(1).Sub(x.Div(expr.LitFloat64(1000)))),
 	}
 	for _, n := range []int{64 << 10, 1 << 20} {
 		df := exprBenchFrame(b, n)

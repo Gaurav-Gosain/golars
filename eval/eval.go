@@ -120,6 +120,12 @@ func evalBinary(ctx context.Context, ec EvalContext, n expr.BinaryNode, df *data
 		return nil, err
 	}
 	defer right.Release()
+	return evalBinaryOperands(ctx, ec, n, left, right)
+}
+
+// evalBinaryOperands applies n to already evaluated operands. It borrows
+// left and right.
+func evalBinaryOperands(ctx context.Context, ec EvalContext, n expr.BinaryNode, left, right *series.Series) (*series.Series, error) {
 	// Broadcast a scalar side (an aggregation or a length-1 literal)
 	// to the other side, as polars does for `x - x.mean()`.
 	if left.Len() != right.Len() && (left.Len() == 1 || right.Len() == 1) {
