@@ -106,7 +106,7 @@ func init() {
 			"strftime":  {names: []string{"format"}},
 		},
 		"list": {
-			"join":         {method: "JoinWith", defaults: []any{false}, names: []string{"separator", "ignore_nulls"}},
+			"join":         {method: "JoinWith", defaults: []any{true}, names: []string{"separator", "ignore_nulls"}},
 			"sort":         {defaults: []any{false, false}, names: []string{"descending", "nulls_last"}},
 			"unique":       {defaults: []any{false}, names: []string{"maintain_order"}},
 			"head":         {defaults: []any{5}},
