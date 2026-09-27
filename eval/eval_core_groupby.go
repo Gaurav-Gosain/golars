@@ -116,7 +116,11 @@ func groupIDsFor(keyCols []*series.Series, height int) ([]int, int) {
 				buf = append(buf, 0)
 			} else {
 				buf = append(buf, 1)
-				buf = appendFallbackKey(buf, series.ValueAt(c, r))
+				if raw, ok := physicalKeyBytes(c, r); ok {
+					buf = append(buf, raw...)
+				} else {
+					buf = appendFallbackKey(buf, series.ValueAt(c, r))
+				}
 			}
 			buf = append(buf, 0x1f)
 		}
@@ -129,6 +133,26 @@ func groupIDsFor(keyCols []*series.Series, height int) ([]int, int) {
 		}
 	}
 	return gids, len(table)
+}
+
+// physicalKeyBytes returns the raw value bytes of row r for integer
+// and temporal arrays. Going through series.ValueAt instead converts
+// durations and times to time.Duration, which overflows for large
+// microsecond values and made distinct keys collide (found by
+// internal/difftest). Floats keep the rendered path so -0.0 and NaN
+// fold together.
+func physicalKeyBytes(a arrow.Array, r int) ([]byte, bool) {
+	switch a.DataType().ID() {
+	case arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64,
+		arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.UINT64,
+		arrow.DATE32, arrow.DATE64, arrow.TIMESTAMP, arrow.DURATION, arrow.TIME32, arrow.TIME64:
+	default:
+		return nil, false
+	}
+	w := a.DataType().(arrow.FixedWidthDataType).BitWidth() / 8
+	d := a.Data()
+	start := (d.Offset() + r) * w
+	return d.Buffers()[1].Bytes()[start : start+w], true
 }
 
 // appendFallbackKey renders one non-null key value for the generic
