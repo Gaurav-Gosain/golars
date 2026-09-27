@@ -96,6 +96,11 @@ func runCompareLit(ctx context.Context, a *series.Series, lit any, opts []Option
 		return out, err
 	}
 	cfg := resolve(opts)
+	if s, ok := lit.(string); ok {
+		if out, ok, err := compareStringScalar(ctx, a, s, cfg, op); ok {
+			return out, err
+		}
+	}
 	aArr, err := extractChunk(a, cfg.alloc)
 	if err != nil {
 		return nil, err
