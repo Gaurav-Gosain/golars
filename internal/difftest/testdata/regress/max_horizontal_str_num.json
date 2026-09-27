@@ -1,6 +1,6 @@
 {
   "name": "max_horizontal_str_num",
-  "status": "known",
+  "status": "fixed",
   "note": "max_horizontal over str and u32: polars raises (polars raised ComputeError: cannot compare string with numeric type (u32))",
   "plan": {
     "seed": 213511,

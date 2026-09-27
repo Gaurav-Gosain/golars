@@ -1,6 +1,6 @@
 {
   "name": "strftime_date_time_directive",
-  "status": "known",
+  "status": "fixed",
   "note": "strftime with a time directive on a date: polars raises, golars formats (polars raised ComputeError: cannot format Date with format '%s')",
   "plan": {
     "seed": 201182,

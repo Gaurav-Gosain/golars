@@ -1,6 +1,6 @@
 {
   "name": "neg_unsigned",
-  "status": "known",
+  "status": "fixed",
   "note": "negation of an unsigned column: polars raises, golars returns i64 (polars raised InvalidOperationError: `neg` operation not supported for dtype `u32`)",
   "plan": {
     "seed": 212378,

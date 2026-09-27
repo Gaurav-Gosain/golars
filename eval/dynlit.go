@@ -234,3 +234,7 @@ func temporalMedian(s *series.Series, ec EvalContext) (*series.Series, bool, err
 	out, err := compute.Cast(context.Background(), ints, target, kernelOpts(ec)...)
 	return out, true, err
 }
+
+func isOrderingOp(op expr.BinaryOp) bool {
+	return op == expr.OpLt || op == expr.OpLe || op == expr.OpGt || op == expr.OpGe
+}

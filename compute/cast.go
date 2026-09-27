@@ -40,6 +40,10 @@ func Cast(ctx context.Context, s *series.Series, to dtype.DType, opts ...Option)
 	if s.DType().Equal(to) {
 		return s.Clone(), nil
 	}
+	if s.DType().IsNull() {
+		// A Null-typed column (lit(None)) casts to all nulls of any dtype.
+		return series.FullNull(cfg.outName(s.Name()), to.Arrow(), s.Len(), series.WithAllocator(cfg.alloc))
+	}
 	if out, ok, err := castExtra(ctx, s, to, cfg); ok {
 		return out, err
 	}

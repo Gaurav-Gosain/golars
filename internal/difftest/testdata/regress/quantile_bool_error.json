@@ -1,6 +1,6 @@
 {
   "name": "quantile_bool_error",
-  "status": "known",
+  "status": "fixed",
   "note": "quantile on bool: polars raises, golars returns a value (polars raised InvalidOperationError: `quantile` operation not supported for dtype `bool`)",
   "plan": {
     "seed": 200157,

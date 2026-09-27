@@ -249,6 +249,18 @@ func runCompare(ctx context.Context, a, b *series.Series, opts []Option, kernel 
 		return compareOrdered(ctx, name, aArr, bArr, float64Values(aArr), float64Values(bArr), op, cfg.alloc, par)
 	case arrow.STRING:
 		return compareStrings(ctx, name, aArr, bArr, op, cfg.alloc, par)
+	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16:
+		wa, err := widenToInt64(a, cfg.alloc)
+		if err != nil {
+			return nil, err
+		}
+		defer wa.Release()
+		wb, err := widenToInt64(b, cfg.alloc)
+		if err != nil {
+			return nil, err
+		}
+		defer wb.Release()
+		return runCompare(ctx, wa, wb, opts, kernel, op)
 	}
 	return nil, isUnsupported(kernel, a.DType())
 }
@@ -807,34 +819,39 @@ func stringPredicate(op compareOp) func(string, string) bool {
 }
 
 func compareBool(ctx context.Context, name string, aArr, bArr arrow.Array, op compareOp, mem memory.Allocator, par int) (*series.Series, error) {
-	if op != opEq && op != opNe {
-		return nil, ErrUnsupportedDType
-	}
 	aBool := aArr.(*array.Boolean)
 	bBool := bArr.(*array.Boolean)
 
 	n := aArr.Len()
 	out := make([]bool, n)
 	valid := buildValidityAnd(aArr, bArr)
-	eq := op == opEq
-	err := pool.ParallelFor(ctx, n, par, func(ctx context.Context, s, e int) error {
-		if valid == nil {
-			for i := s; i < e; i++ {
-				result := aBool.Value(i) == bBool.Value(i)
-				if !eq {
-					result = !result
-				}
-				out[i] = result
-			}
-			return nil
+	// Bools order false < true, as in polars.
+	b2i := func(v bool) int {
+		if v {
+			return 1
 		}
+		return 0
+	}
+	cmp := func(i int) bool {
+		x, y := b2i(aBool.Value(i)), b2i(bBool.Value(i))
+		switch op {
+		case opEq:
+			return x == y
+		case opNe:
+			return x != y
+		case opLt:
+			return x < y
+		case opLe:
+			return x <= y
+		case opGt:
+			return x > y
+		}
+		return x >= y
+	}
+	err := pool.ParallelFor(ctx, n, par, func(ctx context.Context, s, e int) error {
 		for i := s; i < e; i++ {
-			if valid[i] {
-				result := aBool.Value(i) == bBool.Value(i)
-				if !eq {
-					result = !result
-				}
-				out[i] = result
+			if valid == nil || valid[i] {
+				out[i] = cmp(i)
 			}
 		}
 		return nil

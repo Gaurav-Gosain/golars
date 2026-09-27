@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/internal/testutil"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -106,11 +109,13 @@ func TestCompareBool(t *testing.T) {
 	defer ne.Release()
 	assertBoolValues(t, ne, []bool{false, true, true, false}, nil)
 
-	// Ordering of booleans is not supported.
-	_, err := compute.Lt(ctx, a, b, compute.WithAllocator(mem))
-	if !errors.Is(err, compute.ErrUnsupportedDType) {
-		t.Errorf("Lt on bool: expected ErrUnsupportedDType, got %v", err)
+	// polars orders booleans false < true.
+	lt, err := compute.Lt(ctx, a, b, compute.WithAllocator(mem))
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer lt.Release()
+	assertBoolValues(t, lt, []bool{false, true, false, false}, nil)
 }
 
 func TestCompareNullPropagation(t *testing.T) {
@@ -143,14 +148,25 @@ func TestCompareUnsupportedDType(t *testing.T) {
 	mem := testutil.NewCheckedAllocator(t)
 	ctx := context.Background()
 
-	a, _ := series.FromBool("a", []bool{true}, nil, series.WithAllocator(mem))
-	b, _ := series.FromBool("b", []bool{false}, nil, series.WithAllocator(mem))
+	// A list column has no ordering.
+	list := func(name string, v int64) *series.Series {
+		lb := array.NewListBuilder(mem, arrow.PrimitiveTypes.Int64)
+		defer lb.Release()
+		lb.Append(true)
+		lb.ValueBuilder().(*array.Int64Builder).Append(v)
+		s, err := series.New(name, lb.NewArray())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	a, b := list("a", 1), list("b", 2)
 	defer a.Release()
 	defer b.Release()
 
 	_, err := compute.Lt(ctx, a, b, compute.WithAllocator(mem))
 	if !errors.Is(err, compute.ErrUnsupportedDType) {
-		t.Errorf("Lt on bool: expected ErrUnsupportedDType, got %v", err)
+		t.Errorf("Lt on list: expected ErrUnsupportedDType, got %v", err)
 	}
 }
 

@@ -120,9 +120,15 @@ func registerScalarAggs() {
 		return series.ScalarUint32(s.Name(), c, true, seriesAlloc(ec))
 	}))
 	registerCore("quantile", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
+		if s.DType().IsBool() {
+			return nil, fmt.Errorf("`quantile` operation not supported for dtype `bool`")
+		}
 		return aggTyped(ec, "quantile", s)(s.QuantileSeries(paramFloat(n, 0, 0.5), series.QuantileNearest, seriesAlloc(ec)))
 	}))
 	registerCore("quantile_with", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
+		if s.DType().IsBool() {
+			return nil, fmt.Errorf("`quantile` operation not supported for dtype `bool`")
+		}
 		return aggTyped(ec, "quantile", s)(s.QuantileSeries(paramFloat(n, 0, 0.5), paramString(n, 1, series.QuantileNearest), seriesAlloc(ec)))
 	}))
 	registerCore("median", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {

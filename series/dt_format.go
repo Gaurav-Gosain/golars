@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -143,6 +144,10 @@ func (o DtOps) Strftime(format string, opts ...Option) (*Series, error) {
 				format += "%:z"
 			}
 		}
+	}
+	if info.kind == tkDate && formatNeedsTime(format) {
+		// chrono cannot render a time field from a date; polars raises.
+		return nil, fmt.Errorf("cannot format Date with format '%s'", format)
 	}
 	fm, err := temporal.CompileFormat(format)
 	if err != nil {
@@ -320,4 +325,30 @@ func appendPolarsDuration(dst []byte, v int64, u dtype.TimeUnit) []byte {
 		dst = append(dst, p.name...)
 	}
 	return dst
+}
+
+// formatNeedsTime reports whether a chrono format string uses a time
+// of day, fraction or zone directive, which a Date cannot supply.
+func formatNeedsTime(format string) bool {
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' || i+1 >= len(format) {
+			continue
+		}
+		j := i + 1
+		for j < len(format) && strings.ContainsRune("-_0^#.:3469", rune(format[j])) {
+			j++
+		}
+		if j >= len(format) {
+			break
+		}
+		if format[j] == '%' {
+			i = j
+			continue
+		}
+		if strings.ContainsRune("HkIlPpMSfRTXrscZz", rune(format[j])) {
+			return true
+		}
+		i = j
+	}
+	return false
 }

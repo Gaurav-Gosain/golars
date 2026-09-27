@@ -172,7 +172,7 @@ func emptyPivotColumn(name string, valDT dtype.DType, n int, agg dataframe.Pivot
 			}
 		}
 		return seriesFrom(name, b.NewArray())
-	case dataframe.PivotCount:
+	case dataframe.PivotCount, dataframe.PivotLen:
 		b := array.NewUint32Builder(mem)
 		defer b.Release()
 		for range n {

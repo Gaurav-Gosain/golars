@@ -116,6 +116,16 @@ func evalHorizontal(ctx context.Context, ec EvalContext, n expr.FunctionNode, df
 		}
 		return renamed(acc, name), nil
 	}
+	if n.Name == "min_horizontal" || n.Name == "max_horizontal" {
+		var hasStr, hasNum bool
+		for _, a := range args {
+			hasStr = hasStr || a.DType().IsString()
+			hasNum = hasNum || a.DType().IsNumeric()
+		}
+		if hasStr && hasNum {
+			return nil, fmt.Errorf("cannot compare string with numeric type")
+		}
+	}
 	target := commonDType(args)
 	boolSum := target.ID() == arrow.BOOL && (n.Name == "sum_horizontal" || n.Name == "cum_sum_horizontal")
 	cast := make([]*series.Series, len(args))
