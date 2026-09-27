@@ -25,7 +25,8 @@ func (t *strTable) init(hint int) {
 	for size < hint*2 {
 		size <<= 1
 	}
-	t.slots = make([]uint64, size)
+	t.slots = uint64Scratch.get(size)
+	clear(t.slots)
 	t.mask = uint64(size - 1)
 	t.offs = t.offs[:0]
 	t.lens = t.lens[:0]
@@ -65,9 +66,17 @@ func (t *strTable) insertOrGet(data []byte, s, e int32, h uint64, newCode int32)
 	return newCode, true
 }
 
+// release returns the slot array to the scratch pool.
+func (t *strTable) release() {
+	uint64Scratch.put(t.slots)
+	t.slots = nil
+}
+
 func (t *strTable) grow() {
 	size := len(t.slots) * 2
-	t.slots = make([]uint64, size)
+	uint64Scratch.put(t.slots)
+	t.slots = uint64Scratch.get(size)
+	clear(t.slots)
 	t.mask = uint64(size - 1)
 	for i, h := range t.hashes {
 		pos := h & t.mask

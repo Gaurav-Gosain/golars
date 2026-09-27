@@ -53,6 +53,33 @@ func newStrEncoder(arr *array.String, hint int) *strEncoder {
 	return e
 }
 
+// newStrEncoderSized is newStrEncoder with a separate presize hint for
+// each length class, so a caller that knows the key shape does not pay
+// for tables that stay empty or for repeated growth of the one in use.
+func newStrEncoderSized(arr *array.String, short, mid, long int) *strEncoder {
+	e := &strEncoder{arr: arr, hasNulls: arr.NullN() > 0, nullCode: -1}
+	if bufs := arr.Data().Buffers(); len(bufs) > 2 && bufs[2] != nil {
+		e.data = bufs[2].Bytes()
+	}
+	e.offs = arr.ValueOffsets()
+	e.short.init(short)
+	e.mid.init(mid)
+	e.long.init(long)
+	e.firstRows = make([]int32, 0, max(short+mid+long, 16))
+	return e
+}
+
+// release hands the encoder's hash tables back to the scratch pools.
+// firstRows and hashes stay valid; the encoder must not encode again.
+func (e *strEncoder) release() {
+	if e == nil {
+		return
+	}
+	e.short.release()
+	e.mid.release()
+	e.long.release()
+}
+
 // packShort packs a string of at most 7 bytes and its length into one
 // word. Distinct short strings map to distinct words because the length
 // sits in the top byte and the bytes past the length are zeroed. The
@@ -134,28 +161,35 @@ func pairHash(lo, hi uint64) uint64 {
 // midCode looks up (inserting when new) a key of 8 to 15 bytes.
 func (e *strEncoder) midCode(row int, s, t int32) int32 {
 	lo, hi := packMid(e.data, s, t)
-	h := pairHash(lo, hi)
-	code, ok := e.mid.get(lo, hi, h)
-	if !ok {
-		code = int32(len(e.firstRows))
+	code, inserted := e.mid.insertOrGet(lo, hi, pairHash(lo, hi), int32(len(e.firstRows)))
+	if inserted {
 		e.firstRows = append(e.firstRows, int32(row))
-		e.mid.insert(lo, hi, h, code)
 		if e.trackHashes {
-			e.hashes = append(e.hashes, h)
+			e.hashes = append(e.hashes, pairHash(lo, hi))
 		}
 	}
 	return code
 }
 
-// pairTable maps two-word keys to codes with linear probing on the top
-// bits of the pair hash. hi always has bit 63 set, so hi == 0 marks an
-// empty slot.
-type pairTable struct {
-	lo, hi []uint64
-	codes  []int32
-	shift  uint
-	n      int
+// pairEntry is one key of a pairTable with its code.
+type pairEntry struct {
+	lo, hi uint64
+	code   int32
 }
+
+// pairTable maps two-word keys to codes. The probe array holds one word
+// per slot, a 32-bit hash tag next to the entry index, and the keys sit
+// in a dense entry array in insertion order. That keeps the probed
+// memory at 8 bytes per slot, a third of storing the keys in the slots,
+// so large tables stay in cache far longer; a tag match costs one more
+// load to confirm the key.
+type pairTable struct {
+	slots   []uint64 // tag << 32 | (entry index + 1); 0 = empty
+	shift   uint
+	entries []pairEntry
+}
+
+var pairEntryScratch scratchPool[pairEntry]
 
 func (t *pairTable) init(hint int) {
 	size, bits := 16, uint(4)
@@ -163,49 +197,64 @@ func (t *pairTable) init(hint int) {
 		size <<= 1
 		bits++
 	}
-	t.lo = make([]uint64, size)
-	t.hi = make([]uint64, size)
-	t.codes = make([]int32, size)
+	t.slots = uint64Scratch.get(size)
+	clear(t.slots)
 	t.shift = 64 - bits
-	t.n = 0
+	t.entries = pairEntryScratch.get(max(size/2, 16))[:0]
 }
 
-func (t *pairTable) get(lo, hi, h uint64) (int32, bool) {
-	mask := uint64(len(t.hi) - 1)
-	pos := h >> t.shift
-	for {
-		kh := t.hi[pos]
-		if kh == hi && t.lo[pos] == lo {
-			return t.codes[pos], true
-		}
-		if kh == 0 {
-			return 0, false
-		}
-		pos = (pos + 1) & mask
-	}
+// release returns the table memory to the scratch pools.
+func (t *pairTable) release() {
+	uint64Scratch.put(t.slots)
+	pairEntryScratch.put(t.entries)
+	t.slots, t.entries = nil, nil
 }
 
-func (t *pairTable) insert(lo, hi, h uint64, code int32) {
-	mask := uint64(len(t.hi) - 1)
+// pairTag derives the slot tag from hash bits that the slot position
+// (the top bits) does not use.
+func pairTag(h uint64) uint64 { return uint64(uint32(h>>8)) | 1<<31 }
+
+// insertOrGet returns the code of (lo, hi), inserting it with newCode
+// when absent.
+func (t *pairTable) insertOrGet(lo, hi, h uint64, newCode int32) (int32, bool) {
+	slots := t.slots
+	mask := uint64(len(slots) - 1)
+	tag := pairTag(h)
 	pos := h >> t.shift
-	for t.hi[pos] != 0 {
-		pos = (pos + 1) & mask
-	}
-	t.lo[pos], t.hi[pos], t.codes[pos] = lo, hi, code
-	t.n++
-	if t.n*2 > len(t.hi) {
-		oldLo, oldHi, oldC := t.lo, t.hi, t.codes
-		size := 2 * len(oldHi)
-		t.lo = make([]uint64, size)
-		t.hi = make([]uint64, size)
-		t.codes = make([]int32, size)
-		t.shift--
-		t.n = 0
-		for i, kh := range oldHi {
-			if kh != 0 {
-				t.insert(oldLo[i], kh, pairHash(oldLo[i], kh), oldC[i])
+	for ; ; pos++ {
+		sl := slots[pos&mask]
+		if sl == 0 {
+			break
+		}
+		if sl>>32 == tag {
+			en := &t.entries[uint32(sl)-1]
+			if en.lo == lo && en.hi == hi {
+				return en.code, false
 			}
 		}
+	}
+	t.entries = append(t.entries, pairEntry{lo: lo, hi: hi, code: newCode})
+	slots[pos&mask] = tag<<32 | uint64(len(t.entries))
+	if len(t.entries)*2 > len(slots) {
+		t.grow()
+	}
+	return newCode, true
+}
+
+func (t *pairTable) grow() {
+	size := 2 * len(t.slots)
+	uint64Scratch.put(t.slots)
+	t.slots = uint64Scratch.get(size)
+	clear(t.slots)
+	t.shift--
+	mask := uint64(size - 1)
+	for i, en := range t.entries {
+		h := pairHash(en.lo, en.hi)
+		pos := h >> t.shift
+		for t.slots[pos&mask] != 0 {
+			pos++
+		}
+		t.slots[pos&mask] = pairTag(h)<<32 | uint64(i+1)
 	}
 }
 
@@ -239,6 +288,7 @@ func encodeStringCodes(arr *array.String) keyCodes {
 		e := newStrEncoder(arr, 64)
 		codes := int32Scratch.get(n)
 		e.encodeRange(0, n, codes)
+		e.release()
 		return keyCodes{codes: codes, firstRows: e.firstRows}
 	}
 	if sampleDistinctStrings(arr, strSampleSize) > strSampleHighCard {
@@ -277,6 +327,9 @@ func encodeStringCodes(arr *array.String) keyCodes {
 		remaps, firstRows = mergeStrPartsParallel(arr, parts, n)
 	} else {
 		remaps, firstRows = mergeStrPartsSerial(arr, parts)
+	}
+	for _, pe := range parts {
+		pe.release()
 	}
 	for p := range k {
 		if remaps[p] == nil {
@@ -325,6 +378,7 @@ func mergeStrPartsSerial(arr *array.String, parts []*strEncoder) ([][]int32, []i
 			remaps[p] = remap
 		}
 	}
+	global.release()
 	return remaps, global.firstRows
 }
 
@@ -376,6 +430,9 @@ func mergeStrPartsParallel(arr *array.String, parts []*strEncoder, n int) ([][]i
 		}()
 	}
 	wg.Wait()
+	for _, e := range buckets {
+		e.release()
+	}
 
 	// Mark each group's first row with its bucket handle + 1, then number
 	// the marks in row order.
@@ -440,15 +497,22 @@ func mergeStrPartsParallel(arr *array.String, parts []*strEncoder, n int) ([][]i
 	return remaps, firstRows
 }
 
+// packedSlot is one packedTable entry; see pairSlot.
+type packedSlot struct {
+	key  uint64
+	code int32
+}
+
 // packedTable maps packed short-string words to codes with linear
 // probing. A zero key marks an empty slot; packed keys always have bit
 // 63 set.
 type packedTable struct {
-	keys  []uint64
-	codes []int32
+	slots []packedSlot
 	shift uint
 	n     int
 }
+
+var packedSlotScratch scratchPool[packedSlot]
 
 func (t *packedTable) init(hint int) {
 	size, bits := 16, uint(4)
@@ -456,46 +520,54 @@ func (t *packedTable) init(hint int) {
 		size <<= 1
 		bits++
 	}
-	t.keys = make([]uint64, size)
-	t.codes = make([]int32, size)
+	t.slots = packedSlotScratch.get(size)
+	clear(t.slots)
 	t.shift = 64 - bits
 	t.n = 0
 }
 
+// release returns the slot array to the scratch pool.
+func (t *packedTable) release() {
+	packedSlotScratch.put(t.slots)
+	t.slots = nil
+}
+
 func (t *packedTable) get(key uint64) (int32, bool) {
-	mask := uint64(len(t.keys) - 1)
+	slots := t.slots
+	mask := uint64(len(slots) - 1)
 	pos := (key * 0x9E3779B97F4A7C15) >> t.shift
 	for {
-		k := t.keys[pos]
-		if k == key {
-			return t.codes[pos], true
+		sl := &slots[pos&mask]
+		if sl.key == key {
+			return sl.code, true
 		}
-		if k == 0 {
+		if sl.key == 0 {
 			return 0, false
 		}
-		pos = (pos + 1) & mask
+		pos++
 	}
 }
 
 func (t *packedTable) insert(key uint64, code int32) {
-	mask := uint64(len(t.keys) - 1)
+	slots := t.slots
+	mask := uint64(len(slots) - 1)
 	pos := (key * 0x9E3779B97F4A7C15) >> t.shift
-	for t.keys[pos] != 0 {
-		pos = (pos + 1) & mask
+	for slots[pos&mask].key != 0 {
+		pos++
 	}
-	t.keys[pos] = key
-	t.codes[pos] = code
+	slots[pos&mask] = packedSlot{key: key, code: code}
 	t.n++
-	if t.n*2 > len(t.keys) {
-		oldK, oldC := t.keys, t.codes
-		t.keys = make([]uint64, 2*len(oldK))
-		t.codes = make([]int32, 2*len(oldK))
+	if t.n*2 > len(slots) {
+		old := slots
+		t.slots = packedSlotScratch.get(2 * len(old))
+		clear(t.slots)
 		t.shift--
 		t.n = 0
-		for i, k := range oldK {
-			if k != 0 {
-				t.insert(k, oldC[i])
+		for _, sl := range old {
+			if sl.key != 0 {
+				t.insert(sl.key, sl.code)
 			}
 		}
+		packedSlotScratch.put(old)
 	}
 }

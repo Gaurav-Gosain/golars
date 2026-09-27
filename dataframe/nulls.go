@@ -257,13 +257,8 @@ func uniqueFastSingle(df *DataFrame) (*DataFrame, bool, error) {
 		// Dictionary-encode and keep each code's first row: the same
 		// first-seen order the group-by path produces, without the
 		// per-row group id array or the aggregation machinery.
-		kc := encodeStringCodes(a)
-		int32Scratch.put(kc.codes)
-		vals := make([]string, len(kc.firstRows))
-		for g, r := range kc.firstRows {
-			vals[g] = a.Value(int(r))
-		}
-		s, err := series.FromString(col.Name(), vals, nil)
+		rows := distinctStringRows(a)
+		s, err := compute.TakeInt32(context.Background(), col, rows)
 		if err != nil {
 			return nil, true, err
 		}
