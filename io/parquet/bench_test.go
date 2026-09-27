@@ -68,11 +68,13 @@ func benchWrite(b *testing.B, df *dataframe.DataFrame) {
 	ctx := context.Background()
 	path := filepath.Join(b.TempDir(), "bench.parquet")
 	b.ReportAllocs()
+	done := reportCPU(b)
 	for b.Loop() {
 		if err := parquet.WriteFile(ctx, path, df); err != nil {
 			b.Fatal(err)
 		}
 	}
+	done()
 	if st, err := os.Stat(path); err == nil {
 		b.ReportMetric(float64(st.Size())/1e6, "fileMB")
 	}
@@ -86,6 +88,7 @@ func benchRead(b *testing.B, df *dataframe.DataFrame) {
 	}
 	df.Release()
 	b.ReportAllocs()
+	done := reportCPU(b)
 	for b.Loop() {
 		got, err := parquet.ReadFile(ctx, path)
 		if err != nil {
@@ -93,6 +96,7 @@ func benchRead(b *testing.B, df *dataframe.DataFrame) {
 		}
 		got.Release()
 	}
+	done()
 }
 
 func BenchmarkWriteNumeric1M(b *testing.B) { benchWrite(b, benchNumericDF(b, 1<<20)) }

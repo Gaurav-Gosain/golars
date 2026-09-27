@@ -8,8 +8,8 @@
 package parquet
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +24,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/internal/mmapfile"
 	"github.com/Gaurav-Gosain/golars/schema"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -37,6 +38,9 @@ type config struct {
 	chunkSize   int64
 	httpClient  *http.Client
 	columns     []string
+	// noNative forces the pqarrow reader and writer (tests compare the
+	// two paths).
+	noNative bool
 }
 
 func resolve(opts []Option) config {
@@ -90,7 +94,22 @@ func Read(ctx context.Context, r parquet.ReaderAtSeeker, opts ...Option) (*dataf
 	if err != nil {
 		return nil, fmt.Errorf("parquet: read: %w", err)
 	}
-	table, err := readTable(ctx, pf, cfg)
+	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: readBatchSize, PreAllocBinaryData: true}
+	fr, err := pqarrow.NewFileReader(pf, props, cfg.alloc)
+	if err != nil {
+		return nil, fmt.Errorf("parquet: read: %w", err)
+	}
+	if !cfg.noNative {
+		df, err := readNativeTable(ctx, r, pf, fr, cfg)
+		if err == nil {
+			return df, nil
+		}
+		if !errors.Is(err, errUnsupported) {
+			return nil, fmt.Errorf("parquet: read: %w", err)
+		}
+		pqarrowReads.Add(1)
+	}
+	table, err := readTable(ctx, fr, pf.NumRowGroups(), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("parquet: read: %w", err)
 	}
@@ -124,17 +143,19 @@ func ReadSchema(path string) (*schema.Schema, error) {
 
 // ReadBytes is a convenience wrapper over Read for in-memory data.
 func ReadBytes(ctx context.Context, b []byte, opts ...Option) (*dataframe.DataFrame, error) {
-	return Read(ctx, bytes.NewReader(b), opts...)
+	return Read(ctx, newSliceReader(b), opts...)
 }
 
-// ReadFile opens path and reads the parquet file into a DataFrame.
+// ReadFile opens path and reads the parquet file into a DataFrame. The
+// file is memory mapped where the platform supports it; no part of the
+// result refers to the mapping.
 func ReadFile(ctx context.Context, path string, opts ...Option) (*dataframe.DataFrame, error) {
-	f, err := os.Open(path)
+	m, err := mmapfile.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("parquet: open %q: %w", path, err)
 	}
-	defer f.Close()
-	return Read(ctx, f, opts...)
+	defer m.Close()
+	return ReadBytes(ctx, m.Data, opts...)
 }
 
 // ReadURL fetches parquet from an http(s) URL and reads it into a

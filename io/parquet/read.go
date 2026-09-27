@@ -10,7 +10,6 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
@@ -18,28 +17,15 @@ import (
 // batches mean fewer, larger output chunks and fewer builder resizes.
 const readBatchSize = 1 << 20
 
-// readTable decodes the projected columns of every row group. Columns
-// are decoded in parallel (pqarrow's Parallel mode fans out one reader
-// per column).
-func readTable(ctx context.Context, pf *file.Reader, cfg config) (arrow.Table, error) {
-	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: readBatchSize, PreAllocBinaryData: true}
-	fr, err := pqarrow.NewFileReader(pf, props, cfg.alloc)
-	if err != nil {
-		return nil, err
-	}
+// readTable decodes the projected columns of every row group with
+// pqarrow. Columns are decoded in parallel (pqarrow's Parallel mode fans
+// out one reader per column).
+func readTable(ctx context.Context, fr *pqarrow.FileReader, nrg int, cfg config) (arrow.Table, error) {
 	leaves, err := projectLeaves(fr.Manifest, cfg.columns)
 	if err != nil {
 		return nil, err
 	}
-	nrg := pf.NumRowGroups()
-	if nrg <= 1 {
-		rgs := make([]int, nrg)
-		for i := range rgs {
-			rgs[i] = i
-		}
-		return fr.ReadRowGroups(ctx, leaves, rgs)
-	}
-	return readRowGroupsParallel(ctx, fr, leaves, nrg)
+	return readLeaves(ctx, fr, leaves, nrg)
 }
 
 // readRowGroupsParallel decodes row groups concurrently (each row group

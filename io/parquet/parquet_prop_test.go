@@ -70,9 +70,9 @@ func randIOFrame(t testing.TB, mem memory.Allocator, r *rand.Rand, n int, types 
 	return df
 }
 
-// assertFramesEqual checks names, dtypes and every value (NaN equals
+// assertPropFramesEqual checks names, dtypes and every value (NaN equals
 // NaN, and -0.0 must stay -0.0 through a lossless format).
-func assertFramesEqual(t testing.TB, desc string, got, want *dataframe.DataFrame) {
+func assertPropFramesEqual(t testing.TB, desc string, got, want *dataframe.DataFrame) {
 	t.Helper()
 	if got.Height() != want.Height() || got.Width() != want.Width() {
 		t.Fatalf("%s: shape %dx%d want %dx%d", desc, got.Height(), got.Width(), want.Height(), want.Width())
@@ -108,7 +108,7 @@ func TestParquetRoundTripProp(t *testing.T) {
 		if err != nil {
 			t.Fatalf("iter %d read: %v", iter, err)
 		}
-		assertFramesEqual(t, fmt.Sprintf("iter %d n=%d", iter, n), back, df)
+		assertPropFramesEqual(t, fmt.Sprintf("iter %d n=%d", iter, n), back, df)
 		back.Release()
 		df.Release()
 	}
@@ -152,13 +152,13 @@ func TestParquetWriteRegressions(t *testing.T) {
 	for _, vals := range [][]any{{}, {nil}, {nil, nil, nil}} {
 		df := build("b", arrow.FixedWidthTypes.Boolean, vals)
 		back := roundTripParquet(t, mem, df)
-		assertFramesEqual(t, fmt.Sprintf("bool %v", vals), back, df)
+		assertPropFramesEqual(t, fmt.Sprintf("bool %v", vals), back, df)
 		back.Release()
 		df.Release()
 	}
 	df := build("t", &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Asia/Kolkata"}, []any{int64(1577836800000000), nil})
 	back := roundTripParquet(t, mem, df)
-	assertFramesEqual(t, "datetime with time zone", back, df)
+	assertPropFramesEqual(t, "datetime with time zone", back, df)
 	back.Release()
 	df.Release()
 }
@@ -188,5 +188,5 @@ func TestParquetDurationRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer back.Release()
-	assertFramesEqual(t, "duration", back, df)
+	assertPropFramesEqual(t, "duration", back, df)
 }

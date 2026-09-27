@@ -2,9 +2,7 @@ package parquet
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"io"
 	"math"
@@ -13,10 +11,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	arrowipc "github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
-	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
@@ -35,6 +31,20 @@ func writeTable(ctx context.Context, tbl arrow.Table, w io.Writer, cfg config) e
 		parquet.WithCompression(cfg.compression),
 		parquet.WithAllocator(cfg.alloc),
 	}
+	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(cfg.alloc), pqarrow.WithStoreSchema())
+	if !cfg.noNative && isFlat(sc) {
+		err := writeNative(ctx, tbl, w, cfg, parquet.NewWriterProperties(opts...), arrProps)
+		if err == nil {
+			if c, ok := w.(io.Closer); ok {
+				return c.Close()
+			}
+			return nil
+		}
+		if !errors.Is(err, errNotNative) {
+			return err
+		}
+	}
+
 	// Dictionary pages only pay off for low-cardinality columns. For
 	// high-cardinality data they cost a hash insert per value on write,
 	// a fallback re-encode once the dictionary page overflows, and a
@@ -43,9 +53,6 @@ func writeTable(ctx context.Context, tbl arrow.Table, w io.Writer, cfg config) e
 		opts = append(opts, parquet.WithDictionaryFor(f.Name, dictionaryWorthwhile(tbl.Column(i).Data())))
 	}
 	props := parquet.NewWriterProperties(opts...)
-	// Storing the arrow schema lets the reader restore dictionary
-	// (Categorical / Enum) columns instead of decoding them to str.
-	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(cfg.alloc), pqarrow.WithStoreSchema())
 
 	aw := newAsyncWriter(w)
 	bw := bufio.NewWriterSize(aw, writeBufferSize)
@@ -72,25 +79,6 @@ func writeTable(ctx context.Context, tbl arrow.Table, w io.Writer, cfg config) e
 	return nil
 }
 
-// arrowSchemaMetadata is the key-value footer metadata pqarrow's own
-// FileWriter adds with WithStoreSchema: the schema metadata plus the
-// serialized arrow schema under "ARROW:schema". Without it readers
-// (golars and polars) lose time zones and duration types, which have
-// no native parquet representation.
-func arrowSchemaMetadata(sc *arrow.Schema) metadata.KeyValueMetadata {
-	meta := make(metadata.KeyValueMetadata, 0)
-	md := sc.Metadata()
-	for i := range md.Len() {
-		meta.Append(md.Keys()[i], md.Values()[i])
-	}
-	var buf bytes.Buffer
-	sw := arrowipc.NewWriter(&buf, arrowipc.WithSchema(sc))
-	if err := sw.Close(); err == nil {
-		meta.Append("ARROW:schema", base64.StdEncoding.EncodeToString(buf.Bytes()))
-	}
-	return meta
-}
-
 func isFlat(sc *arrow.Schema) bool {
 	for _, f := range sc.Fields() {
 		switch f.Type.(type) {
@@ -107,7 +95,8 @@ func writeFlat(ctx context.Context, tbl arrow.Table, w io.Writer, chunkSize int6
 	if err != nil {
 		return err
 	}
-	fw, err := file.NewParquetWriterWithError(w, pqs.Root(), file.WithWriterProps(props), file.WithWriteMetadata(arrowSchemaMetadata(sc)))
+	fw, err := file.NewParquetWriterWithError(w, pqs.Root(), file.WithWriterProps(props),
+		file.WithWriteMetadata(arrowSchemaMeta(sc, props.Allocator())))
 	if err != nil {
 		return err
 	}
@@ -216,7 +205,7 @@ func writeColumnRange(ctx context.Context, rgw file.BufferedRowGroupWriter, col 
 	// A column whose buffered tail holds only nulls is left for Close.
 	// So is a range without any non-null value: the plain boolean
 	// encoder has no bit writer yet and its size estimate panics.
-	if fl, ok := cw.(interface{ FlushCurrentPage() error }); ok && wroteValues && cw.CurrentEncoder().EstimatedDataEncodedSize() > 0 {
+	if fl, ok := cw.(interface{ FlushCurrentPage() error }); ok && wroteValues && size > 0 && cw.CurrentEncoder().EstimatedDataEncodedSize() > 0 {
 		return fl.FlushCurrentPage()
 	}
 	return nil
