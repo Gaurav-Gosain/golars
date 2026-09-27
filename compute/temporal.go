@@ -557,6 +557,11 @@ func temporalCompare(ctx context.Context, a, b *series.Series, opts []Option, op
 		return nil, false, nil
 	}
 	cfg := resolve(opts)
+	if bInstant == nil {
+		if out, ok, err := dateCompareScalar(a, b, &cfg, op); ok {
+			return out, true, err
+		}
+	}
 	mem := cfg.alloc
 	ao, bo, n, release, err := prepareBinary(a, b, mem)
 	if err != nil {
