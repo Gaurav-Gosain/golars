@@ -16,15 +16,15 @@ with hour      = dt.hour(ts)
 with slot      = dt.strftime(dt.truncate(ts, "30m"), "%H:%M")
 
 # Lists: split a delimited string, then work on the list.
-with ntags     = list.len(str.split(tags, ";"))
-with main_tag  = str.split(tags, ";").list.first()
-with has_api   = list.contains(str.split(tags, ";"), "api")
+with ntags    = list.len(str.split(tags, ";"))
+with main_tag = str.split(tags, ";").list.first()
+with has_api  = list.contains(str.split(tags, ";"), "api")
 
 # Binning, conditionals and integer operators.
-with size      = cut(amount, [20, 100], labels=["small", "medium", "large"])
-with bucket    = amount // 50 * 50
-with parity    = when amount % 2 == 0 then "even" otherwise "odd"
-with label     = concat_str(str.to_uppercase(user), size, separator="/")
+with size   = cut(amount, [20, 100], labels=["small", "medium", "large"])
+with bucket = amount // 50 * 50
+with parity = when amount % 2 == 0 then "even" otherwise "odd"
+with label  = concat_str(str.to_uppercase(user), size, separator="/")
 drop tags, signup
 show
 

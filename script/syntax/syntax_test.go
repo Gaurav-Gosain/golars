@@ -233,6 +233,9 @@ func TestFormat(t *testing.T) {
 
 func TestFormatExamplesIdempotent(t *testing.T) {
 	for path, src := range exampleScripts(t) {
+		if Format(src) != src {
+			t.Errorf("%s is not in canonical form: run golars fmt -w %s", path, path)
+		}
 		once := Format(src)
 		if twice := Format(once); twice != once {
 			t.Errorf("%s: format is not idempotent", path)

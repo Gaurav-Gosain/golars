@@ -13,8 +13,8 @@ with starts_a   = upper_name.str.starts_with("A")
 
 # Arithmetic on numeric columns. `/` is true division, so monthly is
 # f64 even for an integer amount (as in polars).
-with yearly     = amount
-with monthly    = amount / 12
+with yearly  = amount
+with monthly = amount / 12
 
 # Comparison yields a boolean column usable in later filters.
 with big_earner = amount > 100000
