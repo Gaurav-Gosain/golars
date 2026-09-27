@@ -22,6 +22,16 @@ type CommandSpec struct {
 	// required args, square-bracketed for optional. Used verbatim in
 	// completion details.
 	Signature string
+	// Grammar describes the arguments for the statement parser in
+	// script/syntax: a space-separated pattern of slots. Slots are
+	// path, frame (a staged name), target (a staged name or a path),
+	// newframe, col, newcol, cols (one or more columns, commas or
+	// spaces), collist (one comma-joined list), count, int, number,
+	// value, dtype, dur and word; 'kw' is a literal keyword, a|b|c is
+	// one of the listed words, and [ ] marks an optional group. A
+	// grammar starting with @ names a statement with its own parser
+	// (@select, @filter, @with, @sort, @groupby, @dynamic, @asof).
+	Grammar string
 	// Summary is a one-line description: populated in hover docs.
 	Summary string
 	// LongDoc is the full man-page style description: multi-line,
@@ -49,8 +59,8 @@ type CommandSpec struct {
 var Commands = []CommandSpec{
 	{
 		Name:      "load",
-		Signature: "load <path> [as NAME]",
-		Summary:   "Load a csv/tsv/parquet/arrow/json/ndjson file as the focused frame (or staged under NAME).",
+		Signature: "load <path> [as NAME]", Grammar: "path ['as' newframe]",
+		Summary: "Load a csv/tsv/parquet/arrow/json/ndjson file as the focused frame (or staged under NAME).",
 		LongDoc: "Loads a file by path and makes it the new focused pipeline." +
 			" When `as NAME` is appended, the frame is staged in the named-frame registry" +
 			" instead of replacing the focus: useful for multi-source scripts.\n\n" +
@@ -64,14 +74,14 @@ var Commands = []CommandSpec{
 		},
 	},
 	{
-		Name: "use", Signature: "use <NAME>", Summary: "Switch focus to a clone of a named frame.",
+		Name: "use", Signature: "use <NAME>", Grammar: "frame", Summary: "Switch focus to a clone of a named frame.",
 		LongDoc: "Copy-on-promote: NAME stays in the registry so repeated `use NAME`" +
 			" lets scripts branch off the same base. The prior focus is discarded -" +
 			" call `stash` first if you need it back.",
 		Category: "frames", ArgKind: "frame",
 	},
 	{
-		Name: "stash", Signature: "stash <NAME>",
+		Name: "stash", Signature: "stash <NAME>", Grammar: "newframe",
 		Summary: "Snapshot the current focus as NAME for later `.use`.",
 		LongDoc: "Materialises any pending lazy pipeline and stores a reference under NAME." +
 			" The focus is replaced with the materialised state (lazy pipeline cleared)," +
@@ -79,20 +89,20 @@ var Commands = []CommandSpec{
 			" `stash base; filter X; stash a; use base; filter Y; stash b; use a; join b on k`.",
 		Category: "frames",
 	},
-	{Name: "frames", Signature: "frames", Summary: "List loaded frames.", Category: "frames"},
+	{Name: "frames", Signature: "frames", Grammar: "", Summary: "List loaded frames.", Category: "frames"},
 	{
-		Name: "drop_frame", Signature: "drop_frame <NAME>", Summary: "Release a named frame.",
+		Name: "drop_frame", Signature: "drop_frame <NAME>", Grammar: "frame", Summary: "Release a named frame.",
 		Category: "frames", ArgKind: "frame",
 	},
 	{
-		Name: "save", Aliases: []string{"write"}, Signature: "save <path>",
+		Name: "save", Aliases: []string{"write"}, Signature: "save <path>", Grammar: "path",
 		Summary:  "Collect the focused pipeline and write it to disk.",
 		LongDoc:  "The format comes from the extension: .csv .tsv .parquet .pq .arrow .ipc .json .ndjson .jsonl.",
 		Category: "io", ArgKind: "path",
 	},
-	{Name: "show", Signature: "show [N]", Summary: "Collect and print the first N rows (default 10). Same as head.", Category: "inspect", ArgKind: "count"},
+	{Name: "show", Signature: "show [N]", Grammar: "[count]", Summary: "Collect and print the first N rows (default 10). Same as head.", Category: "inspect", ArgKind: "count"},
 	{
-		Name: "ishow", Aliases: []string{"browse"}, Signature: "ishow",
+		Name: "ishow", Aliases: []string{"browse"}, Signature: "ishow", Grammar: "",
 		Summary: "Open the focused pipeline in the interactive browse TUI.",
 		LongDoc: "Materialises the current lazy pipeline (or focused frame) and hands it to" +
 			" the browse TUI on the alt screen. Quit with `q` to return to the REPL; the" +
@@ -100,18 +110,18 @@ var Commands = []CommandSpec{
 			" `:export PATH` inside the TUI; format is inferred from the extension.",
 		Category: "inspect",
 	},
-	{Name: "schema", Signature: "schema", Summary: "Print column names and dtypes.", Category: "inspect"},
+	{Name: "schema", Signature: "schema", Grammar: "", Summary: "Print column names and dtypes.", Category: "inspect"},
 	{
-		Name: "describe", Signature: "describe [col...]",
+		Name: "describe", Signature: "describe [col...]", Grammar: "[cols]",
 		Summary:  "Per-column summary stats (count, null_count, mean, std, min, quartiles, max).",
 		LongDoc:  "Describes every column, or only the listed ones. Non-numeric columns get count and null_count.",
 		Category: "inspect", ArgKind: "column",
 		Examples: []string{"describe", "describe salary, age"},
 	},
-	{Name: "head", Signature: "head [N]", Summary: "Collect and print first N rows (default 10).", Category: "inspect", ArgKind: "count"},
-	{Name: "tail", Signature: "tail [N]", Summary: "Collect and print last N rows (default 10).", Category: "inspect", ArgKind: "count"},
+	{Name: "head", Signature: "head [N]", Grammar: "[count]", Summary: "Collect and print first N rows (default 10).", Category: "inspect", ArgKind: "count"},
+	{Name: "tail", Signature: "tail [N]", Grammar: "[count]", Summary: "Collect and print last N rows (default 10).", Category: "inspect", ArgKind: "count"},
 	{
-		Name: "select", Signature: "select <col|name = expr>[, ...]",
+		Name: "select", Signature: "select <col|name = expr>[, ...]", Grammar: "@select",
 		Summary: "Project columns or expressions (lazy).",
 		LongDoc: "Plain column names may be separated by commas or spaces. Items that contain" +
 			" an expression are separated by commas and may be named with `name = expr`;" +
@@ -122,9 +132,9 @@ var Commands = []CommandSpec{
 			"select name, year = dt.year(hired), salary / 12",
 		},
 	},
-	{Name: "drop", Signature: "drop <col>[,<col>...]", Summary: "Drop columns (lazy). Columns may be separated by commas or spaces.", Category: "pipeline", ArgKind: "column"},
+	{Name: "drop", Signature: "drop <col>[,<col>...]", Grammar: "cols", Summary: "Drop columns (lazy). Columns may be separated by commas or spaces.", Category: "pipeline", ArgKind: "column"},
 	{
-		Name: "filter", Signature: "filter <predicate>",
+		Name: "filter", Signature: "filter <predicate>", Grammar: "@filter",
 		Summary: "Filter rows by a predicate (lazy).",
 		LongDoc: "The predicate is any boolean expression in the `with` expression language." +
 			" Classic clauses read naturally: `col op value` with `==`, `!=`, `<`, `<=`, `>`, `>=`," +
@@ -143,14 +153,14 @@ var Commands = []CommandSpec{
 		},
 	},
 	{
-		Name: "sort", Signature: "sort <col> [asc|desc] [<col> [asc|desc]]...",
+		Name: "sort", Signature: "sort <col> [asc|desc] [<col> [asc|desc]]...", Grammar: "@sort",
 		Summary:  "Sort by one or more columns (lazy). Nulls sort first, as in polars.",
 		Category: "pipeline", ArgKind: "column",
 		Examples: []string{"sort salary desc", "sort dept asc salary desc"},
 	},
-	{Name: "limit", Signature: "limit <N>", Summary: "Keep the first N rows (lazy).", Category: "pipeline", ArgKind: "count"},
+	{Name: "limit", Signature: "limit <N>", Grammar: "count", Summary: "Keep the first N rows (lazy).", Category: "pipeline", ArgKind: "count"},
 	{
-		Name: "groupby", Signature: "groupby <k1,k2,...> <col:op[:alias] | name=expr>...",
+		Name: "groupby", Signature: "groupby <k1,k2,...> <col:op[:alias] | name=expr>...", Grammar: "@groupby",
 		Summary: "Group by KEYS and aggregate.",
 		LongDoc: "Each aggregation is a shorthand `col:op[:alias]` or a named expression `name=expr`." +
 			" Shorthand ops: `sum`, `mean`/`avg`, `min`, `max`, `count`, `null_count`, `first`, `last`," +
@@ -165,8 +175,8 @@ var Commands = []CommandSpec{
 	},
 	{
 		Name: "group_by_dynamic", Aliases: []string{"groupby_dynamic"},
-		Signature: "group_by_dynamic <time_col> every <dur> [period <dur>] [offset <dur>] [by <keys>] [closed <c>] [label <l>] <agg>...",
-		Summary:   "Group rows into time windows of TIME_COL and aggregate (lazy).",
+		Signature: "group_by_dynamic <time_col> every <dur> [period <dur>] [offset <dur>] [by <keys>] [closed <c>] [label <l>] <agg>...", Grammar: "@dynamic",
+		Summary: "Group rows into time windows of TIME_COL and aggregate (lazy).",
 		LongDoc: "Windows start every DUR (`30m`, `1h`, `1d`, `1w`, `1mo`, `1y`, or `3i` for integer" +
 			" columns) and last PERIOD (default: EVERY). TIME_COL must be sorted ascending (within each" +
 			" `by` group). `closed` is left (default), right, both or none; `label` is left (default)," +
@@ -179,7 +189,7 @@ var Commands = []CommandSpec{
 		},
 	},
 	{
-		Name: "join", Signature: "join <path|NAME> on <key> [inner|left|cross]",
+		Name: "join", Signature: "join <path|NAME> on <key> [inner|left|cross]", Grammar: "target 'on' col [inner|left|cross]",
 		Summary:  "Join focus with a file or named frame on KEY.",
 		Category: "pipeline", ArgKind: "frame",
 		Examples: []string{
@@ -189,7 +199,7 @@ var Commands = []CommandSpec{
 		},
 	},
 	{
-		Name: "join_asof", Signature: "join_asof <path|NAME> on <key> [by <cols>] [backward|forward|nearest] [tolerance <t>]",
+		Name: "join_asof", Signature: "join_asof <path|NAME> on <key> [by <cols>] [backward|forward|nearest] [tolerance <t>]", Grammar: "@asof",
 		Summary: "Join each row to the nearest earlier (or later) row of another frame by KEY.",
 		LongDoc: "An asof join matches on the nearest key rather than an equal one. `backward`" +
 			" (default) takes the last right row whose key is <= the left key, `forward` the first" +
@@ -203,199 +213,199 @@ var Commands = []CommandSpec{
 			"join_asof quotes on time by symbol tolerance 2m",
 		},
 	},
-	{Name: "explain", Signature: "explain", Summary: "Print logical plan, optimiser trace, optimised plan.", Category: "plan"},
-	{Name: "explain_tree", Aliases: []string{"tree"}, Signature: "explain_tree", Summary: "Explain rendered as a box-drawn tree.", Category: "plan"},
-	{Name: "graph", Aliases: []string{"show_graph"}, Signature: "graph", Summary: "Styled plan tree with colour coding per node kind.", Category: "plan"},
-	{Name: "mermaid", Signature: "mermaid", Summary: "Emit the plan as a Mermaid flowchart.", Category: "plan"},
-	{Name: "collect", Signature: "collect", Summary: "Materialise lazy pipeline back into focused source.", Category: "pipeline"},
-	{Name: "reset", Signature: "reset", Summary: "Discard the lazy pipeline; keep the source.", Category: "pipeline"},
-	{Name: "source", Signature: "source <path>", Summary: "Run another .glr script inline.", Category: "session", ArgKind: "path"},
-	{Name: "timing", Signature: "timing", Summary: "Toggle per-statement timing output.", Category: "session"},
-	{Name: "info", Signature: "info", Summary: "Runtime info: Go version, heap, uptime.", Category: "session"},
-	{Name: "clear", Signature: "clear", Summary: "Clear the screen.", Category: "session"},
-	{Name: "help", Aliases: []string{"h", "?"}, Signature: "help", Summary: "Print the command reference.", Category: "session"},
-	{Name: "exit", Aliases: []string{"quit", "q"}, Signature: "exit", Summary: "Quit the REPL. In a script, stop running further statements.", Category: "session"},
-	{Name: "reverse", Signature: "reverse", Summary: "Reverse the row order of the focus (lazy).", Category: "pipeline"},
+	{Name: "explain", Signature: "explain", Grammar: "", Summary: "Print logical plan, optimiser trace, optimised plan.", Category: "plan"},
+	{Name: "explain_tree", Aliases: []string{"tree"}, Signature: "explain_tree", Grammar: "", Summary: "Explain rendered as a box-drawn tree.", Category: "plan"},
+	{Name: "graph", Aliases: []string{"show_graph"}, Signature: "graph", Grammar: "", Summary: "Styled plan tree with colour coding per node kind.", Category: "plan"},
+	{Name: "mermaid", Signature: "mermaid", Grammar: "", Summary: "Emit the plan as a Mermaid flowchart.", Category: "plan"},
+	{Name: "collect", Signature: "collect", Grammar: "", Summary: "Materialise lazy pipeline back into focused source.", Category: "pipeline"},
+	{Name: "reset", Signature: "reset", Grammar: "", Summary: "Discard the lazy pipeline; keep the source.", Category: "pipeline"},
+	{Name: "source", Signature: "source <path>", Grammar: "path", Summary: "Run another .glr script inline.", Category: "session", ArgKind: "path"},
+	{Name: "timing", Signature: "timing", Grammar: "", Summary: "Toggle per-statement timing output.", Category: "session"},
+	{Name: "info", Signature: "info", Grammar: "", Summary: "Runtime info: Go version, heap, uptime.", Category: "session"},
+	{Name: "clear", Signature: "clear", Grammar: "", Summary: "Clear the screen.", Category: "session"},
+	{Name: "help", Aliases: []string{"h", "?"}, Signature: "help", Grammar: "", Summary: "Print the command reference.", Category: "session"},
+	{Name: "exit", Aliases: []string{"quit", "q"}, Signature: "exit", Grammar: "", Summary: "Quit the REPL. In a script, stop running further statements.", Category: "session"},
+	{Name: "reverse", Signature: "reverse", Grammar: "", Summary: "Reverse the row order of the focus (lazy).", Category: "pipeline"},
 	{
-		Name: "sample", Signature: "sample <N> [seed]",
+		Name: "sample", Signature: "sample <N> [seed]", Grammar: "count [int]",
 		Summary:  "Replace the focus with N rows sampled without replacement.",
 		LongDoc:  "Draws N rows uniformly at random without replacement. The optional second argument sets the PCG seed (default 42).",
 		Category: "reshape", ArgKind: "count",
 	},
 	{
-		Name: "shuffle", Signature: "shuffle [seed]",
+		Name: "shuffle", Signature: "shuffle [seed]", Grammar: "[int]",
 		Summary:  "Randomly reorder every row of the focus (seed defaults to 42).",
 		Category: "reshape",
 	},
 	{
-		Name: "unique", Signature: "unique",
+		Name: "unique", Signature: "unique", Grammar: "",
 		Summary:  "Drop duplicate rows over all columns (lazy).",
 		Category: "pipeline",
 	},
 	{
-		Name: "null_count", Aliases: []string{"null-count"}, Signature: "null_count",
+		Name: "null_count", Aliases: []string{"null-count"}, Signature: "null_count", Grammar: "",
 		Summary:  "Per-column null count as a single-row frame.",
 		Category: "inspect",
 	},
 	{
-		Name: "glimpse", Signature: "glimpse [N]",
+		Name: "glimpse", Signature: "glimpse [N]", Grammar: "[count]",
 		Summary:  "Compact peek at the first N rows (default 5).",
 		Category: "inspect", ArgKind: "count",
 	},
 	{
-		Name: "size", Signature: "size",
+		Name: "size", Signature: "size", Grammar: "",
 		Summary:  "Estimated Arrow byte size of the current pipeline output.",
 		Category: "inspect",
 	},
 	{
-		Name: "cast", Signature: "cast <col> <dtype>",
+		Name: "cast", Signature: "cast <col> <dtype>", Grammar: "col dtype",
 		Summary:  "Cast a column to a dtype: i8 to i64, u8 to u64, f32, f64, bool, str, date, datetime[ms], categorical, ...",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "fill_null", Aliases: []string{"fillnull"}, Signature: "fill_null <value>",
+		Name: "fill_null", Aliases: []string{"fillnull"}, Signature: "fill_null <value>", Grammar: "value",
 		Summary:  "Replace nulls across all compatible columns.",
 		Category: "pipeline",
 	},
 	{
-		Name: "drop_null", Aliases: []string{"dropnull"}, Signature: "drop_null [col...]",
+		Name: "drop_null", Aliases: []string{"dropnull"}, Signature: "drop_null [col...]", Grammar: "[cols]",
 		Summary:  "Drop rows with nulls in any (or the listed) columns.",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "rename", Signature: "rename <old> as <new>",
+		Name: "rename", Signature: "rename <old> as <new>", Grammar: "col 'as' newcol",
 		Summary:  "Rename a single column.",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "sum", Signature: "sum <col>",
+		Name: "sum", Signature: "sum <col>", Grammar: "col",
 		Summary:  "Print the sum of the given column.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "mean", Aliases: []string{"avg"}, Signature: "mean <col>",
+		Name: "mean", Aliases: []string{"avg"}, Signature: "mean <col>", Grammar: "col",
 		Summary:  "Print the mean of the given column.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "min", Signature: "min <col>",
+		Name: "min", Signature: "min <col>", Grammar: "col",
 		Summary:  "Print the min of the given column.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "max", Signature: "max <col>",
+		Name: "max", Signature: "max <col>", Grammar: "col",
 		Summary:  "Print the max of the given column.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "median", Signature: "median <col>",
+		Name: "median", Signature: "median <col>", Grammar: "col",
 		Summary:  "Print the median of the given column.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "std", Signature: "std <col>",
+		Name: "std", Signature: "std <col>", Grammar: "col",
 		Summary:  "Print the sample standard deviation of the given column.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "with_row_index", Signature: "with_row_index <name> [offset]",
+		Name: "with_row_index", Signature: "with_row_index <name> [offset]", Grammar: "newcol [int]",
 		Summary:  "Prepend an int64 row-index column.",
 		Category: "pipeline",
 	},
 	{
-		Name: "pwd", Signature: "pwd",
+		Name: "pwd", Signature: "pwd", Grammar: "",
 		Summary:  "Print the REPL working directory.",
 		Category: "session",
 	},
 	{
-		Name: "ls", Signature: "ls [path]",
+		Name: "ls", Signature: "ls [path]", Grammar: "[path]",
 		Summary:  "List files in the given directory (default: cwd).",
 		Category: "session", ArgKind: "path",
 	},
 	{
-		Name: "cd", Signature: "cd [path]",
+		Name: "cd", Signature: "cd [path]", Grammar: "[path]",
 		Summary:  "Change the REPL working directory (default: home).",
 		Category: "session", ArgKind: "path",
 	},
 	{
-		Name: "sum_horizontal", Signature: "sum_horizontal <out> [col...]",
+		Name: "sum_horizontal", Signature: "sum_horizontal <out> [col...]", Grammar: "newcol [cols]",
 		Summary: "Append a row-wise sum column named <out> across selected (or all numeric) columns.",
 		LongDoc: "Row-wise reduction: for every row, sum the values in the listed columns" +
 			" (or every numeric column when none are given). Nulls are skipped by default.",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "mean_horizontal", Signature: "mean_horizontal <out> [col...]",
+		Name: "mean_horizontal", Signature: "mean_horizontal <out> [col...]", Grammar: "newcol [cols]",
 		Summary:  "Append a row-wise mean column (nulls skipped).",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "min_horizontal", Signature: "min_horizontal <out> [col...]",
+		Name: "min_horizontal", Signature: "min_horizontal <out> [col...]", Grammar: "newcol [cols]",
 		Summary:  "Append a row-wise min column.",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "max_horizontal", Signature: "max_horizontal <out> [col...]",
+		Name: "max_horizontal", Signature: "max_horizontal <out> [col...]", Grammar: "newcol [cols]",
 		Summary:  "Append a row-wise max column.",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "all_horizontal", Signature: "all_horizontal <out> [col...]",
+		Name: "all_horizontal", Signature: "all_horizontal <out> [col...]", Grammar: "newcol [cols]",
 		Summary:  "Append a row-wise boolean AND column across selected (or all boolean) columns.",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "any_horizontal", Signature: "any_horizontal <out> [col...]",
+		Name: "any_horizontal", Signature: "any_horizontal <out> [col...]", Grammar: "newcol [cols]",
 		Summary:  "Append a row-wise boolean OR column.",
 		Category: "pipeline", ArgKind: "column",
 	},
 	{
-		Name: "sum_all", Signature: "sum_all",
+		Name: "sum_all", Signature: "sum_all", Grammar: "",
 		Summary:  "One-row frame with the sum of every numeric column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "mean_all", Signature: "mean_all",
+		Name: "mean_all", Signature: "mean_all", Grammar: "",
 		Summary:  "One-row frame with the mean of every numeric column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "min_all", Signature: "min_all",
+		Name: "min_all", Signature: "min_all", Grammar: "",
 		Summary:  "One-row frame with the min of every numeric column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "max_all", Signature: "max_all",
+		Name: "max_all", Signature: "max_all", Grammar: "",
 		Summary:  "One-row frame with the max of every numeric column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "std_all", Signature: "std_all",
+		Name: "std_all", Signature: "std_all", Grammar: "",
 		Summary:  "One-row frame with the sample std of every numeric column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "var_all", Signature: "var_all",
+		Name: "var_all", Signature: "var_all", Grammar: "",
 		Summary:  "One-row frame with the sample variance of every numeric column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "median_all", Signature: "median_all",
+		Name: "median_all", Signature: "median_all", Grammar: "",
 		Summary:  "One-row frame with the median of every numeric column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "count_all", Signature: "count_all",
+		Name: "count_all", Signature: "count_all", Grammar: "",
 		Summary:  "One-row frame with the non-null count of every column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "null_count_all", Signature: "null_count_all",
+		Name: "null_count_all", Signature: "null_count_all", Grammar: "",
 		Summary:  "One-row frame with the null count of every column.",
 		Category: "aggregate",
 	},
 	{
-		Name: "with", Signature: "with <name> = <expression>",
+		Name: "with", Signature: "with <name> = <expression>", Grammar: "@with",
 		Summary: "Append a derived column via the expression language.",
 		LongDoc: "Evaluates EXPRESSION for every row and appends the result as column NAME;" +
 			" the other columns are untouched. The same expression language drives `filter`.\n\n" +
@@ -439,7 +449,7 @@ var Commands = []CommandSpec{
 		},
 	},
 	{
-		Name: "unnest", Signature: "unnest <col>",
+		Name: "unnest", Signature: "unnest <col>", Grammar: "col",
 		Summary: "Project the fields of a struct-typed column as top-level columns.",
 		LongDoc: "Requires COL to have a Struct dtype. Each struct field becomes a" +
 			" top-level column whose name is taken from the field. Struct-level" +
@@ -448,7 +458,7 @@ var Commands = []CommandSpec{
 		Category: "reshape", ArgKind: "column",
 	},
 	{
-		Name: "explode", Signature: "explode <col>[,<col>...]",
+		Name: "explode", Signature: "explode <col>[,<col>...]", Grammar: "cols",
 		Summary: "Fan out each element of a list-typed column into its own row.",
 		LongDoc: "Requires list-typed columns. Surrounding columns are repeated" +
 			" to match. Null and empty lists each become a single null row, matching" +
@@ -457,7 +467,7 @@ var Commands = []CommandSpec{
 		Category: "reshape", ArgKind: "column",
 	},
 	{
-		Name: "to_dummies", Signature: "to_dummies [col...] [drop_first]",
+		Name: "to_dummies", Signature: "to_dummies [col...] [drop_first]", Grammar: "[cols] ['drop_first']",
 		Summary: "One-hot encode columns into u8 indicator columns named COL_VALUE.",
 		LongDoc: "Encodes the listed columns, or every column when none are given. Each source" +
 			" column is replaced in place by its indicators, sorted by value. `drop_first` drops" +
@@ -466,7 +476,7 @@ var Commands = []CommandSpec{
 		Examples: []string{"to_dummies dept", "to_dummies dept, level drop_first"},
 	},
 	{
-		Name: "upsample", Signature: "upsample <col> <every>",
+		Name: "upsample", Signature: "upsample <col> <every>", Grammar: "col dur",
 		Summary: "Interpolate a timestamp column at a regular interval.",
 		LongDoc: "COL must be sorted-ascending timestamp. EVERY is a shorthand duration:" +
 			" ns, us, ms, s, m, h, d, w. Calendar units (mo, y) are not supported." +
@@ -474,106 +484,106 @@ var Commands = []CommandSpec{
 		Category: "reshape", ArgKind: "column",
 	},
 	{
-		Name: "scan_csv", Signature: "scan_csv <path> [as NAME]",
+		Name: "scan_csv", Signature: "scan_csv <path> [as NAME]", Grammar: "path ['as' newframe]",
 		Summary: "Register a lazy scan of a CSV file (push-down friendly).",
 		LongDoc: "Unlike `load`, scan defers opening the file until Collect," +
 			" allowing the optimiser to push projections and filters into the reader.",
 		Category: "io", ArgKind: "path",
 	},
 	{
-		Name: "scan_parquet", Signature: "scan_parquet <path> [as NAME]",
+		Name: "scan_parquet", Signature: "scan_parquet <path> [as NAME]", Grammar: "path ['as' newframe]",
 		Summary:  "Register a lazy scan of a Parquet file.",
 		Category: "io", ArgKind: "path",
 	},
 	{
-		Name: "scan_ipc", Aliases: []string{"scan_arrow"}, Signature: "scan_ipc <path> [as NAME]",
+		Name: "scan_ipc", Aliases: []string{"scan_arrow"}, Signature: "scan_ipc <path> [as NAME]", Grammar: "path ['as' newframe]",
 		Summary:  "Register a lazy scan of an Arrow IPC file.",
 		Category: "io", ArgKind: "path",
 	},
 	{
-		Name: "scan_ndjson", Aliases: []string{"scan_jsonl"}, Signature: "scan_ndjson <path> [as NAME]",
+		Name: "scan_ndjson", Aliases: []string{"scan_jsonl"}, Signature: "scan_ndjson <path> [as NAME]", Grammar: "path ['as' newframe]",
 		Summary:  "Register a lazy scan of an NDJSON file.",
 		Category: "io", ArgKind: "path",
 	},
 	{
-		Name: "scan_json", Signature: "scan_json <path> [as NAME]",
+		Name: "scan_json", Signature: "scan_json <path> [as NAME]", Grammar: "path ['as' newframe]",
 		Summary:  "Register a lazy scan of a JSON (array) file.",
 		Category: "io", ArgKind: "path",
 	},
 	{
-		Name: "scan_auto", Signature: "scan_auto <path> [as NAME]",
+		Name: "scan_auto", Signature: "scan_auto <path> [as NAME]", Grammar: "path ['as' newframe]",
 		Summary:  "Register a lazy scan inferring the reader from the file extension.",
 		Category: "io", ArgKind: "path",
 	},
 	{
-		Name: "fill_nan", Signature: "fill_nan <value>",
+		Name: "fill_nan", Signature: "fill_nan <value>", Grammar: "number",
 		Summary:  "Replace NaN with VALUE in every float column (frame-level).",
 		Category: "pipeline",
 	},
 	{
-		Name: "forward_fill", Aliases: []string{"ff"}, Signature: "forward_fill [limit]",
+		Name: "forward_fill", Aliases: []string{"ff"}, Signature: "forward_fill [limit]", Grammar: "[count]",
 		Summary: "Forward-fill nulls (at most LIMIT consecutive, 0 = unlimited).",
 		LongDoc: "Per-column: replace nulls with the most recent non-null value." +
 			" Leading nulls stay null. Mirrors polars' lf.fill_null(strategy=\"forward\").",
 		Category: "pipeline",
 	},
 	{
-		Name: "backward_fill", Aliases: []string{"bf"}, Signature: "backward_fill [limit]",
+		Name: "backward_fill", Aliases: []string{"bf"}, Signature: "backward_fill [limit]", Grammar: "[count]",
 		Summary:  "Backward-fill nulls. Trailing nulls stay null.",
 		Category: "pipeline",
 	},
 	{
-		Name: "top_k", Signature: "top_k <K> <col>",
+		Name: "top_k", Signature: "top_k <K> <col>", Grammar: "count col",
 		Summary:  "Replace the focus with the K rows holding the largest values in COL (descending).",
 		Category: "reshape", ArgKind: "count",
 	},
 	{
-		Name: "bottom_k", Signature: "bottom_k <K> <col>",
+		Name: "bottom_k", Signature: "bottom_k <K> <col>", Grammar: "count col",
 		Summary:  "Replace the focus with the K rows holding the smallest values in COL.",
 		Category: "reshape", ArgKind: "count",
 	},
 	{
-		Name: "transpose", Signature: "transpose [header_col] [prefix]",
+		Name: "transpose", Signature: "transpose [header_col] [prefix]", Grammar: "[col] [word]",
 		Summary:  "Transpose the focus (numeric/bool columns only).",
 		Category: "reshape",
 	},
 	{
-		Name: "unpivot", Aliases: []string{"melt"}, Signature: "unpivot <id_cols> [val_cols]",
+		Name: "unpivot", Aliases: []string{"melt"}, Signature: "unpivot <id_cols> [val_cols]", Grammar: "collist [collist]",
 		Summary:  "Reshape wide to long. ID_COLS/VAL_COLS are comma-separated lists.",
 		Category: "reshape", ArgKind: "column",
 	},
 	{
-		Name: "partition_by", Signature: "partition_by <keys>",
+		Name: "partition_by", Signature: "partition_by <keys>", Grammar: "cols",
 		Summary:  "Split the focus into one frame per distinct key combination; prints a summary.",
 		Category: "inspect", ArgKind: "column",
 	},
 	{
-		Name: "skew", Signature: "skew <col>",
+		Name: "skew", Signature: "skew <col>", Grammar: "col",
 		Summary:  "Print the skewness of COL (polars-default, biased).",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "kurtosis", Signature: "kurtosis <col>",
+		Name: "kurtosis", Signature: "kurtosis <col>", Grammar: "col",
 		Summary:  "Print the excess kurtosis of COL.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "approx_n_unique", Aliases: []string{"approx_nunique"}, Signature: "approx_n_unique <col>",
+		Name: "approx_n_unique", Aliases: []string{"approx_nunique"}, Signature: "approx_n_unique <col>", Grammar: "col",
 		Summary:  "HyperLogLog estimate of the number of distinct values in COL.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "corr", Signature: "corr <col1> <col2>",
+		Name: "corr", Signature: "corr <col1> <col2>", Grammar: "col col",
 		Summary:  "Print the Pearson correlation between two numeric columns.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "cov", Signature: "cov <col1> <col2>",
+		Name: "cov", Signature: "cov <col1> <col2>", Grammar: "col col",
 		Summary:  "Print the sample covariance (ddof=1) between two numeric columns.",
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "pivot", Signature: "pivot <index_cols> <on_col> <values_col> [agg]",
+		Name: "pivot", Signature: "pivot <index_cols> <on_col> <values_col> [agg]", Grammar: "collist col col [first|sum|mean|min|max|count]",
 		Summary:  "Long-to-wide pivot. agg: first/sum/mean/min/max/count (default first).",
 		LongDoc:  "INDEX_COLS may be a comma-separated list.",
 		Category: "reshape", ArgKind: "column",
@@ -699,6 +709,38 @@ func SuggestCommand(want string) string {
 	for _, cmd := range Commands {
 		if d := editDistance(want, cmd.Name, bestDist); d < bestDist {
 			best, bestDist = cmd.Name, d
+		}
+	}
+	return best
+}
+
+// Closest returns the candidate nearest to want by edit distance, or
+// "" when none is close enough to be a plausible typo. Matching is
+// case-insensitive; the candidate is returned as written. Used for
+// "did you mean" hints on columns, functions and keywords.
+func Closest(want string, candidates []string) string {
+	lw := strings.ToLower(want)
+	if lw == "" {
+		return ""
+	}
+	maxDist := 2
+	switch {
+	case len(lw) <= 2:
+		maxDist = 1
+	case len(lw) >= 8:
+		maxDist = 3
+	}
+	best, bestDist := "", maxDist+1
+	for _, c := range candidates {
+		lc := strings.ToLower(c)
+		if lc == lw {
+			if c == want {
+				continue
+			}
+			return c
+		}
+		if d := editDistance(lw, lc, bestDist); d < bestDist {
+			best, bestDist = c, d
 		}
 	}
 	return best
