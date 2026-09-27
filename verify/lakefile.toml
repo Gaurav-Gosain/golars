@@ -1,0 +1,10 @@
+name = "golarsverify"
+version = "0.1.0"
+defaultTargets = ["Golars", "gen-vectors"]
+
+[[lean_lib]]
+name = "Golars"
+
+[[lean_exe]]
+name = "gen-vectors"
+root = "GenVectors"
