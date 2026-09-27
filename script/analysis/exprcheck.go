@@ -86,7 +86,7 @@ func evalExprs(sch *schema.Schema, exprs ...expr.Expr) (out *schema.Schema, err 
 			err = fmt.Errorf("%v", r)
 		}
 	}()
-	df := probe(Frame{Schema: sch}, true)
+	df := probe(Frame{Schema: narrow(sch, exprs)}, true)
 	defer df.Release()
 	res, err := lazy.FromDataFrame(df).Select(exprs...).Collect(bgCtx)
 	if err != nil {
@@ -94,6 +94,38 @@ func evalExprs(sch *schema.Schema, exprs ...expr.Expr) (out *schema.Schema, err 
 	}
 	defer res.Release()
 	return res.Schema(), nil
+}
+
+// narrow keeps the columns of sch that exprs read, so probing a wide
+// frame costs what the expression needs. Expressions that expand to
+// many columns (all(), exclude, regex) keep the full schema.
+func narrow(sch *schema.Schema, exprs []expr.Expr) *schema.Schema {
+	var want []string
+	for _, e := range exprs {
+		cols, complete := expr.ReferencedColumns(e)
+		if !complete {
+			return sch
+		}
+		want = append(want, cols...)
+	}
+	var fields []schema.Field
+	seen := map[string]bool{}
+	for _, name := range want {
+		if f, found := sch.FieldByName(name); found && !seen[name] {
+			seen[name] = true
+			fields = append(fields, f)
+		}
+	}
+	if len(fields) == 0 && sch.Len() > 0 {
+		// Keep one column so the probe still has a row (len() and
+		// literals broadcast against it).
+		fields = append(fields, sch.Field(0))
+	}
+	out, err := schema.New(fields...)
+	if err != nil {
+		return sch
+	}
+	return out
 }
 
 // probe returns a frame with f's schema to run operations on: one

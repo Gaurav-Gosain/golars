@@ -317,8 +317,17 @@ func namedExprs(st *syntax.Stmt) []namedExpr {
 // returns the expressions (aliased) and the origins of the named
 // outputs; ok is false when an item did not compile.
 func (a *analyzer) compileItems(items []namedExpr, f Frame) (exprs []expr.Expr, add map[string]Loc, ok bool) {
+	exprs, _, add, ok = a.compileItemsFields(items, f)
+	return exprs, add, ok
+}
+
+// compileItemsFields is compileItems that also returns the output
+// field of each expression; fields is nil when an expression expands
+// to several columns or the frame is unknown.
+func (a *analyzer) compileItemsFields(items []namedExpr, f Frame) (exprs []expr.Expr, fields []schema.Field, add map[string]Loc, ok bool) {
 	add = map[string]Loc{}
 	ok = true
+	single := f.Known()
 	for _, it := range items {
 		e, good := a.checkExpr(it.expr, f)
 		if it.name != nil {
@@ -342,20 +351,38 @@ func (a *analyzer) compileItems(items []namedExpr, f Frame) (exprs []expr.Expr, 
 				}
 				a.step0.Items[it.name.Value] = sch.Field(0).DType.String()
 			}
+			if sch.Len() == 1 {
+				fields = append(fields, sch.Field(0))
+			} else {
+				single = false
+			}
 		}
 		exprs = append(exprs, e)
 	}
-	return exprs, add, ok
+	if !single {
+		fields = nil
+	}
+	return exprs, fields, add, ok
 }
 
 func (a *analyzer) applyWith(st *syntax.Stmt) {
-	exprs, add, ok := a.compileItems(namedExprs(st), a.focus)
+	exprs, fields, add, ok := a.compileItemsFields(namedExprs(st), a.focus)
 	if !ok {
 		a.focus.Origins = withOrigins(a.focus, add)
 		if a.focus.Known() {
 			// Keep the names so later statements do not cascade.
 			a.addUnknownColumns(add)
 		}
+		return
+	}
+	if fields != nil {
+		// with_columns appends or replaces each output in order.
+		sch := a.focus.Schema
+		for _, f := range fields {
+			sch = sch.WithField(f)
+		}
+		a.focus.Schema = sch
+		a.focus.Origins = withOrigins(a.focus, add)
 		return
 	}
 	a.lazyStep(st.Parts[0], func(lf lazy.LazyFrame) lazy.LazyFrame { return lf.WithColumns(exprs...) }, add)
@@ -383,11 +410,18 @@ func (a *analyzer) applySelect(st *syntax.Stmt) {
 		}
 		return
 	}
-	exprs, add, ok := a.compileItems(namedExprs(st), a.focus)
+	exprs, fields, add, ok := a.compileItemsFields(namedExprs(st), a.focus)
 	if !ok {
 		a.focus.Schema = nil
 		a.focus.Origins = withOrigins(a.focus, add)
 		return
+	}
+	if fields != nil {
+		if sch, err := schema.New(fields...); err == nil {
+			a.focus.Schema = sch
+			a.focus.Origins = withOrigins(a.focus, add)
+			return
+		}
 	}
 	a.lazyStep(st.Parts[0], func(lf lazy.LazyFrame) lazy.LazyFrame { return lf.Select(exprs...) }, add)
 }
