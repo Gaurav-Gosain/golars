@@ -175,7 +175,43 @@ func executeJoin(ctx context.Context, cfg execConfig, j Join) (*dataframe.DataFr
 	}
 	defer left.Release()
 	defer right.Release()
+	if out, ok, err := joinBuildSmaller(ctx, cfg, left, right, j); ok {
+		return out, err
+	}
 	return left.Join(ctx, right, j.On, j.How, dataframe.WithJoinAllocator(cfg.alloc))
+}
+
+// joinBuildSmaller runs an inner join with the inputs swapped when the
+// right input is the larger one. The join kernel builds its table on
+// the right input, so a small filtered dimension joined with a large
+// fact table (orders with lineitem in TPC-H Q3, Q5, Q10) built the table
+// over the large side: several times more memory and slower probes.
+// The swapped result is restored to the left-then-right column layout.
+// Row order is not part of the inner join contract (polars' default
+// maintain_order is "none"). Only applies when no non-key column name
+// occurs on both sides, so no suffixing is involved.
+func joinBuildSmaller(ctx context.Context, cfg execConfig, left, right *dataframe.DataFrame, j Join) (*dataframe.DataFrame, bool, error) {
+	if j.How != dataframe.InnerJoin || right.Height() <= 2*left.Height() {
+		return nil, false, nil
+	}
+	keys := stringSet(j.On)
+	names := append(make([]string, 0, left.Width()+right.Width()), left.ColumnNames()...)
+	for _, n := range right.ColumnNames() {
+		if _, isKey := keys[n]; isKey {
+			continue
+		}
+		if left.Contains(n) {
+			return nil, false, nil
+		}
+		names = append(names, n)
+	}
+	swapped, err := right.Join(ctx, left, j.On, j.How, dataframe.WithJoinAllocator(cfg.alloc))
+	if err != nil {
+		return nil, true, err
+	}
+	defer swapped.Release()
+	out, err := swapped.Select(names...)
+	return out, true, err
 }
 
 // executeBoth runs two independent inputs concurrently (the right one on

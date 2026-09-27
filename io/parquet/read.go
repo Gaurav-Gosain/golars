@@ -10,12 +10,27 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
 // readBatchSize is the number of rows decoded per NextBatch call. Larger
 // batches mean fewer, larger output chunks and fewer builder resizes.
 const readBatchSize = 1 << 20
+
+// batchSizeFor returns the pqarrow decode batch size for pf: the
+// largest row group, capped at readBatchSize. pqarrow reserves value
+// and level buffers for a whole batch before decoding each row group,
+// so a 1M-row batch on a file with 64K-row groups reserved (and zeroed)
+// about 16x the memory each column needs, for every row group read in
+// parallel.
+func batchSizeFor(pf *file.Reader) int64 {
+	batch := int64(1)
+	for i := range pf.NumRowGroups() {
+		batch = max(batch, pf.MetaData().RowGroup(i).NumRows())
+	}
+	return min(batch, readBatchSize)
+}
 
 // readTable decodes the projected columns of every row group with
 // pqarrow. Columns are decoded in parallel (pqarrow's Parallel mode fans

@@ -96,7 +96,7 @@ func Read(ctx context.Context, r parquet.ReaderAtSeeker, opts ...Option) (*dataf
 	if err != nil {
 		return nil, fmt.Errorf("parquet: read: %w", err)
 	}
-	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: readBatchSize, PreAllocBinaryData: true}
+	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: batchSizeFor(pf), PreAllocBinaryData: true}
 	fr, err := pqarrow.NewFileReader(pf, props, cfg.alloc)
 	if err != nil {
 		return nil, fmt.Errorf("parquet: read: %w", err)
