@@ -56,7 +56,7 @@ func TestParseErrors(t *testing.T) {
 		`x.rolling_mean(3)`:  "rolling_mean",
 		`"unterminated`:      "",
 		`a + `:               "",
-		`a b`:                "unexpected trailing token",
+		`a b`:                `unexpected identifier "b"`,
 		`(a + 1`:             "",
 		`coalesce()`:         "coalesce requires at least 1 argument",
 		`lit(a)`:             "expected a literal",

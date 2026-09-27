@@ -10,6 +10,7 @@ import (
 
 	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
+	"github.com/Gaurav-Gosain/golars/script"
 )
 
 // val is a compiled expression together with the Go source that
@@ -28,31 +29,37 @@ var (
 	rollOptType  = reflect.TypeFor[expr.RollingByOption]()
 )
 
-func compile(n *node) (val, error) {
-	switch n.kind {
-	case nLit:
-		return litVal(n.lit)
-	case nCol:
-		return val{expr.Col(n.name), fmt.Sprintf("expr.Col(%q)", n.name)}, nil
-	case nList:
-		return val{}, fmt.Errorf("a [list] at byte %d is only valid as a function argument", n.pos)
-	case nNot, nNeg:
-		inner, err := compile(n.args[0])
+func compile(n *Node) (val, error) {
+	v, err := compileNode(n)
+	return v, locate(err, n)
+}
+
+func compileNode(n *Node) (val, error) {
+	switch n.Kind {
+	case KindLit:
+		return litVal(n.Lit)
+	case KindCol:
+		return val{expr.Col(n.Name), fmt.Sprintf("expr.Col(%q)", n.Name)}, nil
+	case KindList:
+		return val{}, errAt(n, "a [list] is only valid as a function argument").
+			withHint(`as in x in [1, 2] or cut(x, [0, 10])`)
+	case KindNot, KindNeg:
+		inner, err := compile(n.Args[0])
 		if err != nil {
 			return val{}, err
 		}
-		if n.kind == nNot {
+		if n.Kind == KindNot {
 			return val{inner.e.Not(), inner.src + ".Not()"}, nil
 		}
 		return val{inner.e.Neg(), inner.src + ".Neg()"}, nil
-	case nBinary:
+	case KindBinary:
 		return compileBinary(n)
-	case nWhen:
+	case KindWhen:
 		return compileWhen(n)
-	case nCall:
+	case KindCall:
 		return compileCall(n)
 	}
-	return val{}, fmt.Errorf("internal: unknown node kind %d", n.kind)
+	return val{}, fmt.Errorf("internal: unknown node kind %d", n.Kind)
 }
 
 func litVal(v any) (val, error) {
@@ -78,16 +85,16 @@ var binaryMethods = map[string]string{
 	">=": "Ge", "and": "And", "or": "Or",
 }
 
-func compileBinary(n *node) (val, error) {
-	l, err := compile(n.args[0])
+func compileBinary(n *Node) (val, error) {
+	l, err := compile(n.Args[0])
 	if err != nil {
 		return val{}, err
 	}
-	r, err := compile(n.args[1])
+	r, err := compile(n.Args[1])
 	if err != nil {
 		return val{}, err
 	}
-	m := binaryMethods[n.name]
+	m := binaryMethods[n.Name]
 	out := reflect.ValueOf(l.e).MethodByName(m).Call([]reflect.Value{reflect.ValueOf(r.e)})[0]
 	return val{out.Interface().(expr.Expr), fmt.Sprintf("%s.%s(%s)", l.src, m, r.src)}, nil
 }
@@ -95,22 +102,22 @@ func compileBinary(n *node) (val, error) {
 // compileWhen nests `when a then x when b then y otherwise z` as
 // When(a).Then(x).Otherwise(When(b).Then(y).Otherwise(z)). A missing
 // otherwise yields null, as in polars.
-func compileWhen(n *node) (val, error) {
+func compileWhen(n *Node) (val, error) {
 	acc, err := litVal(nil)
 	if err != nil {
 		return val{}, err
 	}
-	if n.final != nil {
-		if acc, err = compile(n.final); err != nil {
+	if n.Final != nil {
+		if acc, err = compile(n.Final); err != nil {
 			return val{}, err
 		}
 	}
-	for i := len(n.args) - 2; i >= 0; i -= 2 {
-		pred, err := compile(n.args[i])
+	for i := len(n.Args) - 2; i >= 0; i -= 2 {
+		pred, err := compile(n.Args[i])
 		if err != nil {
 			return val{}, err
 		}
-		then, err := compile(n.args[i+1])
+		then, err := compile(n.Args[i+1])
 		if err != nil {
 			return val{}, err
 		}
@@ -122,19 +129,19 @@ func compileWhen(n *node) (val, error) {
 	return acc, nil
 }
 
-func compileCall(n *node) (val, error) {
-	if n.recv != nil {
-		recv, err := compile(n.recv)
+func compileCall(n *Node) (val, error) {
+	if n.Recv != nil {
+		recv, err := compile(n.Recv)
 		if err != nil {
 			return val{}, err
 		}
-		return compileMethod(n.ns, n.name, recv, n.args, n.kw)
+		return compileMethod(n, n.NS, recv, n.Args, 0)
 	}
-	if n.ns != "" {
+	if n.NS != "" {
 		v, err := compileNSFunction(n)
 		if err != nil && n.ambig {
-			col := val{expr.Col(n.ns), fmt.Sprintf("expr.Col(%q)", n.ns)}
-			if v2, err2 := compileMethod("", n.name, col, n.args, n.kw); err2 == nil {
+			col := val{expr.Col(n.NS), fmt.Sprintf("expr.Col(%q)", n.NS)}
+			if v2, err2 := compileMethod(n, "", col, n.Args, 0); err2 == nil {
 				return v2, nil
 			}
 		}
@@ -145,83 +152,120 @@ func compileCall(n *node) (val, error) {
 
 // compileNSFunction handles `dt.year(ts)`: the first argument is the
 // receiver of the namespaced method.
-func compileNSFunction(n *node) (val, error) {
-	if len(n.args) == 0 {
-		return val{}, fmt.Errorf("%s.%s needs the value to work on as its first argument, as in %s.%s(x)",
-			n.ns, n.name, n.ns, n.name)
+func compileNSFunction(n *Node) (val, error) {
+	if _, found := lookupMethod(n.NS, n.Name); !found {
+		return val{}, unknownFunction(n, "unknown "+n.NS+" function")
 	}
-	if _, found := lookupMethod(n.ns, n.name); !found {
-		return val{}, fmt.Errorf("unknown %s function %q", n.ns, n.name)
+	if len(n.Args) == 0 {
+		return val{}, errAt(n, "%s.%s needs the value to work on as its first argument", n.NS, n.Name).
+			withHint("as in %s.%s(x) or x.%s.%s()", n.NS, n.Name, n.NS, n.Name)
 	}
-	recv, err := compile(n.args[0])
+	recv, err := compile(n.Args[0])
 	if err != nil {
 		return val{}, err
 	}
-	return compileMethod(n.ns, n.name, recv, n.args[1:], n.kw)
+	return compileMethod(n, n.NS, recv, n.Args[1:], 1)
 }
 
-func compileFree(n *node) (val, error) {
-	switch n.name {
+func compileFree(n *Node) (val, error) {
+	switch n.Name {
 	case "col":
-		if len(n.args) != 1 || len(n.kw) != 0 {
-			return val{}, fmt.Errorf("col takes 1 argument, got %d", len(n.args))
+		if len(n.Args) != 1 || len(n.Kw) != 0 {
+			return val{}, errAt(n, "col takes 1 argument, got %d", len(n.Args)+len(n.Kw)).withHint(`as in col("my column")`)
 		}
-		s, err := stringLit(n.args[0], "col", 0)
+		s, err := stringLit(n.Args[0], "col", 0)
 		if err != nil {
 			return val{}, err
 		}
 		return val{expr.Col(s), fmt.Sprintf("expr.Col(%q)", s)}, nil
 	case "lit":
-		if len(n.args) != 1 || len(n.kw) != 0 {
-			return val{}, fmt.Errorf("lit takes 1 argument, got %d", len(n.args))
+		if len(n.Args) != 1 || len(n.Kw) != 0 {
+			return val{}, errAt(n, "lit takes 1 argument, got %d", len(n.Args)+len(n.Kw))
 		}
-		if n.args[0].kind != nLit {
-			return val{}, fmt.Errorf("lit: expected a literal")
+		v := litOf(n.Args[0])
+		if v == nil && !isNullLit(n.Args[0]) {
+			return val{}, errAt(n.Args[0], "lit: expected a literal")
 		}
-		return litVal(n.args[0].lit)
+		return litVal(v)
 	}
 	// Legacy spelling: `sum("x")` aggregates the column named x.
-	if slices.Contains(legacyColumnAggs, n.name) && len(n.args) == 1 && len(n.kw) == 0 &&
-		n.args[0].kind == nLit {
-		s, isStr := n.args[0].lit.(string)
+	if slices.Contains(legacyColumnAggs, n.Name) && len(n.Args) == 1 && len(n.Kw) == 0 &&
+		n.Args[0].Kind == KindLit {
+		s, isStr := n.Args[0].Lit.(string)
 		if !isStr {
-			return val{}, fmt.Errorf("%s: expected a column name or expression", n.name)
+			return val{}, errAt(n.Args[0], "%s: expected a column name or expression", n.Name)
 		}
-		return compileMethod("", n.name, val{expr.Col(s), fmt.Sprintf("expr.Col(%q)", s)}, nil, nil)
+		return compileMethod(&Node{Name: n.Name, Pos: n.Pos, End: n.End, NamePos: n.NamePos}, "",
+			val{expr.Col(s), fmt.Sprintf("expr.Col(%q)", s)}, nil, 1)
 	}
-	_, isMethod := lookupMethod("", n.name)
-	if f, found := freeFuncs[n.name]; found {
-		v, err := f.call(n.name, n.args, n.kw)
-		if err == nil || !isMethod || len(n.args) == 0 {
+	_, isMethod := lookupMethod("", n.Name)
+	if f, found := freeFuncs[n.Name]; found {
+		v, err := f.call(n)
+		if err == nil || !isMethod || len(n.Args) == 0 {
 			return v, err
 		}
 	}
-	if isMethod && len(n.args) > 0 {
-		recv, err := compile(n.args[0])
+	if isMethod && len(n.Args) > 0 {
+		recv, err := compile(n.Args[0])
 		if err != nil {
 			return val{}, err
 		}
-		return compileMethod("", n.name, recv, n.args[1:], n.kw)
+		return compileMethod(n, "", recv, n.Args[1:], 1)
 	}
-	return val{}, fmt.Errorf("unknown function %q", n.name)
+	if isMethod {
+		return val{}, errAt(n, "%s needs the value to work on as its first argument", n.Name).
+			withHint("as in %s(x) or x.%s()", n.Name, n.Name)
+	}
+	return val{}, unknownFunction(n, "unknown function")
 }
+
+// unknownFunction reports an unresolved call name with the closest
+// known spelling.
+func unknownFunction(n *Node, what string) *Error {
+	e := errSpan(n.NamePos, n.NameEnd(), "%s %q", what, n.Name)
+	var pool []string
+	switch {
+	case n.Recv != nil:
+		pool = Functions()[n.NS]
+	case n.NS != "":
+		pool = Functions()[n.NS]
+	default:
+		fns := Functions()
+		pool = append(append([]string(nil), fns["free"]...), fns[""]...)
+	}
+	if best := script.Closest(n.Name, pool); best != "" {
+		e.Fix = best
+		return e.withHint("did you mean %q?", best)
+	}
+	return e
+}
+
+func isNullLit(n *Node) bool { return n.Kind == KindLit && n.Lit == nil }
 
 // compileMethod applies method name of namespace ns (or of expr.Expr
 // itself when ns is "") to recv.
-func compileMethod(ns, name string, recv val, args []*node, kw []kwarg) (val, error) {
+//
+// call is the call node (for its name, keyword arguments and error
+// positions); shift is 1 when the receiver was written as the first
+// argument, so arity errors count the arguments the user typed.
+func compileMethod(call *Node, ns string, recv val, args []*Node, shift int) (val, error) {
+	name, kw := call.Name, call.Kw
 	spec, found := lookupMethod(ns, name)
 	display := name
 	if ns != "" {
 		display = ns + "." + name
 	}
 	if !found {
+		probe := *call
+		probe.NS = ns
 		if ns == "" {
-			return val{}, fmt.Errorf("unknown method %q", name)
+			return val{}, unknownFunction(&probe, "unknown method")
 		}
-		return val{}, fmt.Errorf("unknown %s method %q", ns, name)
+		return val{}, unknownFunction(&probe, "unknown "+ns+" method")
 	}
 	if spec.custom != nil {
-		return spec.custom(recv, args, kw)
+		v, err := spec.custom(recv, args, kw)
+		return v, locate(err, call)
 	}
 	rv := reflect.ValueOf(recv.e)
 	prefix := recv.src
@@ -238,7 +282,7 @@ func compileMethod(ns, name string, recv val, args []*node, kw []kwarg) (val, er
 	if !m.IsValid() {
 		return val{}, fmt.Errorf("internal: %s maps to missing method %s", display, goName)
 	}
-	return invoke(m, display, prefix+"."+goName, args, kw, spec.defaults, spec.names)
+	return invoke(call, m, display, prefix+"."+goName, args, kw, spec.defaults, spec.names, shift)
 }
 
 // invoke calls fn with glr arguments converted to its Go parameter
@@ -246,7 +290,7 @@ func compileMethod(ns, name string, recv val, args []*node, kw []kwarg) (val, er
 // functions are filled from keyword arguments; the other parameters
 // are positional, with trailing ones taking defaults when omitted and
 // names letting keyword arguments fill them.
-func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, defaults []any, names []string) (val, error) {
+func invoke(call *Node, fn reflect.Value, display, goCall string, args []*Node, kw []KwArg, defaults []any, names []string, shift int) (val, error) {
 	t := fn.Type()
 	nIn := t.NumIn()
 	variadic := t.IsVariadic()
@@ -277,9 +321,9 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 	// Keyword arguments that name a positional parameter.
 	for k, a := range kw {
 		for j, name := range names {
-			if j < nFixed && normalize(name) == normalize(a.name) {
+			if j < nFixed && normalize(name) == normalize(a.Name) {
 				idx := positional[j]
-				v, s, err := convert(a.val, t.In(idx), display, j+1)
+				v, s, err := convert(a.Val, t.In(idx), display, j+1)
 				if err != nil {
 					return val{}, err
 				}
@@ -289,7 +333,7 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 	}
 
 	next := 0
-	var rest []*node
+	var rest []*Node
 	for j := range nFixed {
 		idx := positional[j]
 		if filled[idx] {
@@ -306,7 +350,7 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 		}
 		d := len(defaults) - (nFixed - j)
 		if d < 0 {
-			return val{}, arityError(display, nFixed, len(defaults), hasVar, len(args), len(kw))
+			return val{}, arityError(call, display, nFixed, len(defaults), hasVar, len(args), shift)
 		}
 		v, s, err := convert(litNode(defaults[d]), t.In(idx), display, j+1)
 		if err != nil {
@@ -316,7 +360,7 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 	}
 	if next < len(args) {
 		if !hasVar {
-			return val{}, arityError(display, nFixed, len(defaults), hasVar, len(args), len(kw))
+			return val{}, arityError(call, display, nFixed, len(defaults), hasVar, len(args), shift)
 		}
 		rest = args[next:]
 	}
@@ -325,8 +369,8 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 	var varSrcs []string
 	if hasVar {
 		elem := t.In(nIn - 1).Elem()
-		if len(rest) == 1 && rest[0].kind == nList && elem.Kind() != reflect.Slice {
-			rest = rest[0].args
+		if len(rest) == 1 && rest[0].Kind == KindList && elem.Kind() != reflect.Slice {
+			rest = rest[0].Args
 		}
 		for i, a := range rest {
 			v, s, err := convert(a, elem, display, next+i+1)
@@ -354,7 +398,7 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 	}
 	for k, isUsed := range used {
 		if !isUsed {
-			return val{}, fmt.Errorf("%s: unknown keyword argument %q", display, kw[k].name)
+			return val{}, unknownKeyword(display, kw[k], keywordNames(t, names, nFixed, optStructs, optFuncs >= 0))
 		}
 	}
 
@@ -383,15 +427,72 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 	return val{out[0].Interface().(expr.Expr), goCall + "(" + strings.Join(callSrcs, ", ") + ")"}, nil
 }
 
-func arityError(display string, nFixed, nDefaults int, hasVar bool, got, gotKw int) error {
-	lo := max(nFixed-nDefaults, 0)
+func arityError(call *Node, display string, nFixed, nDefaults int, hasVar bool, got, shift int) error {
+	lo := max(nFixed-nDefaults, 0) + shift
+	hi := nFixed + shift
+	got += shift
+	var e *Error
 	switch {
 	case hasVar:
-		return fmt.Errorf("%s takes at least %d %s, got %d", display, lo, plural(lo), got)
-	case lo == nFixed:
-		return fmt.Errorf("%s takes %d %s, got %d", display, nFixed, plural(nFixed), got)
+		e = errAt(call, "%s takes at least %d %s, got %d", display, lo, plural(lo), got)
+	case lo == hi:
+		e = errAt(call, "%s takes %d %s, got %d", display, hi, plural(hi), got)
+	default:
+		e = errAt(call, "%s takes %d to %d arguments, got %d", display, lo, hi, got)
 	}
-	return fmt.Errorf("%s takes %d to %d arguments, got %d", display, lo, nFixed, got)
+	if sig := Signature(nsOf(display), nameOf(display)); sig != "" {
+		e.Hint = "usage: " + sig
+	}
+	return e
+}
+
+func nsOf(display string) string {
+	if ns, _, found := strings.Cut(display, "."); found {
+		return ns
+	}
+	return ""
+}
+
+func nameOf(display string) string {
+	if _, name, found := strings.Cut(display, "."); found {
+		return name
+	}
+	return display
+}
+
+// keywordNames lists the keyword arguments fn accepts: named
+// positional parameters, option struct fields and rolling options.
+func keywordNames(t reflect.Type, names []string, nFixed int, optStructs []int, rolling bool) []string {
+	var out []string
+	for j, n := range names {
+		if j < nFixed {
+			out = append(out, n)
+		}
+	}
+	for _, idx := range optStructs {
+		st := t.In(idx)
+		for i := range st.NumField() {
+			if f := st.Field(i); f.IsExported() {
+				out = append(out, snake(f.Name))
+			}
+		}
+	}
+	if rolling {
+		out = append(out, "min_periods", "closed", "ddof", "interpolation")
+	}
+	return out
+}
+
+func unknownKeyword(display string, k KwArg, valid []string) *Error {
+	e := errSpan(k.NamePos, k.NamePos+len(k.Name), "%s: unknown keyword argument %q", display, k.Name)
+	if best := script.Closest(k.Name, valid); best != "" {
+		e.Fix = best
+		return e.withHint("did you mean %q?", best)
+	}
+	if len(valid) > 0 {
+		return e.withHint("valid: %s", strings.Join(valid, ", "))
+	}
+	return e.withHint("%s takes no keyword arguments", display)
 }
 
 func plural(n int) string {
@@ -410,7 +511,7 @@ func normalize(s string) string {
 
 // buildOptions fills an option struct (CutOptions, DatetimeArgs, ...)
 // from the keyword arguments whose names match its fields.
-func buildOptions(st reflect.Type, display string, kw []kwarg, used []bool) (reflect.Value, string, error) {
+func buildOptions(st reflect.Type, display string, kw []KwArg, used []bool) (reflect.Value, string, error) {
 	out := reflect.New(st).Elem()
 	var fields []string
 	set := map[int]string{}
@@ -427,11 +528,11 @@ func buildOptions(st reflect.Type, display string, kw []kwarg, used []bool) (ref
 		if used[k] {
 			continue
 		}
-		fi := fieldIndex(st, a.name)
+		fi := fieldIndex(st, a.Name)
 		if fi < 0 {
 			continue
 		}
-		v, s, err := convert(a.val, st.Field(fi).Type, display+" "+a.name, 0)
+		v, s, err := convert(a.Val, st.Field(fi).Type, display+" "+a.Name, 0)
 		if err != nil {
 			return reflect.Value{}, "", err
 		}
@@ -463,19 +564,19 @@ func fieldIndex(st reflect.Type, name string) int {
 
 // buildRollingOptions turns keyword arguments into the functional
 // options of the rolling_*_by methods.
-func buildRollingOptions(display string, kw []kwarg, used []bool) ([]reflect.Value, []string, error) {
+func buildRollingOptions(display string, kw []KwArg, used []bool) ([]reflect.Value, []string, error) {
 	var vals []reflect.Value
 	var srcs []string
 	for k, a := range kw {
 		if used[k] {
 			continue
 		}
-		opt, found := rollingOptions[normalize(a.name)]
+		opt, found := rollingOptions[normalize(a.Name)]
 		if !found {
 			continue
 		}
 		fn := reflect.ValueOf(opt.fn)
-		v, s, err := convert(a.val, fn.Type().In(0), display+" "+a.name, 0)
+		v, s, err := convert(a.Val, fn.Type().In(0), display+" "+a.Name, 0)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -489,7 +590,12 @@ func buildRollingOptions(display string, kw []kwarg, used []bool) ([]reflect.Val
 // convert turns one glr argument into a value of Go type pt, plus the
 // Go source for it. pos is the 1-based argument position (0 for a
 // keyword argument) used in error messages.
-func convert(n *node, pt reflect.Type, display string, pos int) (reflect.Value, string, error) {
+func convert(n *Node, pt reflect.Type, display string, pos int) (reflect.Value, string, error) {
+	v, s, err := convertArg(n, pt, display, pos)
+	return v, s, locate(err, n)
+}
+
+func convertArg(n *Node, pt reflect.Type, display string, pos int) (reflect.Value, string, error) {
 	where := display
 	if pos > 0 {
 		where = fmt.Sprintf("%s: argument %d", display, pos)
@@ -577,13 +683,13 @@ func convert(n *node, pt reflect.Type, display string, pos int) (reflect.Value, 
 		}
 		return reflect.Value{}, "", fmt.Errorf("%s: expected a numeric literal", where)
 	case reflect.Interface:
-		if n.kind != nLit {
+		if n.Kind != KindLit {
 			return reflect.Value{}, "", fmt.Errorf("%s: expected a literal", where)
 		}
-		if n.lit == nil {
+		if n.Lit == nil {
 			return reflect.Zero(pt), "nil", nil
 		}
-		return reflect.ValueOf(n.lit), anySrc(n.lit), nil
+		return reflect.ValueOf(n.Lit), anySrc(n.Lit), nil
 	case reflect.Slice:
 		if pt.Elem().Kind() == reflect.Uint8 {
 			s, err := stringLit(n, where, 0)
@@ -592,9 +698,9 @@ func convert(n *node, pt reflect.Type, display string, pos int) (reflect.Value, 
 			}
 			return reflect.ValueOf([]byte(s)), fmt.Sprintf("[]byte(%q)", s), nil
 		}
-		elems := []*node{n}
-		if n.kind == nList {
-			elems = n.args
+		elems := []*Node{n}
+		if n.Kind == KindList {
+			elems = n.Args
 		}
 		out := reflect.MakeSlice(pt, 0, len(elems))
 		parts := make([]string, len(elems))
@@ -613,14 +719,23 @@ func convert(n *node, pt reflect.Type, display string, pos int) (reflect.Value, 
 
 // litOf returns the literal value of n, or nil when n is not a
 // literal.
-func litOf(n *node) any {
-	if n.kind != nLit {
-		return nil
+func litOf(n *Node) any {
+	switch n.Kind {
+	case KindLit:
+		return n.Lit
+	case KindNeg:
+		// `-(1)` is a negative literal written with parentheses.
+		switch v := litOf(n.Args[0]).(type) {
+		case int64:
+			return -v
+		case float64:
+			return -v
+		}
 	}
-	return n.lit
+	return nil
 }
 
-func stringLit(n *node, where string, _ int) (string, error) {
+func stringLit(n *Node, where string, _ int) (string, error) {
 	s, isStr := litOf(n).(string)
 	if !isStr {
 		return "", fmt.Errorf("%s: expected a string literal", where)

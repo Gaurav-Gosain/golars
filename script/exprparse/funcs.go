@@ -26,7 +26,7 @@ type methodSpec struct {
 	names []string
 	// custom builds the call by hand when the Go signature does not
 	// map onto glr arguments.
-	custom func(recv val, args []*node, kw []kwarg) (val, error)
+	custom func(recv val, args []*Node, kw []KwArg) (val, error)
 }
 
 // overrides adjusts the automatic mapping per namespace ("" is
@@ -242,17 +242,19 @@ type freeFunc struct {
 	defaults []any
 	names    []string
 	minArgs  int
-	custom   func(name string, args []*node, kw []kwarg) (val, error)
+	custom   func(name string, args []*Node, kw []KwArg) (val, error)
 }
 
-func (f freeFunc) call(name string, args []*node, kw []kwarg) (val, error) {
+func (f freeFunc) call(n *Node) (val, error) {
+	name, args, kw := n.Name, n.Args, n.Kw
 	if f.custom != nil {
-		return f.custom(name, args, kw)
+		v, err := f.custom(name, args, kw)
+		return v, locate(err, n)
 	}
 	if len(args) < f.minArgs {
-		return val{}, fmt.Errorf("%s requires at least %d %s", name, f.minArgs, plural(f.minArgs))
+		return val{}, errAt(n, "%s requires at least %d %s", name, f.minArgs, plural(f.minArgs))
 	}
-	return invoke(reflect.ValueOf(f.fn), name, "expr."+f.goName, args, kw, f.defaults, f.names)
+	return invoke(n, reflect.ValueOf(f.fn), name, "expr."+f.goName, args, kw, f.defaults, f.names, 0)
 }
 
 var freeFuncs map[string]freeFunc
@@ -295,58 +297,58 @@ func init() {
 
 // logCall maps `log(x)` to the natural log and `log(x, base)` to
 // LogBase, as polars' Expr.log does.
-func logCall(recv val, args []*node, kw []kwarg) (val, error) {
+func logCall(recv val, args []*Node, kw []KwArg) (val, error) {
 	if len(args) == 0 && len(kw) == 0 {
 		return val{recv.e.Log(), recv.src + ".Log()"}, nil
 	}
-	return invoke(reflect.ValueOf(recv.e.LogBase), "log", recv.src+".LogBase", args, kw, nil, []string{"base"})
+	return invoke(nil, reflect.ValueOf(recv.e.LogBase), "log", recv.src+".LogBase", args, kw, nil, []string{"base"}, 0)
 }
 
 // replaceStrict takes `replace_strict(x, old, new, default=v,
 // return_dtype="str")`.
-func replaceStrict(recv val, args []*node, kw []kwarg) (val, error) {
-	return invoke(reflect.ValueOf(recv.e.ReplaceStrict), "replace_strict", recv.src+".ReplaceStrict", args, kw, nil, []string{"old", "new"})
+func replaceStrict(recv val, args []*Node, kw []KwArg) (val, error) {
+	return invoke(nil, reflect.ValueOf(recv.e.ReplaceStrict), "replace_strict", recv.src+".ReplaceStrict", args, kw, nil, []string{"old", "new"}, 0)
 }
 
 // qcut accepts a list of quantiles or a bin count.
-func qcut(recv val, args []*node, kw []kwarg) (val, error) {
+func qcut(recv val, args []*Node, kw []KwArg) (val, error) {
 	if len(args) > 0 {
 		if _, isInt := litOf(args[0]).(int64); isInt {
-			return invoke(reflect.ValueOf(recv.e.QCutN), "qcut", recv.src+".QCutN", args, kw, nil, nil)
+			return invoke(nil, reflect.ValueOf(recv.e.QCutN), "qcut", recv.src+".QCutN", args, kw, nil, nil, 0)
 		}
 	}
-	return invoke(reflect.ValueOf(recv.e.QCut), "qcut", recv.src+".QCut", args, kw, nil, nil)
+	return invoke(nil, reflect.ValueOf(recv.e.QCut), "qcut", recv.src+".QCut", args, kw, nil, nil, 0)
 }
 
 // sortBy takes `sort_by(x, key...)` plus descending= and nulls_last=.
-func sortBy(recv val, args []*node, kw []kwarg) (val, error) {
+func sortBy(recv val, args []*Node, kw []KwArg) (val, error) {
 	var opts expr.SortByOptions
 	var optSrc []string
 	for _, a := range kw {
-		switch normalize(a.name) {
+		switch normalize(a.Name) {
 		case "descending":
-			v, s, err := convert(a.val, reflect.TypeFor[[]bool](), "sort_by descending", 0)
+			v, s, err := convert(a.Val, reflect.TypeFor[[]bool](), "sort_by descending", 0)
 			if err != nil {
 				return val{}, err
 			}
 			opts.Descending = v.Interface().([]bool)
 			optSrc = append(optSrc, "Descending: "+s)
 		case "nullslast":
-			b, isBool := litOf(a.val).(bool)
+			b, isBool := litOf(a.Val).(bool)
 			if !isBool {
 				return val{}, fmt.Errorf("sort_by nulls_last: expected true or false")
 			}
 			opts.NullsLast = b
 			optSrc = append(optSrc, fmt.Sprintf("NullsLast: %t", b))
 		case "maintainorder":
-			b, isBool := litOf(a.val).(bool)
+			b, isBool := litOf(a.Val).(bool)
 			if !isBool {
 				return val{}, fmt.Errorf("sort_by maintain_order: expected true or false")
 			}
 			opts.MaintainOrder = b
 			optSrc = append(optSrc, fmt.Sprintf("MaintainOrder: %t", b))
 		default:
-			return val{}, fmt.Errorf("sort_by: unknown keyword argument %q", a.name)
+			return val{}, fmt.Errorf("sort_by: unknown keyword argument %q", a.Name)
 		}
 	}
 	keys, keySrc, err := exprList("sort_by", args)
@@ -359,43 +361,43 @@ func sortBy(recv val, args []*node, kw []kwarg) (val, error) {
 
 // topKBy takes `top_k_by(x, by, k)` or `top_k_by(x, [a, b], k,
 // reverse=[...])`.
-func topKBy(goName, display string) func(recv val, args []*node, kw []kwarg) (val, error) {
-	return func(recv val, args []*node, kw []kwarg) (val, error) {
+func topKBy(goName, display string) func(recv val, args []*Node, kw []KwArg) (val, error) {
+	return func(recv val, args []*Node, kw []KwArg) (val, error) {
 		m := reflect.ValueOf(recv.e).MethodByName(goName)
-		return invoke(m, display, recv.src+"."+goName, args, kw, []any{5, []any{}}, []string{"by", "k", "reverse"})
+		return invoke(nil, m, display, recv.src+"."+goName, args, kw, []any{5, []any{}}, []string{"by", "k", "reverse"}, 0)
 	}
 }
 
 // offsetBy accepts a duration string or an expression.
-func offsetBy(recv val, args []*node, kw []kwarg) (val, error) {
+func offsetBy(recv val, args []*Node, kw []KwArg) (val, error) {
 	dt := reflect.ValueOf(recv.e.Dt())
 	if len(args) == 1 && len(kw) == 0 {
 		if _, isStr := litOf(args[0]).(string); !isStr {
-			return invoke(dt.MethodByName("OffsetByExpr"), "dt.offset_by", recv.src+".Dt().OffsetByExpr", args, kw, nil, nil)
+			return invoke(nil, dt.MethodByName("OffsetByExpr"), "dt.offset_by", recv.src+".Dt().OffsetByExpr", args, kw, nil, nil, 0)
 		}
 	}
-	return invoke(dt.MethodByName("OffsetBy"), "dt.offset_by", recv.src+".Dt().OffsetBy", args, kw, nil, []string{"by"})
+	return invoke(nil, dt.MethodByName("OffsetBy"), "dt.offset_by", recv.src+".Dt().OffsetBy", args, kw, nil, []string{"by"}, 0)
 }
 
 // concatStr takes `concat_str(a, b, ..., separator="-")`: the
 // separator is keyword-only, as in polars.
-func concatStr(name string, args []*node, kw []kwarg) (val, error) {
+func concatStr(name string, args []*Node, kw []KwArg) (val, error) {
 	sep := litNode("")
 	for _, a := range kw {
-		if normalize(a.name) != "separator" {
-			return val{}, fmt.Errorf("%s: unknown keyword argument %q", name, a.name)
+		if normalize(a.Name) != "separator" {
+			return val{}, fmt.Errorf("%s: unknown keyword argument %q", name, a.Name)
 		}
-		sep = a.val
+		sep = a.Val
 	}
 	if len(args) == 0 {
 		return val{}, fmt.Errorf("%s requires at least 1 argument", name)
 	}
-	return invoke(reflect.ValueOf(expr.ConcatStr), name, "expr.ConcatStr", append([]*node{sep}, args...), nil, nil, nil)
+	return invoke(nil, reflect.ValueOf(expr.ConcatStr), name, "expr.ConcatStr", append([]*Node{sep}, args...), nil, nil, nil, 0)
 }
 
-func exprList(display string, args []*node) ([]expr.Expr, []string, error) {
-	if len(args) == 1 && args[0].kind == nList {
-		args = args[0].args
+func exprList(display string, args []*Node) ([]expr.Expr, []string, error) {
+	if len(args) == 1 && args[0].Kind == KindList {
+		args = args[0].Args
 	}
 	out := make([]expr.Expr, len(args))
 	srcs := make([]string, len(args))
