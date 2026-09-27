@@ -6,8 +6,8 @@ nothing more. Every REPL command you know is also a script statement.
 
 ```glr
 # trades-daily.glr
-load data/trades.csv          as trades
-load data/symbols.csv         as symbols
+load examples/script/data/trades.csv  as trades
+load examples/script/data/symbols.csv as symbols
 
 use trades
 filter volume > 100
@@ -18,10 +18,13 @@ limit 10
 show
 ```
 
-Run it:
+Run it from the repository root (the examples in this page use the
+data in `examples/script/data/`, and a test runs every one of them):
 
 ```sh
 golars run trades-daily.glr       # one-shot
+golars lint trades-daily.glr      # check without running
+golars fmt -w trades-daily.glr    # canonical formatting
 ```
 
 From inside the REPL:
@@ -58,21 +61,57 @@ whitespace) continues onto the next physical line, useful for long
 filter predicates:
 
 ```glr
+load examples/script/data/staff.csv
 filter salary > 100000 \
   and dept == "eng" \
   and tenure_years >= 2
 ```
 
+In the REPL an unclosed bracket or quote also continues the
+statement on the next line.
+
 The leading `.` on every command is optional: `load foo.csv` and
 `.load foo.csv` do the same thing. A `#` inside a `"..."` string is
 treated as a literal - only unquoted `#` starts a comment.
 
-If you mis-spell a command golars tries to be helpful:
+Mistakes are reported with the statement, a caret under the exact
+text and a suggestion. `golars run` and the REPL check each statement
+before running it; `golars lint` checks the whole script without
+running anything:
 
 ```
 $ golars run typo.glr
-typo.glr:3: unknown command "filtet" (did you mean "filter"?)
+error: typo.glr:3: unknown column "salry"
+    filter salry > 100000
+           ^^^^^
+  hint: did you mean "salary"?
+
+$ golars lint typo.glr
+typo.glr:3:8: error: unknown column "salry"
+  filter salry > 100000
+         ^^^^^
+  hint: did you mean "salary"?
+typo.glr:4:14: error: unknown str function "to_uppercse"
+  with n = str.to_uppercse(name)
+               ^^^^^^^^^^^
+  hint: did you mean "to_uppercase"?
 ```
+
+`golars lint` follows the columns and dtypes through the pipeline
+from the files the script loads (it reads only a sample of each file
+for its schema), so it catches unknown columns, frames and files,
+wrong argument counts and types, expressions the engine would reject
+(`name + 1` on a string column), non-boolean filters, statements
+before any `load`, and stashes that are never used. `--short` prints
+one line per finding and `--json` prints them as JSON.
+
+`golars fmt` prints the canonical form: lower-case commands without
+the leading `.`, single spaces, `, ` in lists, formatted expressions
+(`a+b*c` becomes `a + b * c`, calls always get parentheses), and
+consecutive `with NAME = ...` and `load PATH as NAME` lines and
+trailing comments aligned. `-w` rewrites files, `-d` prints a diff and
+`--check` lists files that are not formatted. Lines with syntax errors
+are left as written.
 
 ---
 
@@ -129,11 +168,11 @@ and staged, like `load PATH as NAME`.
 | `filter PRED`                          | Keep rows where the boolean expression PRED holds. See [predicates](#predicates). |
 | `sort COL [asc\|desc] [COL [asc\|desc]]...` | Sort by one or more columns. Nulls sort first, as in polars. |
 | `limit N`                              | Keep the first N rows. |
-| `groupby KEYS AGG [AGG...]`            | Group and aggregate. KEYS is comma-separated. AGG is `col:op[:alias]` (op: `sum`, `mean`/`avg`, `min`, `max`, `count`, `null_count`, `first`, `last`, `median`, `std`, `var`, `n_unique`) or `name=expr`, as in `n=len()`. Write an expression AGG without spaces or wrap it in parentheses. |
+| `groupby KEYS AGG [AGG...]`            | Group and aggregate. KEYS is comma-separated. AGG is `col:op[:alias]` (op: `sum`, `mean`/`avg`, `min`, `max`, `count`, `null_count`, `first`, `last`, `median`, `std`, `var`, `n_unique`) or `name = expr`, as in `n = len()` or `total = amount.sum()`. Keys may be written `a, b` or `a,b`. |
 | `group_by_dynamic TIME every DUR [period DUR] [offset DUR] [by KEYS] [closed C] [label L] AGG...` (alias `groupby_dynamic`) | Group rows into time windows of the sorted column TIME and aggregate. DUR is `30m`, `1h`, `1d`, `1w`, `1mo`, `1y` (or `3i` for integer columns). AGG takes a bare column, as in `amount:sum:total` or `n=amount.count()`. |
 | `join PATH\|NAME on KEY [TYPE]`        | Join the focus with a staged frame or a file. TYPE is `inner` (default), `left` or `cross`. The join runs eagerly and becomes the new focus. |
 | `join_asof PATH\|NAME on KEY [by COLS] [backward\|forward\|nearest] [tolerance T]` | Join each row to the nearest row of the other frame by KEY: the last one at or before it (`backward`, the default), the first at or after it (`forward`), or the closest (`nearest`). `by` requires exact matches first; `tolerance` bounds the distance (a number, or a duration such as `2m`). Both frames must be sorted by KEY. |
-| `with NAME = EXPR`                     | Add a derived column. See [expression language](#expression-language). |
+| `with NAME = EXPR [, NAME = EXPR...]`  | Add derived columns. See [expression language](#expression-language). |
 | `collect`                              | Run the pipeline and make the result the focus. |
 | `reset`                                | Discard the pending lazy steps; keep the source. |
 | `reverse`                              | Reverse the row order. |
@@ -276,9 +315,10 @@ Every function has two equivalent spellings: a method on the value, or
 a call whose first argument is the value.
 
 ```glr
-with r1 = x.round(2)             # same as round(x, 2)
+load examples/script/data/events.csv
+with r1 = amount.round(2)        # same as round(amount, 2)
 with y1 = ts.dt.year()           # same as dt.year(ts)
-with n1 = str.len_chars(name)    # same as name.str.len_chars()
+with n1 = str.len_chars(user)    # same as user.str.len_chars()
 ```
 
 - **Namespaces**: `str`, `dt`, `list`, `arr`, `struct`, `name`, `bin`,
@@ -324,6 +364,7 @@ Functions that take a Go callback (`map_batches`, `map_elements`,
 ### Examples
 
 ```glr
+load examples/script/data/events.csv
 with signed_up = str.to_date(signup, "%d/%m/%Y")
 with tenure_d  = dt.total_days(dt.date(ts) - signed_up)
 with slot      = dt.strftime(dt.truncate(ts, "30m"), "%H:%M")
@@ -332,7 +373,16 @@ with size      = cut(amount, [20, 100], labels=["small", "medium", "large"])
 with bucket    = amount // 50 * 50
 with parity    = when amount % 2 == 0 then "even" otherwise "odd"
 with trend     = amount.rolling_mean(7, 1)
-with score     = coalesce(primary, backup).str.trim()
+with label     = coalesce(tags, user).str.to_uppercase()
+```
+
+Several columns can be added in one statement, separated by commas,
+as polars' `with_columns` takes several expressions. Each expression
+sees the columns from before the statement:
+
+```glr
+load examples/script/data/events.csv
+with hour = dt.hour(ts), big = amount > 50
 ```
 
 ### Predicates
@@ -341,8 +391,9 @@ with score     = coalesce(primary, backup).str.trim()
 naturally, `and` binds tighter than `or`, and parentheses group:
 
 ```glr
+load examples/script/data/staff.csv
 filter age >= 21 and salary > 50000
-filter symbol == "AAPL"
+filter dept == "eng"
 filter is_active and created_at > 1704067200000000
 filter note is_null
 filter name like "a%" or name contains "z"
@@ -363,14 +414,14 @@ Scripts regularly need N frames. The `as NAME` / `use NAME` /
 ```glr
 # Stage every input up front. None of these promote themselves to
 # focus, so we can read them in any order.
-load data/trades.csv    as trades
-load data/symbols.csv   as symbols
-load data/users.csv     as users
+load examples/script/data/trades.csv  as trades
+load examples/script/data/symbols.csv as symbols
+load examples/script/data/users.csv   as users
 
 # Work on one, stash it, work on the next.
 use trades
 filter volume > 100
-groupby user_id amount:sum:total_bought
+groupby user_id, symbol amount:sum:total_bought
 stash trade_totals
 
 # `use` is non-consuming: trade_totals stays staged, and so does the
@@ -390,7 +441,7 @@ lazy pipeline is on the focus and parks a copy under `NAME` so later
 from the snapshot, so the idiomatic branching pattern is:
 
 ```glr
-load data/trades.csv
+load examples/script/data/trades.csv
 filter volume > 100
 stash base
 
@@ -416,7 +467,7 @@ The short form `load PATH` (no `as`) is equivalent to `use NAME`
 where `NAME` is empty. It's the "single-frame script" ergonomic:
 
 ```glr
-load data/trades.csv
+load examples/script/data/trades.csv
 filter volume > 100
 show
 ```
@@ -510,19 +561,33 @@ directory's README.
 
 <p align="center"><img src="../golars_lsp.png" alt="golars-lsp in Neovim: inlay hints showing frame shape after every .glr statement" width="360"></p>
 
-[`cmd/golars-lsp`](../cmd/golars-lsp/) is a minimal Language Server
-that ships:
+[`cmd/golars-lsp`](../cmd/golars-lsp/) is the language server. It
+uses the same analysis as `golars lint` (`script/analysis`), so the
+editor, the linter, the REPL and the Jupyter kernel agree:
 
-- **Inline completions** for commands, staged-frame names, file
-  paths, and column names read from loaded CSV files.
-- **Inlay hints** showing each pipeline step's output shape -
-  `→ 5 rows × 3 cols` appears at the end of every shape-changing
-  statement. Row counts propagate as upper bounds: `limit N` clamps
-  to `N`, left joins preserve the left side's count, filters and
-  inner joins mark rows `?`.
-- **Hover docs** with signature + long description on any command
-  token.
-- **Diagnostics** for unknown commands and files that don't resolve.
+- **Diagnostics** on open, save and change (debounced; set
+  `initializationOptions.debounceMs` to tune): everything `golars lint`
+  reports, at the exact span.
+- **Completion**: commands with argument snippets; the columns known at
+  that point of the pipeline, with dtypes; functions and methods per
+  namespace with snippets for their arguments; keyword arguments
+  inside a call; option words (`inner`, `desc`, `nearest`, ...); dtypes,
+  durations, aggregation ops, frame names and file paths after `load`.
+- **Hover**: command docs from `script/spec.go`, function signatures
+  and Go doc comments, and for a column its dtype, the frame shape at
+  that point and the line that defined it.
+- **Signature help** inside function calls, in both call forms.
+- **Go to definition, find references, highlights and rename** for
+  staged frames (`load ... as NAME`, `stash NAME`) and derived columns
+  (`with NAME = ...`, select and groupby aliases, `rename`).
+- **Document symbols** (one section per `load`/`use`), **folding
+  ranges**, **semantic tokens** and **formatting** (`golars fmt`).
+- **Code actions** that apply every did-you-mean suggestion and add a
+  missing `load`.
+- **Inlay hints** with the frame shape after each shape-changing
+  statement: `→ 5 rows × 3 cols`, with `≤` for upper bounds (after
+  `filter` or an inner join) and `?` where the count depends on the
+  data.
 
 ### `# ^?` probe: live table previews
 
@@ -533,7 +598,7 @@ scripting equivalent of Twoslash/Quokka probes: a live peek at the
 data at that pipeline position:
 
 ```glr
-load data/trades.csv
+load examples/script/data/trades.csv
 filter volume > 100
 sort amount desc
 limit 5

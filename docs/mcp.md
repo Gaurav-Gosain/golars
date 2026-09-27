@@ -49,6 +49,10 @@ restart needed in Cursor; the server picks up automatically.
 | `sql` | Run a SQL query against one or more files |
 | `row_count` | Cheap "how many rows × cols" probe |
 | `null_counts` | Per-column null counts |
+| `run_glr` | Run a glr script and return its output and the resulting table |
+| `check_glr` | Check a glr script without running it; findings plus the schema after each statement |
+| `format_glr` | Canonical form of a glr script (`golars fmt`) |
+| `glr_reference` | Docs for a glr command or expression function, or the functions of a namespace |
 
 Every tool returns _both_ a plain-text fallback (for hosts that only
 render text) and a `structuredContent` payload. The table-shaped
@@ -62,6 +66,27 @@ it so richer UIs can render a table. The others use their own shape:
 File arguments (`path`, and each entry of `files` for `sql`) should
 be absolute paths. For `sql`, each file is registered as a table
 named after its filename without the extension.
+
+The glr tools take the script as text. Relative paths in it resolve
+against `dir` (default: the server's working directory).
+
+- `run_glr` checks the script first; static problems come back as an
+  error result with line, column, hint and suggested fix, and nothing
+  runs. Otherwise it runs the script through `golars kernel-host`
+  (found through `$GOLARS_BIN`, next to `golars-mcp`, or on `$PATH`)
+  and returns `output` (what the script printed) and `table`
+  (`columns`, `dtypes` and the first `max_rows` rows of the focused
+  frame, default 50, every column), plus `truncated` when there may be
+  more rows. The text fallback shows the table as CSV.
+- `check_glr` returns `ok`, `findings` (each with `line`, `column`,
+  `severity`, `code`, `message`, `hint`, `fix`) and `steps`: the shape
+  and `name: dtype` columns after every shape-changing statement,
+  tracked from the schemas of the files the script loads.
+- `glr_reference` with `name` documents a command (`groupby`) or a
+  function (`round`, `str.to_date`), suggesting the closest name on a
+  typo; with `namespace` (`str`, `dt`, `list`, `arr`, `struct`, `name`,
+  `bin`, `cat` or `free`) it lists the functions and their signatures;
+  with neither it lists every command.
 
 ## Example session
 

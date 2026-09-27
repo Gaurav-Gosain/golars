@@ -49,9 +49,13 @@ show
 - Persistent state across cells: `load` in cell 1, `filter` in cell 2,
   `groupby` in cell 3 - same model as the REPL.
 - `stash NAME` / `use NAME` for branching pipelines.
-- Tab completion on command names.
-- Hover docs on commands (Shift+Tab in classic notebook, hover panel
-  in JupyterLab).
+- Tab completion from the same analysis golars-lsp uses, against the
+  live session: commands, the columns of the loaded frames (with
+  dtypes), functions and methods per namespace, keyword arguments,
+  option words and file paths.
+- Inspect (Shift+Tab in classic notebook, the contextual help panel in
+  JupyterLab) documents commands, functions (signature and Go doc
+  comment) and columns (dtype and frame shape).
 - `interrupt` button kills the in-flight cell by restarting the
   embedded host process.
 
@@ -89,6 +93,19 @@ themed tables; that fork is the planned home for Go notebooks but is
 not published yet. `DataFrame.MimeBundle()` and `Series.MimeBundle()`
 return the same table next to `text/plain` and `text/html`, and
 `DataFrame.HTML()` / `Series.HTML()` return just the HTML table.
+
+Besides running cells, a request can set `op`:
+
+- `"complete"` with `code` and a byte offset `cursor`: the reply's
+  `ide` holds `matches`, the replaced byte range `start`/`end`, and
+  `types` (text, Jupyter type, signature) for each match.
+- `"inspect"` with `code` and `cursor`: `ide.markdown` documents what
+  is under the cursor.
+- `"table"` with `max_rows`: `table` is the first rows of the focused
+  frame with every column.
+
+`golars-kernel` uses the first two for complete_request and
+inspect_request; `golars-mcp` uses `table` for `run_glr`.
 
 ### Install flags
 
@@ -218,9 +235,6 @@ polars-py's default `repr` ergonomics.
 
 - [ ] Forward `kernel-host` stdout/stderr line-by-line to iopub during
       a long-running cell instead of buffering until the cell completes.
-- [ ] Column-name completion: today only command names are suggested.
-      Need an extra `complete` opcode in the NDJSON protocol so the
-      kernel can ask the host for live schema names.
 - [ ] Inline plotting: `golars` doesn't render charts yet, but once
       it does (e.g. via gg, vegolite, or a wasm hook) the kernel will
       route them as `image/png` or `application/vnd.vega.v5+json`.
