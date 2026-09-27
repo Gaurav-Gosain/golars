@@ -33,6 +33,7 @@ import (
 	"github.com/Gaurav-Gosain/golars/script"
 	"github.com/Gaurav-Gosain/golars/script/exprparse"
 	"github.com/Gaurav-Gosain/golars/script/predparse"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
 // Transpile reads the script at path and writes equivalent Go source
@@ -72,6 +73,7 @@ type trans struct {
 	pkg     string
 	src     string
 	imports map[string]struct{}
+	cur     *syntax.Stmt // the statement being translated
 	stmts   []string
 
 	focus       string   // Go var name for the focused lazy frame
@@ -109,13 +111,22 @@ func (t *trans) walk() error {
 }
 
 func (t *trans) handle(stmt string) error {
-	parts := strings.Fields(stmt)
-	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "."))
-	if spec := script.FindCommand(cmd); spec != nil {
-		cmd = spec.Name // resolve aliases such as write and melt
+	f := syntax.Parse(stmt)
+	if len(f.Stmts) == 0 {
+		return nil
 	}
-	args := parts[1:]
-	rest := strings.TrimSpace(strings.TrimPrefix(stmt, parts[0]))
+	st := f.Stmts[0]
+	if st.Spec != nil {
+		// Unknown commands become TODO comments below; known ones must
+		// be well formed.
+		if err := syntax.FirstError(st); err != nil {
+			return err
+		}
+	}
+	t.cur = st
+	cmd := st.Name() // resolves aliases such as write and melt
+	rest, _ := st.Rest()
+	args := syntax.SplitArgs(rest)
 
 	switch cmd {
 	case "load":
@@ -272,7 +283,15 @@ func (t *trans) selectCols(rest string) error {
 		return fmt.Errorf("select: expected a column list")
 	}
 	var exprs []string
-	if !strings.ContainsAny(rest, "(=\"'") {
+	if !syntax.SelectIsPlain(rest) {
+		items, err := namedItemSources(t.cur)
+		if err != nil {
+			return fmt.Errorf("select: %w", err)
+		}
+		t.pipe("Select", strings.Join(items, ", "))
+		return nil
+	}
+	if syntax.SelectIsPlain(rest) {
 		cols, err := parseCommaList(strings.Fields(rest))
 		if err != nil {
 			return err
@@ -406,30 +425,53 @@ func (t *trans) filter(rest string) error {
 	return nil
 }
 
-func (t *trans) with(rest string) error {
-	name, exprText, err := splitAssign(rest)
+func (t *trans) with(string) error {
+	items, err := namedItemSources(t.cur)
 	if err != nil {
-		return err
+		return fmt.Errorf("with: %w", err)
 	}
-	src, err := exprparse.GoSource(exprText)
-	if err != nil {
-		return fmt.Errorf("with %q: parse: %w", name, err)
+	if len(items) == 0 {
+		return fmt.Errorf("with: expected NAME = EXPR")
 	}
-	t.pipe("WithColumns", fmt.Sprintf("%s.Alias(%q)", src, name))
+	t.pipe("WithColumns", strings.Join(items, ", "))
 	return nil
 }
 
-func (t *trans) groupby(rest string) error {
-	args := script.SplitTopLevel(rest, ' ')
-	if len(args) < 1 {
+// namedItemSources renders the expression items of a parsed
+// statement (`name = expr` or a bare expression) as Go.
+func namedItemSources(st *syntax.Stmt) ([]string, error) {
+	var out []string
+	for i := 0; i < len(st.Parts); i++ {
+		p := st.Parts[i]
+		name := ""
+		if p.Kind == syntax.PartNewColumn && i+2 < len(st.Parts) && st.Parts[i+2].Kind == syntax.PartExpr {
+			name = p.Value
+			i += 2
+			p = st.Parts[i]
+		} else if p.Kind != syntax.PartExpr {
+			continue
+		}
+		src, err := exprparse.GoSource(p.Text)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p.Text, err)
+		}
+		if name != "" {
+			src = fmt.Sprintf("%s.Alias(%q)", src, name)
+		}
+		out = append(out, src)
+	}
+	return out, nil
+}
+
+func (t *trans) groupby(string) error {
+	if len(t.cur.Parts) == 0 {
 		return fmt.Errorf("groupby requires at least one key")
 	}
-	keys := strings.Split(args[0], ",")
-	quotedKeys := make([]string, len(keys))
-	for i, k := range keys {
-		quotedKeys[i] = strconv.Quote(strings.TrimSpace(k))
+	var quotedKeys []string
+	for _, k := range t.cur.Parts[0].Items {
+		quotedKeys = append(quotedKeys, strconv.Quote(k.Value))
 	}
-	aggs, err := t.aggSources(args[1:])
+	aggs, err := aggPartSources(t.cur)
 	if err != nil {
 		return err
 	}
@@ -440,44 +482,45 @@ func (t *trans) groupby(rest string) error {
 	return nil
 }
 
-// aggSources renders `col:op[:alias]` and `name=expr` aggregations.
-func (t *trans) aggSources(specs []string) ([]string, error) {
+// aggPartSources renders the `col:op[:alias]` and `name = expr`
+// aggregations of a groupby statement in source order.
+func aggPartSources(st *syntax.Stmt) ([]string, error) {
 	var aggs []string
-	for _, spec := range specs {
-		if strings.Contains(spec, "=") {
-			src, err := namedExprSource(spec)
-			if err != nil {
-				return nil, fmt.Errorf("aggregation: %w", err)
+	for i := 0; i < len(st.Parts); i++ {
+		p := st.Parts[i]
+		switch {
+		case p.Kind == syntax.PartAgg:
+			col, op := p.Items[0].Value, p.Items[1].Value
+			alias := col
+			if len(p.Items) == 3 {
+				alias = p.Items[2].Value
 			}
-			aggs = append(aggs, src)
-			continue
+			aggs = append(aggs, fmt.Sprintf("expr.Col(%q).%s().Alias(%q)", col, aggMethod(op), alias))
+		case p.Kind == syntax.PartNewColumn && i+2 < len(st.Parts) && st.Parts[i+2].Kind == syntax.PartExpr:
+			x := st.Parts[i+2]
+			src, err := exprparse.GoSource(x.Text)
+			if err != nil {
+				return nil, fmt.Errorf("aggregation %s: %w", p.Value, err)
+			}
+			aggs = append(aggs, fmt.Sprintf("%s.Alias(%q)", src, p.Value))
+			i += 2
 		}
-		parts := strings.Split(spec, ":")
-		if len(parts) < 2 {
-			t.emitComment("skipping invalid agg spec %q", spec)
-			continue
-		}
-		col := parts[0]
-		alias := col
-		if len(parts) >= 3 {
-			alias = parts[2]
-		}
-		aggs = append(aggs, fmt.Sprintf("expr.Col(%q).%s().Alias(%q)", col, aggMethod(parts[1]), alias))
 	}
 	return aggs, nil
 }
 
-func (t *trans) groupByDynamic(rest string) error {
-	args := script.SplitTopLevel(rest, ' ')
-	if len(args) < 4 {
+func (t *trans) groupByDynamic(string) error {
+	st := t.cur
+	if len(st.Parts) < 3 {
 		return fmt.Errorf("group_by_dynamic: expected TIME_COL every DUR AGG")
 	}
 	var fields []string
-	i := 1
-options:
-	for ; i+1 < len(args); i += 2 {
-		v := args[i+1]
-		switch strings.ToLower(args[i]) {
+	for i := 1; i+1 < len(st.Parts); i++ {
+		if st.Parts[i].Kind != syntax.PartKeyword {
+			continue
+		}
+		v := st.Parts[i+1].Value
+		switch st.Parts[i].Value {
 		case "every":
 			fields = append(fields, fmt.Sprintf("Every: %q", v))
 		case "period":
@@ -485,7 +528,10 @@ options:
 		case "offset":
 			fields = append(fields, fmt.Sprintf("Offset: %q", v))
 		case "by":
-			keys, _ := parseCommaList([]string{v})
+			var keys []string
+			for _, it := range st.Parts[i+1].Items {
+				keys = append(keys, it.Value)
+			}
 			fields = append(fields, "GroupBy: []string{"+quoteList(keys)+"}")
 		case "closed":
 			fields = append(fields, fmt.Sprintf("Closed: %q", v))
@@ -493,17 +539,15 @@ options:
 			fields = append(fields, fmt.Sprintf("Label: %q", v))
 		case "start_by":
 			fields = append(fields, fmt.Sprintf("StartBy: %q", v))
-		default:
-			break options
 		}
 	}
-	aggs, err := t.aggSources(args[i:])
+	aggs, err := aggPartSources(st)
 	if err != nil {
 		return err
 	}
 	t.imports["github.com/Gaurav-Gosain/golars/dataframe"] = struct{}{}
 	t.pendingChain(fmt.Sprintf("GroupByDynamic(%q, dataframe.DynamicGroupOptions{%s}).Agg(%s)",
-		args[0], strings.Join(fields, ", "), strings.Join(aggs, ", ")))
+		st.Parts[0].Value, strings.Join(fields, ", "), strings.Join(aggs, ", ")))
 	return nil
 }
 

@@ -45,47 +45,55 @@ func TestGoDocsUpToDate(t *testing.T) {
 func extractGoDocs(t *testing.T, dir string) map[string]goDoc {
 	t.Helper()
 	fset := gotoken.NewFileSet()
-	pkgs, err := goparser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, goparser.ParseComments)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := goparser.ParseFile(fset, dir+"/"+name, nil, goparser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
 	}
 	receivers := map[string]bool{}
 	for _, rt := range nsTypes {
 		receivers[rt.Name()] = true
 	}
 	out := map[string]goDoc{}
-	for _, pkg := range pkgs {
-		for _, f := range pkg.Files {
-			for _, decl := range f.Decls {
-				fd, isFunc := decl.(*ast.FuncDecl)
-				if !isFunc || !fd.Name.IsExported() {
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fd, isFunc := decl.(*ast.FuncDecl)
+			if !isFunc || !fd.Name.IsExported() {
+				continue
+			}
+			key := fd.Name.Name
+			if fd.Recv != nil {
+				recv := typeName(fd.Recv.List[0].Type)
+				if !receivers[recv] {
 					continue
 				}
-				key := fd.Name.Name
-				if fd.Recv != nil {
-					recv := typeName(fd.Recv.List[0].Type)
-					if !receivers[recv] {
-						continue
-					}
-					key = recv + "." + key
-				}
-				var params []string
-				for _, field := range fd.Type.Params.List {
-					if len(field.Names) == 0 {
-						params = append(params, "_")
-					}
-					for _, n := range field.Names {
-						params = append(params, n.Name)
-					}
-				}
-				text := ""
-				if fd.Doc != nil {
-					text = strings.TrimSpace(fd.Doc.Text())
-				}
-				out[key] = goDoc{params: params, doc: text}
+				key = recv + "." + key
 			}
+			var params []string
+			for _, field := range fd.Type.Params.List {
+				if len(field.Names) == 0 {
+					params = append(params, "_")
+				}
+				for _, n := range field.Names {
+					params = append(params, n.Name)
+				}
+			}
+			text := ""
+			if fd.Doc != nil {
+				text = strings.TrimSpace(fd.Doc.Text())
+			}
+			out[key] = goDoc{params: params, doc: text}
 		}
 	}
 	return out
