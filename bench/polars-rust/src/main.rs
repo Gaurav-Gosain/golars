@@ -13,7 +13,11 @@ use serde::Serialize;
 use std::time::Instant;
 
 mod extra;
+mod mem;
 use extra::add_extra_workloads;
+
+#[global_allocator]
+static GLOBAL: mem::Counting = mem::Counting;
 
 const WARMUP: usize = 3;
 const REPEAT: usize = 25;
@@ -49,6 +53,7 @@ fn time_ns<F: FnMut()>(mut f: F) -> u128 {
         samples.push(t0.elapsed().as_nanos());
     }
     samples.sort_unstable();
+    mem::measure(&mut f);
     samples[REPEAT / 2]
 }
 
@@ -1144,24 +1149,54 @@ fn main() {
         add(&mut out, &only, "CumSumOverGroup", || bench_cumsum_over_group(n));
     }
 
-    out.push(bench_str_contains(1_048_576));
-    out.push(bench_str_split(1_048_576));
+    add(&mut out, &only, "StrContainsShort", || bench_str_contains(1_048_576));
+    add(&mut out, &only, "StrSplit", || bench_str_split(1_048_576));
 
     // Workloads beyond the original numeric suite (strings, IO, lazy).
     add_extra_workloads(&mut out, &only);
+
+    // Every Result comes from exactly one time_ns call, so the memory
+    // log lines up with out by position. If it ever does not, the
+    // results are emitted without memory figures.
+    #[derive(Serialize)]
+    struct WithMem<'a> {
+        #[serde(flatten)]
+        r: &'a Result,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alloc_bytes: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        allocs: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peak_bytes: Option<i64>,
+    }
+    let log = mem::MEM_LOG.lock().unwrap().clone();
+    let aligned = log.len() == out.len();
+    let rows: Vec<WithMem> = out
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let m = if aligned { Some(log[i]) } else { None };
+            WithMem {
+                r,
+                alloc_bytes: m.map(|m| m.alloc_bytes),
+                allocs: m.map(|m| m.allocs),
+                peak_bytes: m.map(|m| m.peak_bytes),
+            }
+        })
+        .collect();
 
     #[derive(Serialize)]
     struct Envelope<'a> {
         engine: &'a str,
         version: &'a str,
-        runs: &'a [Result],
+        runs: &'a [WithMem<'a>],
     }
     // Pin the reported version to the polars crate version we link against.
     // Kept in sync with Cargo.toml; bump when the polars dep bumps.
     let env = Envelope {
         engine: "polars-rust",
         version: "0.53.0",
-        runs: &out,
+        runs: &rows,
     };
     println!("{}", serde_json::to_string_pretty(&env).unwrap());
 }

@@ -17,6 +17,16 @@ Run:
   uv run python compare.py              # default: 3 runs, drop 1
   uv run python compare.py --runs 5     # more runs, smoother signal
   uv run python compare.py --runs 1     # quick single-run check
+  uv run python compare.py --rss        # peak RSS per workload instead
+
+Memory. golars and polars-rs report the heap bytes one call of each
+workload allocates (alloc_bytes; polars-rs also reports peak_bytes,
+the high-water mark of live memory the call added). The table prints
+golars simd alloc bytes, polars-rs alloc and peak bytes, and m/rs =
+golars alloc / polars-rs alloc (above 1 means golars allocates more).
+polars-py cannot hook the allocator of its compiled extension, so it
+only appears in the --rss view, which runs every workload in its own
+process per engine and reads the peak resident set size of each.
 """
 
 from __future__ import annotations
@@ -97,12 +107,19 @@ def aggregate_runs(runs, how="median_drop_worst"):
     merged = []
     for key, entries in by_key.items():
         e = pick(entries, how)
-        merged.append({
+        row = {
             "name": key[0],
             "rows": key[1],
             "median_ns": int(e["median_ns"]),
             "throughput_mbps": float(e["throughput_mbps"]),
-        })
+        }
+        # Allocation figures barely move between runs; the median over
+        # runs discards the odd one that caught a lazy init.
+        for field in ("alloc_bytes", "allocs", "peak_bytes"):
+            vals = sorted(x[field] for x in entries if x.get(field) is not None)
+            if vals:
+                row[field] = vals[len(vals) // 2]
+        merged.append(row)
     return {
         "engine": runs[0].get("engine", ""),
         "version": runs[0].get("version", ""),
@@ -124,7 +141,86 @@ def parse_args():
                         "-5 requires root on most systems)")
     p.add_argument("--only", default="",
                    help="regexp; run only workloads whose name matches (passed to all engines)")
+    p.add_argument("--rss", action="store_true",
+                   help="measure peak RSS per workload (one process per workload and engine) "
+                        "instead of throughput")
     return p.parse_args()
+
+
+def fmt_bytes(n) -> str:
+    if n is None:
+        return "-"
+    n = float(n)
+    if abs(n) < 1024:
+        return f"{n:.0f}B"
+    for unit in ("K", "M", "G"):
+        n /= 1024
+        if abs(n) < 1024 or unit == "G":
+            return f"{n:.1f}{unit}"
+    return f"{n:.1f}G"
+
+
+def run_rss(cmd: list[str], cwd) -> int:
+    """Run cmd to completion and return its peak resident set size in
+    bytes, taken from the rusage of that one child."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _, status, ru = os.wait4(proc.pid, 0)
+    proc.returncode = os.waitstatus_to_exitcode(status)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+    # ru_maxrss is bytes on macOS and kilobytes on Linux.
+    return ru.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+
+
+def with_only(cmd: list[str], pattern: str) -> list[str]:
+    cmd = list(cmd)
+    if "--only" in cmd:
+        i = cmd.index("--only")
+        del cmd[i:i + 2]
+    return cmd + ["--only", pattern]
+
+
+def rss_main(args, engines, base) -> int:
+    """Peak RSS view: one process per (workload, engine). Each harness
+    runs every size of the named workload, so the peak belongs to the
+    largest size. A process that matches no workload gives each
+    runtime's idle footprint (interpreter, thread pools), which is
+    subtracted so the numbers show what the workload added: its inputs,
+    the operation's working memory and, for golars, the GC headroom."""
+    import re
+
+    cmd, cwd = engines["simd"]
+    listing = json.loads(run(with_only(cmd, args.only or "."), cwd))
+    names: dict[str, int] = {}
+    for r in listing["runs"]:
+        names[r["name"]] = max(names.get(r["name"], 0), r["rows"])
+
+    baseline = {}
+    for name in base:
+        cmd, cwd = engines[name]
+        baseline[name] = min(run_rss(with_only(cmd, "^$nothing"), cwd) for _ in range(2))
+
+    print()
+    print(f"{'workload':<28} {'rows':>10} {'pl-py':>9} {'pl-rs':>9} {'simd':>9} {'m/py':>7} {'m/rs':>7}")
+    print("(peak RSS above each engine's idle baseline, at the largest size of the workload)")
+    print("-" * 86)
+    ratios = []
+    for wl, rows in names.items():
+        pattern = "^" + re.escape(wl) + "$"
+        rss = {}
+        for name in base:
+            cmd, cwd = engines[name]
+            rss[name] = max(run_rss(with_only(cmd, pattern), cwd) - baseline[name], 1)
+        m_py = rss["simd"] / rss["py"]
+        m_rs = rss["simd"] / rss["rs"]
+        ratios.append(m_rs)
+        print(f"{wl:<28} {rows:>10,} {fmt_bytes(rss['py']):>9} {fmt_bytes(rss['rs']):>9}"
+              f" {fmt_bytes(rss['simd']):>9} {m_py:>6.2f}x {m_rs:>6.2f}x")
+    print()
+    print("idle baseline: " + ", ".join(f"{k}={fmt_bytes(v)}" for k, v in baseline.items()))
+    if ratios:
+        print(f"median simd/rs peak RSS: {statistics.median(ratios):.2f}x (above 1 means golars uses more)")
+    return 0
 
 
 def main() -> int:
@@ -173,6 +269,8 @@ def main() -> int:
         "simd": (wrap([str(bin_dir / "golars-bench-simd"), *only]), repo),
     }
     base = ["py", "rs", "scalar", "simd"]
+    if args.rss:
+        return rss_main(args, engines, ["py", "rs", "simd"])
     runs: dict[str, list] = {name: [] for name in base}
     for r in range(nr):
         order = base[r:] + base[:r]
@@ -216,12 +314,14 @@ def main() -> int:
         f"{'workload':<28} {'rows':>10}"
         f" {'pl-py':>10} {'pl-rs':>10} {'scalar':>10} {'simd':>10}"
         f" {'s/py':>7} {'s/rs':>7} {'c/py':>7} {'c/rs':>7}"
+        f" {'g-alloc':>8} {'rs-alloc':>8} {'rs-peak':>8} {'m/rs':>7}"
     )
     print(header_tag)
-    print("-" * 132)
+    print("-" * 168)
     wins_py = wins_rs = 0
     cons_wins_py = cons_wins_rs = 0
     total = 0
+    mem_ratios: list[tuple[float, str]] = []
     for name, rows in keys:
         p_py, p_rs, ss, vv = py_t[(name, rows)], rs_t[(name, rows)], sc_t[(name, rows)], v_t[(name, rows)]
         ratio_py = vv["throughput_mbps"] / p_py["throughput_mbps"] if p_py["throughput_mbps"] else 0
@@ -239,6 +339,14 @@ def main() -> int:
         if cons_rs >= 1.0:
             cons_wins_rs += 1
         total += 1
+        g_alloc, rs_alloc = vv.get("alloc_bytes"), p_rs.get("alloc_bytes")
+        # Ratios of tiny figures (a few hundred bytes of bookkeeping) say
+        # nothing; below 64 KiB on both sides the column shows "-".
+        mem_ratio = None
+        if g_alloc is not None and rs_alloc is not None and max(g_alloc, rs_alloc) >= 64 << 10:
+            mem_ratio = g_alloc / max(rs_alloc, 1)
+            mem_ratios.append((mem_ratio, f"{name}({rows:,})"))
+        mem_cell = f"{mem_ratio:>6.2f}x" if mem_ratio is not None else f"{'-':>7}"
         print(
             f"{name:<28} {rows:>10,}"
             f" {p_py['throughput_mbps']:>8,.0f}MB"
@@ -249,8 +357,17 @@ def main() -> int:
             f" {ratio_rs:>6.2f}x"
             f" {cons_py:>6.2f}x"
             f" {cons_rs:>6.2f}x"
+            f" {fmt_bytes(g_alloc):>8} {fmt_bytes(rs_alloc):>8} {fmt_bytes(p_rs.get('peak_bytes')):>8}"
+            f" {mem_cell}"
         )
     print()
+    if mem_ratios:
+        mem_ratios.sort(reverse=True)
+        print(
+            f"alloc bytes per call, golars simd vs polars-rs: median {statistics.median(r for r, _ in mem_ratios):.2f}x, "
+            f"golars allocates more on {sum(r > 1.0 for r, _ in mem_ratios)}/{len(mem_ratios)}"
+        )
+        print("  largest: " + ", ".join(f"{label} {r:.2f}x" for r, label in mem_ratios[:8]))
     print(
         f"polars-py {py_typical['version']}  |  polars-rs crate {rs_typical['version']}  |  runs={nr}"
     )

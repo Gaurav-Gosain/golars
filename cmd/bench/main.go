@@ -33,6 +33,10 @@ type result struct {
 	Rows           int     `json:"rows"`
 	MedianNs       int64   `json:"median_ns"`
 	ThroughputMBps float64 `json:"throughput_mbps"`
+	// AllocBytes and Allocs are the heap bytes and objects one call of
+	// the workload allocates; see mem.go.
+	AllocBytes int64 `json:"alloc_bytes"`
+	Allocs     int64 `json:"allocs"`
 }
 
 func timeNs(fn func(), warmup, repeat int) int64 {
@@ -70,6 +74,7 @@ func timeNs(fn func(), warmup, repeat int) int64 {
 		samples[i] = time.Since(t0).Nanoseconds() / int64(inner)
 	}
 	slices.Sort(samples)
+	measureAlloc(fn)
 	return samples[len(samples)/2]
 }
 
@@ -1020,7 +1025,10 @@ func main() {
 		if onlyRe != nil && !onlyRe.MatchString(name) {
 			return
 		}
-		runs = append(runs, f())
+		memQueue = memQueue[:0]
+		r := []result{f()}
+		attachMem(r)
+		runs = append(runs, r[0])
 	}
 
 	sizes := []int{16 * 1024, 256 * 1024, 1024 * 1024}
@@ -1099,7 +1107,10 @@ func main() {
 		if onlyRe != nil && !slices.ContainsFunc(names, onlyRe.MatchString) {
 			return
 		}
-		for _, r := range f() {
+		memQueue = memQueue[:0]
+		rs := f()
+		attachMem(rs)
+		for _, r := range rs {
 			if onlyRe == nil || onlyRe.MatchString(r.Name) {
 				runs = append(runs, r)
 			}

@@ -44,6 +44,30 @@ SumInt64                       16,384     5,000MB    15,500MB    14,500MB   36,0
 polars-py 1.39.3  |  polars-rs crate 0.53.0  |  simd wins vs py: NN/NN  |  simd wins vs rs: NN/NN
 ```
 
+## Memory
+
+After timing a workload, the golars and polars-rs harnesses run it
+once more and record the heap bytes that single call allocates
+(`alloc_bytes`, `allocs`). golars reads `runtime.MemStats` and adds
+buffers served from the shared arrow buffer pool; polars-rs wraps the
+system allocator with a counter and also reports `peak_bytes`, the
+high-water mark of live memory the call added. The table shows
+`g-alloc`, `rs-alloc`, `rs-peak` and `m/rs` (golars simd alloc bytes
+over polars-rs alloc bytes, so above 1 means golars allocates more).
+
+polars-py cannot hook the allocator of its compiled extension, so it
+is covered by the peak RSS view instead:
+
+```sh
+uv run python compare.py --rss --only 'LazyPipeline|InnerJoin'
+```
+
+`--rss` runs each workload in its own process per engine, reads the
+peak resident set size from the child's rusage and subtracts each
+engine's idle footprint. It covers the largest size of each workload
+and includes inputs, working memory and, for golars, GC headroom (the
+harness runs with `GOGC=200`).
+
 ## Workloads
 
 Covers aggregations, arithmetic, filters, joins, groupby /

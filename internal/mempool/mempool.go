@@ -12,6 +12,7 @@ package mempool
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
@@ -57,6 +58,9 @@ func (p *pooledAllocator) Allocate(size int) []byte {
 	if got := p.pools[b].Get(); got != nil {
 		buf := got.([]byte)
 		if cap(buf) >= size {
+			if countHits.Load() {
+				hitBytes.Add(int64(size))
+			}
 			return buf[:size]
 		}
 		// Under-cap bucket hit - drop and fall through.
@@ -103,4 +107,21 @@ func Pooling(userMem memory.Allocator) memory.Allocator {
 		return hot
 	}
 	return userMem
+}
+
+// Pool-hit accounting for the bench harness (cmd/bench). A buffer
+// served from a pool never reaches the Go heap, so runtime.MemStats
+// does not see it; with counting on, its size is added to a counter so
+// per-operation allocation figures include it. Off by default; the
+// cost when off is one atomic load per pool hit.
+var (
+	countHits atomic.Bool
+	hitBytes  atomic.Int64
+)
+
+// CountPoolHits turns pool-hit accounting on or off and returns the
+// bytes counted since the previous call, resetting the counter.
+func CountPoolHits(on bool) int64 {
+	countHits.Store(on)
+	return hitBytes.Swap(0)
 }
