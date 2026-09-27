@@ -14,6 +14,7 @@
 #   make fmt           # gofmt + goimports
 #   make examples      # compile every ./examples/*
 #   make clean         # drop ./bin and pprof files
+#   make verify        # rebuild the Lean proofs and regenerate testdata/verified
 
 GO       ?= go
 BIN      ?= ./bin
@@ -23,7 +24,7 @@ CMDS     := $(notdir $(wildcard ./cmd/*))
 LDFLAGS  ?= -s -w
 SIMD_ENV ?= GOEXPERIMENT=simd
 
-.PHONY: all help build build-simd install test test-race test-noasm test-simd test-all bench vet lint fmt examples docs-site docker tidy clean check
+.PHONY: all help build build-simd install test test-race test-noasm test-simd test-all bench vet lint fmt examples docs-site docker tidy clean check verify
 
 all: check
 
@@ -98,5 +99,9 @@ tidy: ## go mod tidy
 
 clean: ## Remove ./bin and pprof files
 	rm -rf $(BIN) *.prof *.pprof
+
+verify: ## Rebuild the Lean proofs (verify/) and regenerate testdata/verified
+	sh verify/verify.sh
+	git diff --stat -- testdata/verified
 
 check: vet test ## Quick gate: vet + test

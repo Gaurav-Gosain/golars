@@ -359,7 +359,7 @@ theorem runs_spec (antisymm : ∀ a b, le a b = true → le b a = true → a = b
         simpa using n1
       dsimp only
       by_cases hxk : key x = key y
-      · rw [if_pos hxk]
+      · simp only [hxk, ↓reduceIte]
         refine ⟨?_, n1, ?_, ?_⟩
         · simp only [map_cons, groupsOver]
           congr 1
@@ -380,7 +380,7 @@ theorem runs_spec (antisymm : ∀ a b, le a b = true → le b a = true → a = b
             · exact ⟨y, mem_cons_self, by rw [← e, hxk]⟩
             · exact ⟨z, hz, e⟩
         · intro a as h; simp at h; simp [← h.1, hxk]
-      · rw [if_neg hxk]
+      · simp only [hxk, ↓reduceIte]
         have notin : ∀ z ∈ y :: ys, key z ≠ key x := by
           intro z hz e
           have a1 : le (key x) (key y) = true := hx y mem_cons_self

@@ -342,7 +342,7 @@ theorem select_elem (es : List Expr) (P : Plan) (h : ∀ e ∈ es, isElem e = tr
     simp only [List.any_eq_true, Bool.not_eq_true'] at hn
     obtain ⟨e, he, hu⟩ := hn
     have := ha e he; simp_all
-  rw [if_neg hu, List.map_map]
+  simp only [hu, ↓reduceIte, List.map_map]
   have : es.map (bcast (eval P).length ∘ (evalCol · (eval P))) =
       es.map (fun e => (eval P).map (evalRow e)) :=
     List.map_congr_left (fun e he => evalCol_elem e _ (h e he))

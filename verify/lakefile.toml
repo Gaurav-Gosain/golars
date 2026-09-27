@@ -8,3 +8,6 @@ name = "Golars"
 [[lean_exe]]
 name = "gen-vectors"
 root = "GenVectors"
+
+[leanOptions]
+linter.unusedSimpArgs = false
