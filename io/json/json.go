@@ -202,33 +202,11 @@ func ReadURL(ctx context.Context, url string, opts ...Option) (*dataframe.DataFr
 // DataFrame. Blank lines are skipped. A trailing newline is optional.
 func ReadNDJSON(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFrame, error) {
 	cfg := resolve(opts)
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1<<20), 1<<26) // up to 64 MiB per line
-	var rows []map[string]any
-	var ord keyOrder
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		// Skip whitespace-only lines.
-		trimmed := trimSpaces(line)
-		if len(trimmed) == 0 {
-			continue
-		}
-		var row map[string]any
-		if err := unmarshalNumbers(trimmed, &row); err != nil {
-			return nil, fmt.Errorf("json.ReadNDJSON: line %d: %w", len(rows)+1, err)
-		}
-		if err := ord.add(row, trimmed); err != nil {
-			return nil, fmt.Errorf("json.ReadNDJSON: line %d: %w", len(rows)+1, err)
-		}
-		rows = append(rows, row)
-	}
-	if err := scanner.Err(); err != nil {
+	data, err := io.ReadAll(r)
+	if err != nil {
 		return nil, fmt.Errorf("json.ReadNDJSON: %w", err)
 	}
-	return buildFromRowsOrdered(ctx, rows, ord.names, cfg)
+	return readNDJSONBytes(ctx, data, cfg)
 }
 
 // ReadNDJSONString is a convenience that parses an NDJSON-formatted string.
@@ -273,23 +251,14 @@ func Write(ctx context.Context, w io.Writer, df *dataframe.DataFrame) error {
 	if err != nil {
 		return err
 	}
-	bw := bufio.NewWriter(w)
-	bw.WriteByte('[')
-	for i := range df.Height() {
-		if i%4096 == 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-		}
-		if i > 0 {
-			bw.WriteByte(',')
-		}
-		if err := rw.writeRow(bw, i); err != nil {
-			return err
-		}
+	if _, err := w.Write([]byte{'['}); err != nil {
+		return err
 	}
-	bw.WriteString("]\n")
-	return bw.Flush()
+	if err := rw.writeRows(ctx, w, df.Height(), ',', false); err != nil {
+		return err
+	}
+	_, err = w.Write([]byte("]\n"))
+	return err
 }
 
 // rowWriter encodes one DataFrame row as a JSON object. Keys are
@@ -313,32 +282,6 @@ func newRowWriter(df *dataframe.DataFrame) (*rowWriter, error) {
 		rw.cols = append(rw.cols, s.Chunk(0))
 	}
 	return rw, nil
-}
-
-func (rw *rowWriter) writeRow(bw *bufio.Writer, i int) error {
-	bw.WriteByte('{')
-	for c, col := range rw.cols {
-		if c > 0 {
-			bw.WriteByte(',')
-		}
-		bw.Write(rw.keys[c])
-		bw.WriteByte(':')
-		v := arrowCellToGo(col, i)
-		if f, isFloat := v.(float64); isFloat && (math.IsNaN(f) || math.IsInf(f, 0)) {
-			v = nil
-		}
-		b, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Errorf("json: column %s row %d: %w", rw.keys[c], i, err)
-		}
-		if _, isFloat := v.(float64); isFloat && !bytes.ContainsAny(b, ".eE") {
-			// polars writes 1.0, not 1, so the column reads back as float.
-			b = append(b, ".0"...)
-		}
-		bw.Write(b)
-	}
-	bw.WriteByte('}')
-	return nil
 }
 
 // WriteFile writes df as a JSON array of objects to path.
@@ -374,19 +317,7 @@ func WriteNDJSON(ctx context.Context, w io.Writer, df *dataframe.DataFrame) erro
 	if err != nil {
 		return err
 	}
-	bw := bufio.NewWriter(w)
-	for i := range df.Height() {
-		if i%4096 == 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-		}
-		if err := rw.writeRow(bw, i); err != nil {
-			return err
-		}
-		bw.WriteByte('\n')
-	}
-	return bw.Flush()
+	return rw.writeRows(ctx, w, df.Height(), '\n', true)
 }
 
 // keyOrder collects object keys in first-seen document order across
