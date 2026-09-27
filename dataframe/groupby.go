@@ -638,6 +638,20 @@ func arrowValuesEqual(arr arrow.Array, a, b int) bool {
 		return x.Value(a) == x.Value(b)
 	case *array.String:
 		return x.Value(a) == x.Value(b)
+	case *array.LargeString:
+		return x.Value(a) == x.Value(b)
+	case *array.Date32:
+		return x.Value(a) == x.Value(b)
+	case *array.Date64:
+		return x.Value(a) == x.Value(b)
+	case *array.Timestamp:
+		return x.Value(a) == x.Value(b)
+	case *array.Time32:
+		return x.Value(a) == x.Value(b)
+	case *array.Time64:
+		return x.Value(a) == x.Value(b)
+	case *array.Duration:
+		return x.Value(a) == x.Value(b)
 	case *array.Binary:
 		av, bv := x.Value(a), x.Value(b)
 		if len(av) != len(bv) {

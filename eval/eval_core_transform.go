@@ -268,6 +268,11 @@ func evalScalarOrColumn(ctx context.Context, ec EvalContext, e expr.Expr, df *da
 // to one row (the first row is used for longer results).
 func evalScalar(ctx context.Context, ec EvalContext, e expr.Expr, df *dataframe.DataFrame) (*series.Series, error) {
 	if lit, ok := e.Node().(expr.LitNode); ok {
+		// Temporal literals carry Go values (DateValue, time.Time) that
+		// FromValues cannot store; they have their own conversion.
+		if s, ok, err := temporalLiteralSeries(lit, 1, ec); ok {
+			return s, err
+		}
 		dt := lit.DType.Arrow()
 		if lit.Value == nil {
 			return series.FullNull("literal", dt, 1, seriesAlloc(ec))

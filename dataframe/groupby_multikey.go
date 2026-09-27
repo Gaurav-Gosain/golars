@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -156,6 +157,12 @@ func hashAggMultiKey(ctx context.Context, df *DataFrame, keys []string, specs []
 			c.i64 = a
 		case *array.Int32:
 			c.i32 = a
+		case *array.Date32:
+			// Grouped by the physical day number; the key output is
+			// rebuilt as a date column.
+			c.i32 = array.NewInt32Data(a.Data())
+			defer c.i32.Release()
+			c.logical = col.DType()
 		case *array.String:
 			c.str = a
 		case *array.Boolean:
@@ -174,7 +181,7 @@ func hashAggMultiKey(ctx context.Context, df *DataFrame, keys []string, specs []
 
 	keyOuts := make([]*series.Series, len(cols))
 	for i, u := range uniques {
-		s, err := u.series(cols[i].name, mem)
+		s, err := u.series(cols[i].name, cols[i].logical, mem)
 		if err != nil {
 			for _, prev := range keyOuts[:i] {
 				if prev != nil {
@@ -193,10 +200,13 @@ func hashAggMultiKey(ctx context.Context, df *DataFrame, keys []string, specs []
 // multiKeyCol is one group-by key column in its concrete arrow type.
 type multiKeyCol struct {
 	name string
-	i64  *array.Int64
-	i32  *array.Int32
-	str  *array.String
-	bl   *array.Boolean
+	// logical is set when the column is grouped by its physical values
+	// (a date as int32); the key output takes this dtype back.
+	logical dtype.DType
+	i64     *array.Int64
+	i32     *array.Int32
+	str     *array.String
+	bl      *array.Boolean
 }
 
 // keyUniques accumulates the distinct key values of one column, one
@@ -209,8 +219,10 @@ type keyUniques struct {
 	valid   []bool
 }
 
-func (u *keyUniques) series(name string, mem memory.Allocator) (*series.Series, error) {
+func (u *keyUniques) series(name string, logical dtype.DType, mem memory.Allocator) (*series.Series, error) {
 	switch {
+	case u.i32 != nil && logical.IsValid() && logical.ID() == arrow.DATE32:
+		return series.FromDate(name, u.i32, u.valid, series.WithAllocator(mem))
 	case u.i64 != nil:
 		return series.FromInt64(name, u.i64, u.valid, series.WithAllocator(mem))
 	case u.i32 != nil:
