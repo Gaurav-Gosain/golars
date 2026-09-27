@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+
+	"github.com/Gaurav-Gosain/golars/internal/mempool"
 )
 
 // CumSum returns a new Series where out[i] = sum of s[0..i] (inclusive),
@@ -22,8 +24,9 @@ func (s *Series) CumSum(opts ...Option) (*Series, error) {
 	case *array.Int64:
 		raw := a.Int64Values()
 		if a.NullN() == 0 {
-			return BuildInt64Direct(s.Name(), n, cfg.alloc, func(out []int64) {
+			return BuildInt64Direct(s.Name(), n, mempool.Pooling(cfg.alloc), func(out []int64) {
 				var acc int64
+				out = out[:len(raw)]
 				for i, v := range raw {
 					acc += v
 					out[i] = acc
@@ -47,8 +50,9 @@ func (s *Series) CumSum(opts ...Option) (*Series, error) {
 	case *array.Float64:
 		raw := a.Float64Values()
 		if a.NullN() == 0 {
-			return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
+			return BuildFloat64Direct(s.Name(), n, mempool.Pooling(cfg.alloc), func(out []float64) {
 				var acc float64
+				out = out[:len(raw)]
 				for i, v := range raw {
 					acc += v
 					out[i] = acc
