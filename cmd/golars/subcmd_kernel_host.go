@@ -59,10 +59,16 @@ type kernelRequest struct {
 	// outputs. "" runs the cell.
 	// "table" returns the first MaxRows rows of the focused frame
 	// with every column, for programmatic callers (golars-mcp).
+	// "frames", "export" and "import" list and move frames as Arrow
+	// IPC files (kernel_frames.go).
 	Op     string `json:"op,omitempty"`
 	Cursor int    `json:"cursor,omitempty"`
 	// MaxRows bounds the rows of an op=table reply (default 50).
 	MaxRows int `json:"max_rows,omitempty"`
+	// Name and Path are the frame and file of op=export and op=import
+	// (see kernel_frames.go).
+	Name string `json:"name,omitempty"`
+	Path string `json:"path,omitempty"`
 }
 
 // hostOutput is one entry of a structured reply's outputs.
@@ -144,6 +150,10 @@ type kernelResponse struct {
 	Outputs []hostOutput `json:"outputs,omitempty"`
 	// IDE answers complete and inspect requests.
 	IDE *ideReply `json:"ide,omitempty"`
+	// Frames answers op=frames; Gen is the new generation of the frame
+	// an op=import staged.
+	Frames []hostFrame `json:"frames,omitempty"`
+	Gen    int         `json:"gen,omitempty"`
 }
 
 func newKernelHostCmd() *cobra.Command {
@@ -174,6 +184,7 @@ func runKernelHost(realOut io.Writer, in io.Reader) error {
 		os.Stderr = origStderr
 	}()
 
+	var gens frameGens
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 1<<16), 1<<24) // up to 16 MiB per cell
 	for scanner.Scan() {
@@ -196,6 +207,8 @@ func runKernelHost(realOut io.Writer, in io.Reader) error {
 			resp = kernelResponse{ID: req.ID, IDE: &ide}
 		case "table":
 			resp = focusTable(s, req)
+		case "frames", "export", "import":
+			resp = hostFrameOp(s, &gens, req)
 		case "":
 			resp = executeCell(s, req)
 		default:
