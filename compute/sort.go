@@ -141,31 +141,30 @@ func sortValuesFast(ctx context.Context, s *series.Series, so SortOptions, opts 
 	case *array.Float32:
 		out := make([]float32, a.Len())
 		copy(out, a.Float32Values())
-		slices.SortFunc(out, func(x, y float32) int {
-			// slices.Sort for floats would use < which misorders NaN.
-			// Our semantics: NaN goes last in ascending, first in descending.
+		// Stable and direction aware, like polars: NaN ties NaN and sorts
+		// above every number, -0.0 ties 0.0, and ties keep input order in
+		// both directions (a reversed ascending sort would flip them).
+		sign := 1
+		if so.Descending {
+			sign = -1
+		}
+		slices.SortStableFunc(out, func(x, y float32) int {
 			xNaN, yNaN := x != x, y != y
-			if xNaN && yNaN {
-				return 0
-			}
-			if xNaN {
-				return 1
-			}
-			if yNaN {
-				return -1
-			}
 			switch {
+			case xNaN && yNaN:
+				return 0
+			case xNaN:
+				return sign
+			case yNaN:
+				return -sign
 			case x < y:
-				return -1
+				return -sign
 			case x > y:
-				return 1
+				return sign
 			default:
 				return 0
 			}
 		})
-		if so.Descending {
-			slices.Reverse(out)
-		}
 		s, err := series.FromFloat32(name, out, nil, series.WithAllocator(cfg.alloc))
 		return s, true, err
 	case *array.Float64:
@@ -210,6 +209,7 @@ func sortValuesFast(ctx context.Context, s *series.Series, so SortOptions, opts 
 				}
 			}
 
+			negZero := false
 			if needsIEEE {
 				// Mixed signs or NaN/Inf: full IEEE transform (skip NaN).
 				j := 0
@@ -218,6 +218,9 @@ func sortValuesFast(ctx context.Context, s *series.Series, so SortOptions, opts 
 						continue
 					}
 					bits := math.Float64bits(v)
+					if bits == 1<<63 {
+						negZero = true
+					}
 					if bits>>63 == 0 {
 						bits |= 1 << 63
 					} else {
@@ -243,11 +246,43 @@ func sortValuesFast(ctx context.Context, s *series.Series, so SortOptions, opts 
 			if so.Descending {
 				slices.Reverse(out)
 			}
+			// The radix key orders -0.0 before 0.0 and NaN payloads by
+			// bits, and the reverse above flips ties. polars ties both
+			// zeros and all NaNs and keeps them in input order, so
+			// rewrite those runs from src. Each run is contiguous.
+			if n > 0 {
+				last := out[n-1]
+				if so.Descending {
+					last = out[0]
+				}
+				if last != last {
+					restoreTieRun(out, src, func(v float64) bool { return v != v })
+				}
+			}
+			if negZero {
+				restoreTieRun(out, src, func(v float64) bool { return v == 0 })
+			}
 		})
 		return s, true, err
 	}
 	_ = ctx
 	return nil, false, nil
+}
+
+// restoreTieRun rewrites the contiguous run of values in sorted out that
+// satisfy tie with the matching values of src, in src order. The run
+// holds exactly the values of src that satisfy tie.
+func restoreTieRun(out, src []float64, tie func(float64) bool) {
+	k := slices.IndexFunc(out, tie)
+	if k < 0 {
+		return
+	}
+	for _, v := range src {
+		if tie(v) {
+			out[k] = v
+			k++
+		}
+	}
 }
 
 // SortIndicesMulti returns the stable permutation that would sort by the
