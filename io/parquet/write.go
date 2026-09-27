@@ -205,10 +205,23 @@ func writeColumnRange(ctx context.Context, rgw file.BufferedRowGroupWriter, col 
 	// A column whose buffered tail holds only nulls is left for Close.
 	// So is a range without any non-null value: the plain boolean
 	// encoder has no bit writer yet and its size estimate panics.
-	if fl, ok := cw.(interface{ FlushCurrentPage() error }); ok && wroteValues && size > 0 && cw.CurrentEncoder().EstimatedDataEncodedSize() > 0 {
+	if fl, ok := cw.(interface{ FlushCurrentPage() error }); ok && wroteValues && size > 0 && hasBufferedValues(cw.CurrentEncoder()) {
 		return fl.FlushCurrentPage()
 	}
 	return nil
+}
+
+// hasBufferedValues reports whether enc holds values not yet written to
+// a page. A dictionary encoder's EstimatedDataEncodedSize is never zero
+// (it counts the bit-width byte), so after the writer has just cut a
+// page it would still look non-empty, and flushing that empty page
+// panics inside arrow's level encoding. Its observed raw size is reset
+// with every page and grows with every buffered value.
+func hasBufferedValues(enc interface{ EstimatedDataEncodedSize() int64 }) bool {
+	if d, ok := enc.(interface{ ObservedRawSize() int64 }); ok {
+		return d.ObservedRawSize() > 0
+	}
+	return enc.EstimatedDataEncodedSize() > 0
 }
 
 // asyncWriter hands full buffers to a goroutine that writes them to w, so
