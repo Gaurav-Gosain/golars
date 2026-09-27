@@ -2,7 +2,9 @@ package browse
 
 import (
 	"fmt"
+	"math"
 	"strconv"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 )
@@ -99,7 +101,8 @@ func (m *model) summaryString(visIdx int) string {
 		mn, _ := col.Min()
 		mx, _ := col.Max()
 		mean, _ := col.Mean()
-		return fmt.Sprintf("sum=%g  min=%g  max=%g  mean=%g", sum, mn, mx, mean)
+		return fmt.Sprintf("sum=%s  min=%s  max=%s  mean=%s",
+			statFloat(sum), statFloat(mn), statFloat(mx), statFloat(mean))
 	case "bool":
 		return fmt.Sprintf("len=%d  nulls=%d", col.Len(), col.NullCount())
 	case "str":
@@ -146,4 +149,28 @@ func truncate(s string, w int) string {
 		return s[:w]
 	}
 	return s[:w-1] + "…"
+}
+
+// statFloat formats a summary statistic the way polars' describe table
+// shows floats: at most six decimals with trailing zeros dropped
+// ("1152.216667", "2.5", "4.0"), and scientific notation for very
+// large or very small magnitudes.
+func statFloat(v float64) string {
+	switch {
+	case math.IsNaN(v):
+		return "NaN"
+	case math.IsInf(v, 1):
+		return "inf"
+	case math.IsInf(v, -1):
+		return "-inf"
+	}
+	if a := math.Abs(v); a != 0 && (a >= 1e15 || a < 1e-5) {
+		return strconv.FormatFloat(v, 'e', 6, 64)
+	}
+	s := strconv.FormatFloat(v, 'f', 6, 64)
+	s = strings.TrimRight(s, "0")
+	if strings.HasSuffix(s, ".") {
+		s += "0"
+	}
+	return s
 }
