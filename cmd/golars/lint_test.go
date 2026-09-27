@@ -20,22 +20,24 @@ use base
 .melt id x
 `
 	got := map[string]bool{}
-	for _, m := range lintGlr(src) {
-		got[fmt.Sprintf("%d: %s", m.line, m.msg)] = true
+	r := lintGlr(src, t.TempDir())
+	for _, d := range r.Diags {
+		got[fmt.Sprintf("%d: %s", d.Line+1, d.Msg)] = true
 	}
 	want := []string{
-		`2: stash "unused" is never used`,
-		`3: use "missing" with no earlier stash or load ... as`,
-		`5: filter has unbalanced quotes`,
-		`6: unknown command "filtet" (did you mean "filter"?)`,
+		`1: file "a.csv" does not exist`,
+		`2: stash needs a loaded frame; nothing is loaded yet`,
+		`3: no frame named "missing"`,
+		`5: unterminated string`,
+		`6: unknown command "filtet"`,
 	}
 	for _, w := range want {
 		if !got[w] {
-			t.Errorf("missing warning %q; got %v", w, got)
+			t.Errorf("missing finding %q; got %v", w, got)
 		}
 	}
 	if len(got) != len(want) {
-		t.Errorf("got %d warnings, want %d: %v", len(got), len(want), got)
+		t.Errorf("got %d findings, want %d: %v", len(got), len(want), got)
 	}
 }
 
@@ -50,8 +52,16 @@ func TestExampleScriptsLintClean(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, m := range lintGlr(string(src)) {
-			t.Errorf("%s:%d: %s", p, m.line, m.msg)
+		if r := lintGlr(string(src), filepath.Dir(p)); len(r.Diags) > 0 {
+			t.Error(r.Render(p))
 		}
+	}
+}
+
+func TestUnifiedDiff(t *testing.T) {
+	got := unifiedDiff("s.glr", "load a\nfilter x>1\nshow\n", "load a\nfilter x > 1\nshow\n")
+	want := "--- s.glr\n+++ s.glr (formatted)\n@@ -1,3 +1,3 @@\n load a\n-filter x>1\n+filter x > 1\n show\n"
+	if got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }

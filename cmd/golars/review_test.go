@@ -50,15 +50,15 @@ func TestParseNatBounds(t *testing.T) {
 }
 
 func TestFormatPreservesContent(t *testing.T) {
-	for _, input := range []string{
-		"show\n", "show\n\n", "", "show",
-		`with x = 'two  spaces'`,
-		`with x = "escaped\"  spaces"`,
-		"with x = 1 # keep   spacing\n",
+	for input, want := range map[string]string{
+		"show\n": "show\n", "show\n\n": "show\n", "": "", "show": "show\n",
+		`with x = 'two  spaces'`:        "with x = 'two  spaces'\n",
+		`with x = "escaped\"  spaces"`:  "with x = \"escaped\\\"  spaces\"\n",
+		"with x = 1 # keep   spacing\n": "with x = 1 # keep   spacing\n",
 	} {
 		got := formatGlr(input)
-		if got != input {
-			t.Errorf("formatGlr(%q) = %q", input, got)
+		if got != want {
+			t.Errorf("formatGlr(%q) = %q, want %q", input, got, want)
 		}
 		if again := formatGlr(got); again != got {
 			t.Errorf("not idempotent: %q -> %q", got, again)
