@@ -63,7 +63,7 @@ const SYMBOL_COMMANDS = new Set(['null-count', '?']);
 // Statement keywords (join types, ordering, window options).
 const KEYWORDS = new Set([
   'as', 'on', 'asc', 'desc',
-  'inner', 'left', 'cross',
+  'inner', 'left', 'cross', 'right', 'full', 'outer', 'semi', 'anti', 'suffix',
   'every', 'period', 'offset', 'by', 'closed', 'label', 'start_by',
   'backward', 'forward', 'nearest', 'tolerance', 'drop_first'
 ]);

@@ -7,7 +7,7 @@ Registers the filetype, default buffer options, and the
 What you get:
 
 * Inline **diagnostics** for unknown commands and missing required args
-* **Completions** for commands, keywords (`as`, `on`, `asc`, `desc`, `inner`, `left`, `cross`), staged frame names (from earlier `load ... as NAME` in the same file), and filesystem paths after `load` / `save` / `join` / `source`
+* **Completions** for commands, keywords (`as`, `on`, `asc`, `desc`, `inner`, `left`, `right`, `full`, `outer`, `semi`, `anti`, `cross`, `suffix`), staged frame names (from earlier `load ... as NAME` in the same file), and filesystem paths after `load` / `save` / `join` / `source`
 * **Hover** docs with signature + full description on any command token, plus `# ^?` probe previews rendered as virtual text
 * Proper `commentstring = "# %s"` so `gcc` / `gc{motion}` comment the right way
 

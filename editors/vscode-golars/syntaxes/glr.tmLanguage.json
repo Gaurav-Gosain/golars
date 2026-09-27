@@ -53,7 +53,7 @@
       "name": "comment.line.number-sign.glr"
     },
     "statement-keywords": {
-      "match": "(?<![.\\w])\\b(as|on|asc|desc|inner|left|cross|by|every|period|offset|closed|label|start_by|backward|forward|nearest|tolerance|drop_first)\\b(?!\\s*[=(.])",
+      "match": "(?<![.\\w])\\b(as|on|asc|desc|inner|left|cross|right|full|outer|semi|anti|suffix|by|every|period|offset|closed|label|start_by|backward|forward|nearest|tolerance|drop_first)\\b(?!\\s*[=(.])",
       "name": "keyword.other.glr"
     },
     "assignment": {

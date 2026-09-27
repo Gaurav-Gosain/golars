@@ -47,7 +47,7 @@ syn keyword glrCommand      melt partition_by skew kurtosis approx_n_unique appr
 syn keyword glrCommand      corr cov pivot contained
 
 " Statement keywords (join types, ordering, window options).
-syn keyword glrKeyword      as on asc desc inner left cross
+syn keyword glrKeyword      as on asc desc inner left cross right full outer semi anti suffix
 syn keyword glrKeyword      every period offset by closed label start_by
 syn keyword glrKeyword      backward forward nearest tolerance drop_first
 

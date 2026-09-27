@@ -17,14 +17,14 @@
 (statement
   args: (identifier) @keyword
   (#any-of? @keyword
-    "as" "on" "asc" "desc" "inner" "left" "cross" "by" "every" "period"
+    "as" "on" "asc" "desc" "inner" "left" "cross" "right" "full" "outer" "semi" "anti" "suffix" "by" "every" "period"
     "offset" "closed" "label" "start_by" "backward" "forward" "nearest"
     "tolerance" "drop_first"))
 
 (statement
   args: (identifier) @variable
   (#not-any-of? @variable
-    "as" "on" "asc" "desc" "inner" "left" "cross" "by" "every" "period"
+    "as" "on" "asc" "desc" "inner" "left" "cross" "right" "full" "outer" "semi" "anti" "suffix" "by" "every" "period"
     "offset" "closed" "label" "start_by" "backward" "forward" "nearest"
     "tolerance" "drop_first"))
 
