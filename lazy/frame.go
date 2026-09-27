@@ -214,6 +214,7 @@ func (g LazyGroupBy) Agg(exprs ...expr.Expr) LazyFrame {
 	if g.ext.active() {
 		return g.aggExt(exprs)
 	}
+	exprs, post := liftAggWrappers(exprs, g.keys)
 	hoisted := make([]expr.Expr, 0, len(exprs))
 	rewritten := make([]expr.Expr, len(exprs))
 	nextID := 0
@@ -228,7 +229,11 @@ func (g LazyGroupBy) Agg(exprs ...expr.Expr) LazyFrame {
 	if len(hoisted) > 0 {
 		input = WithColumns{Input: input, Exprs: hoisted}
 	}
-	return LazyFrame{plan: Aggregate{Input: input, Keys: g.keys, Aggs: rewritten}}
+	var plan Node = Aggregate{Input: input, Keys: g.keys, Aggs: rewritten}
+	if post != nil {
+		plan = Projection{Input: plan, Exprs: post}
+	}
+	return LazyFrame{plan: plan}
 }
 
 // rewriteAggInput returns (rewritten agg expr, hoisted WithColumns

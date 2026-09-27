@@ -401,6 +401,15 @@ func castToFloat64(name string, arr arrow.Array, cfg config) (*series.Series, er
 		return series.BuildFloat64DirectWithValidity(name, n, cfg.alloc, func(out []float64) {
 			castUint64ToFloat64(out, raw)
 		}, nullBuf, arr.NullN())
+	case *array.Uint32:
+		// Counts and lengths are u32; sum(x) / count(x) needs this.
+		raw := x.Uint32Values()
+		nullBuf := series.CopyValidityBitmap(arr, cfg.alloc)
+		return series.BuildFloat64DirectWithValidity(name, n, cfg.alloc, func(out []float64) {
+			for i, v := range raw {
+				out[i] = float64(v)
+			}
+		}, nullBuf, arr.NullN())
 	case *array.Float32:
 		raw := x.Float32Values()
 		nullBuf := series.CopyValidityBitmap(arr, cfg.alloc)
