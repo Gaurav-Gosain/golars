@@ -43,9 +43,6 @@ type config struct {
 	// noNative forces the pqarrow reader and writer (tests compare the
 	// two paths).
 	noNative bool
-	// dictionary lists string columns row-group reads may return
-	// dictionary-encoded.
-	dictionary []string
 }
 
 func resolve(opts []Option) config {
@@ -88,13 +85,6 @@ func WithChunkSize(rows int64) Option {
 // pl.read_parquet(path, columns=[...]).
 func WithColumns(names ...string) Option {
 	return func(c *config) { c.columns = append([]string{}, names...) }
-}
-
-// withDictionary makes row-group reads return the named string columns
-// dictionary-encoded. Used by the lazy engine for columns it only
-// compares with literals.
-func withDictionary(names []string) Option {
-	return func(c *config) { c.dictionary = names }
 }
 
 // Read reads a parquet file from r into a DataFrame. r must support random

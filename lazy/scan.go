@@ -42,11 +42,6 @@ type SourceFunc struct {
 type BatchOptions struct {
 	// Columns to read; nil means all.
 	Columns []string
-	// Dictionary lists string columns the executor only compares with
-	// literals and drops right after. A source may return them
-	// dictionary-encoded (categorical), which is much cheaper to decode
-	// and compare; returning plain strings is also correct.
-	Dictionary []string
 }
 
 // BatchSource reads a source one batch at a time. ReadBatch must be safe

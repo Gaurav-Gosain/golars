@@ -29,7 +29,7 @@ func Scan(path string, opts ...Option) lazy.LazyFrame {
 		if cols == nil {
 			cols = resolve(opts).columns
 		}
-		r, err := OpenRowGroups(path, cols, append(append([]Option(nil), opts...), withDictionary(bo.Dictionary))...)
+		r, err := OpenRowGroups(path, cols, opts...)
 		if err != nil {
 			return nil, err
 		}

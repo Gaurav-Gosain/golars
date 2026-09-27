@@ -246,19 +246,31 @@ func classify(sf *pqarrow.SchemaField, md *metadata.FileMetaData) *nativeCol {
 // readNativeTable reads the projected columns of pf. Fallback columns
 // are decoded by pqarrow concurrently with the native ones.
 func readNativeTable(ctx context.Context, r io.ReaderAt, pf *file.Reader, fr *pqarrow.FileReader, cfg config) (*dataframe.DataFrame, error) {
+	return readNativeRowGroups(ctx, r, pf, fr, cfg, nil)
+}
+
+// readNativeRowGroups is readNativeTable restricted to the row groups
+// rgs (nil means all).
+func readNativeRowGroups(ctx context.Context, r io.ReaderAt, pf *file.Reader, fr *pqarrow.FileReader, cfg config,
+	rgs []int) (*dataframe.DataFrame, error) {
 	p, err := planNative(pf, fr.Manifest, cfg.columns)
 	if err != nil {
 		return nil, err
 	}
 	md := pf.MetaData()
-	nrg := md.NumRowGroups()
+	if rgs == nil {
+		rgs = make([]int, md.NumRowGroups())
+		for i := range rgs {
+			rgs[i] = i
+		}
+	}
 
 	var fbTable arrow.Table
 	var fbErr error
 	var fbWG sync.WaitGroup
 	if len(p.fbLeaves) > 0 {
 		fbWG.Go(func() {
-			fbTable, fbErr = readLeaves(ctx, fr, p.fbLeaves, nrg)
+			fbTable, fbErr = readLeaves(ctx, fr, p.fbLeaves, rgs)
 		})
 	}
 
@@ -268,7 +280,7 @@ func readNativeTable(ctx context.Context, r io.ReaderAt, pf *file.Reader, fr *pq
 			continue
 		}
 		off := 0
-		for rg := range nrg {
+		for _, rg := range rgs {
 			rgm := md.RowGroup(rg)
 			cc, err := rgm.ColumnChunk(nc.leaf)
 			if err != nil {
@@ -368,16 +380,13 @@ func releaseTable(t arrow.Table) {
 	}
 }
 
-// readLeaves decodes the given leaves of every row group with pqarrow.
-func readLeaves(ctx context.Context, fr *pqarrow.FileReader, leaves []int, nrg int) (arrow.Table, error) {
-	if nrg <= 1 {
-		rgs := make([]int, nrg)
-		for i := range rgs {
-			rgs[i] = i
-		}
+// readLeaves decodes the given leaves of the row groups rgs with
+// pqarrow.
+func readLeaves(ctx context.Context, fr *pqarrow.FileReader, leaves []int, rgs []int) (arrow.Table, error) {
+	if len(rgs) <= 1 {
 		return fr.ReadRowGroups(ctx, leaves, rgs)
 	}
-	return readRowGroupsParallel(ctx, fr, leaves, nrg)
+	return readRowGroupsParallel(ctx, fr, leaves, rgs)
 }
 
 func (nc *nativeCol) alloc(mem memory.Allocator) {

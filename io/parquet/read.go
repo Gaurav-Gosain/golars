@@ -40,7 +40,11 @@ func readTable(ctx context.Context, fr *pqarrow.FileReader, nrg int, cfg config)
 	if err != nil {
 		return nil, err
 	}
-	return readLeaves(ctx, fr, leaves, nrg)
+	rgs := make([]int, nrg)
+	for i := range rgs {
+		rgs[i] = i
+	}
+	return readLeaves(ctx, fr, leaves, rgs)
 }
 
 // readRowGroupsParallel decodes row groups concurrently (each row group
@@ -48,7 +52,8 @@ func readTable(ctx context.Context, fr *pqarrow.FileReader, nrg int, cfg config)
 // tables into one table whose columns keep one chunk per row group.
 // pqarrow alone only parallelizes over columns, which leaves most cores
 // idle for narrow projections.
-func readRowGroupsParallel(ctx context.Context, fr *pqarrow.FileReader, leaves []int, nrg int) (arrow.Table, error) {
+func readRowGroupsParallel(ctx context.Context, fr *pqarrow.FileReader, leaves []int, rgs []int) (arrow.Table, error) {
+	nrg := len(rgs)
 	tables := make([]arrow.Table, nrg)
 	errs := make([]error, nrg)
 	var next atomic.Int64
@@ -61,7 +66,7 @@ func readRowGroupsParallel(ctx context.Context, fr *pqarrow.FileReader, leaves [
 				if i >= nrg || ctx.Err() != nil {
 					return
 				}
-				tables[i], errs[i] = fr.ReadRowGroups(ctx, leaves, []int{i})
+				tables[i], errs[i] = fr.ReadRowGroups(ctx, leaves, []int{rgs[i]})
 			}
 		})
 	}

@@ -123,7 +123,7 @@ func runMorsels(ctx context.Context, cfg execConfig, fragment Node, leaf Node,
 	switch l := leaf.(type) {
 	case SourceFunc:
 		var err error
-		bs, err = l.OpenBatches(ctx, BatchOptions{Columns: l.Projection, Dictionary: dictColumns(fragment, l)})
+		bs, err = l.OpenBatches(ctx, BatchOptions{Columns: l.Projection})
 		if err != nil {
 			return nil, err
 		}

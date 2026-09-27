@@ -228,42 +228,6 @@ func TestMorselAggregateInMemoryFrame(t *testing.T) {
 	assertClose(t, gs, ws)
 }
 
-// Only string columns compared with literals in filters and dropped
-// before the fragment output are offered for dictionary reads.
-func TestMorselDictionaryColumns(t *testing.T) {
-	ctx := context.Background()
-	mem := testutil.NewCheckedAllocator(t)
-	o := series.WithAllocator(mem)
-	a, _ := series.FromString("a", []string{"x", "y", "x", "z"}, nil, o)
-	b, _ := series.FromString("b", []string{"p", "q", "p", "q"}, nil, o)
-	c, _ := series.FromString("c", []string{"m", "n", "m", "n"}, nil, o)
-	v, _ := series.FromInt64("v", []int64{1, 2, 3, 4}, nil, o)
-	df, _ := dataframe.New(a, b, c, v)
-	defer df.Release()
-	var got []string
-	load := func(_ context.Context, cols []string) (*dataframe.DataFrame, error) { return df.Select(cols...) }
-	open := func(_ context.Context, bo lazy.BatchOptions) (lazy.BatchSource, error) {
-		got = bo.Dictionary
-		return sliceBatches{df: df, size: 2, cols: bo.Columns}, nil
-	}
-	src := lazy.FromSourceBatched("s", df.Schema(), load, open)
-	lf := src.
-		Filter(expr.Col("a").Eq(expr.LitString("x")).Or(expr.Col("b").Ne(expr.LitString("q")))).
-		Filter(expr.Col("c").Str().Contains("m")).
-		Select(expr.Col("v"), expr.Col("b").Alias("bb")).
-		GroupBy("bb").Agg(expr.Col("v").Sum().Alias("s"))
-	out, err := lf.Collect(ctx, lazy.WithExecAllocator(mem))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer out.Release()
-	// a: literal comparisons only, dropped -> yes. b: reaches the output
-	// (as bb) -> no. c: read by a string function -> no.
-	if len(got) != 1 || got[0] != "a" {
-		t.Fatalf("dictionary columns = %v, want [a]", got)
-	}
-}
-
 // A column read only by a filter is dropped right after it.
 func TestFilterOnlyColumnPruned(t *testing.T) {
 	mem := testutil.NewCheckedAllocator(t)
