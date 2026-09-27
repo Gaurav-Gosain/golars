@@ -22,7 +22,7 @@ func main() {
 	}
 	defer df1.Release()
 	lf1 := lazy.FromDataFrame(df1).
-		WithColumns(expr.Col("discount").FillNullExpr(expr.LitFloat64(0)).Alias("discount_filled")).
+		WithColumns(expr.Col("discount").FillNullExpr(expr.LitFloat64(0.0)).Alias("discount_filled")).
 		WithColumns(expr.Col("unit_price").Mul(expr.LitInt64(1).Sub(expr.Col("discount_filled"))).Alias("revenue")).
 		Filter(expr.Col("revenue").Gt(expr.LitInt64(0))).
 		GroupBy("region").Agg(expr.Col("revenue").Sum().Alias("total_revenue"), expr.Col("revenue").Count().Alias("line_count")).

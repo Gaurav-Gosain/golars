@@ -11,7 +11,8 @@ load examples/script/data/salaries.csv
 with upper_name = name.str.upper()
 with starts_a   = upper_name.str.starts_with("A")
 
-# Arithmetic on numeric columns; result carries i64 dtype.
+# Arithmetic on numeric columns. `/` is true division, so monthly is
+# f64 even for an integer amount (as in polars).
 with yearly     = amount
 with monthly    = amount / 12
 

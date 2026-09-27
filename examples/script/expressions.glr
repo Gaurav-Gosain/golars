@@ -1,0 +1,54 @@
+# Tour of the glr expression language and the time-series commands.
+#
+# Every function works as a method (`ts.dt.hour()`) or as a call whose
+# first argument is the value (`dt.hour(ts)`). Namespaces: str, dt,
+# list, arr, struct, name, bin, cat. Options are keyword arguments.
+#
+# Run: golars run examples/script/expressions.glr
+
+load examples/script/data/rates.csv as rates
+load examples/script/data/events.csv
+
+# Temporal: ts is read as a datetime; signup is dd/mm/yyyy text.
+with signed_up = str.to_date(signup, "%d/%m/%Y")
+with tenure_d  = dt.total_days(dt.date(ts) - signed_up)
+with hour      = dt.hour(ts)
+with slot      = dt.strftime(dt.truncate(ts, "30m"), "%H:%M")
+
+# Lists: split a delimited string, then work on the list.
+with ntags     = list.len(str.split(tags, ";"))
+with main_tag  = str.split(tags, ";").list.first()
+with has_api   = list.contains(str.split(tags, ";"), "api")
+
+# Binning, conditionals and integer operators.
+with size      = cut(amount, [20, 100], labels=["small", "medium", "large"])
+with bucket    = amount // 50 * 50
+with parity    = when amount % 2 == 0 then "even" otherwise "odd"
+with label     = concat_str(str.to_uppercase(user), size, separator="/")
+drop tags, signup
+show
+
+# Predicates use the same language.
+filter user in ["ada", "bo"] and not has_api
+select ts, user, amount, size, share = amount / amount.sum()
+show
+# reset drops the pending steps: back to the events as loaded.
+reset
+
+# Asof join: each event picks the latest rate for its user at or
+# before the event time.
+join_asof rates on ts by user tolerance 2h
+with value = round(amount * rate, 2)
+select ts, user, amount, rate, value
+show
+stash priced
+
+# Hourly windows over the priced events.
+group_by_dynamic ts every 1h amount:sum:total value:sum:value n=amount.count()
+show
+
+# One-hot encode a category.
+use priced
+select user, amount
+to_dummies user
+show

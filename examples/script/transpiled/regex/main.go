@@ -31,17 +31,17 @@ func main() {
 		log.Fatal(err)
 	}
 	defer df2.Release()
-	lf2 := lazy.FromDataFrame(df2).Filter(expr.Col("name").Str().Contains("a"))
-	display(ctx, lf2.Limit(10))
+	lf3 := lazy.FromDataFrame(df2).Filter(expr.Col("name").Str().Contains("a"))
+	display(ctx, lf3.Limit(10))
 	df3, err := golars.ReadCSV("examples/script/data/people.csv", csv.WithNullValues(""))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer df3.Release()
-	lf3 := lazy.FromDataFrame(df3).
+	lf5 := lazy.FromDataFrame(df3).
 		WithColumns(expr.Col("name").Str().ContainsRegex("[aeiou]").Alias("matches_vowel")).
 		Filter(expr.Col("matches_vowel"))
-	display(ctx, lf3.Limit(10))
+	display(ctx, lf5.Limit(10))
 }
 
 // display collects and prints lf, releasing the result on return.
