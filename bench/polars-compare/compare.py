@@ -131,6 +131,9 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--runs", type=int, default=3,
                    help="invocations per engine (default 3)")
+    p.add_argument("--rust-bin", default="",
+                   help="use this polars-rust-bench binary instead of the cargo target one "
+                        "(useful when several checkouts share CARGO_TARGET_DIR)")
     p.add_argument("--skip-build", action="store_true",
                    help="reuse already-built binaries")
     p.add_argument("--pin-cores", default="",
@@ -250,7 +253,7 @@ def main() -> int:
     rust_dir = repo / "bench" / "polars-rust"
     # cargo honors CARGO_TARGET_DIR; look for the binary where cargo put it.
     target_dir = Path(os.environ.get("CARGO_TARGET_DIR") or (rust_dir / "target"))
-    rust_bin = target_dir / "release" / "polars-rust-bench"
+    rust_bin = Path(args.rust_bin) if args.rust_bin else target_dir / "release" / "polars-rust-bench"
 
     nr = args.runs
 

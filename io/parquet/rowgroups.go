@@ -38,8 +38,15 @@ func OpenRowGroups(path string, columns []string, opts ...Option) (*RowGroupRead
 		return nil, fmt.Errorf("parquet: read: %w", err)
 	}
 	// Columns of one row group decode in parallel; row groups themselves
-	// are spread over workers by the caller.
-	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: readBatchSize, PreAllocBinaryData: true}
+	// are spread over workers by the caller. The decode buffers are
+	// reserved for BatchSize rows up front, so size them to the largest
+	// row group rather than the 1M rows a whole-file read uses: with a
+	// worker per core the difference is hundreds of megabytes.
+	batch := int64(1)
+	for i := range pf.NumRowGroups() {
+		batch = max(batch, pf.MetaData().RowGroup(i).NumRows())
+	}
+	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: min(batch, readBatchSize), PreAllocBinaryData: true}
 	fr, err := pqarrow.NewFileReader(pf, props, cfg.alloc)
 	if err != nil {
 		f.Close()
