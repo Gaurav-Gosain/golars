@@ -569,7 +569,7 @@ eager `series.*Ops` types.
 | `df.iter_columns` | `df.IterColumns` | done |  |
 | `df.iter_rows` | `df.IterRows` | done |  |
 | `df.iter_slices` | `df.IterSlices` | done |  |
-| `df.join` | `df.Join` | partial | single key; inner, left and cross only (no right, full, semi, anti) |
+| `df.join` | `df.Join` | partial | keys are column names (WithJoinKeys for left_on/right_on), not expressions |
 | `df.join_asof` | `df.JoinAsof` | done |  |
 | `df.join_where` | `df.JoinWhere` | done |  |
 | `df.lazy` | `golars.Lazy` | done |  |
@@ -677,7 +677,7 @@ eager `series.*Ops` types.
 | `lf.head` | `lf.Head` | done |  |
 | `lf.inspect` | `lf.Inspect` | done |  |
 | `lf.interpolate` |  | todo |  |
-| `lf.join` | `lf.Join` | partial | single key; inner, left and cross only (no right, full, semi, anti) |
+| `lf.join` | `lf.Join` | partial | keys are column names (WithJoinKeys for left_on/right_on), not expressions |
 | `lf.join_asof` | `lf.JoinAsof` | done |  |
 | `lf.join_where` | `lf.JoinWhere` | done |  |
 | `lf.last` | `lf.Last` | done |  |
@@ -1437,10 +1437,10 @@ Every `todo` row from the tables above, grouped by surface.
 Partial rows, where golars covers a narrower form:
 
 - `meta`: package functions, not a namespace: OutputName, ReferencedColumns, IsMultiColumn, Equal
-- `df.join`: single key; inner, left and cross only (no right, full, semi, anti)
+- `df.join`: keys are column names (WithJoinKeys for left_on/right_on), not expressions
 - `df.select`: takes column names; use golars.SelectExpr for expressions
 - `df.with_columns`: takes Series; use golars.WithColumnsExpr for expressions
-- `lf.join`: single key; inner, left and cross only (no right, full, semi, anti)
+- `lf.join`: keys are column names (WithJoinKeys for left_on/right_on), not expressions
 - `pl.cum_count`: method only: Col(x).CumCount()
 - `pl.cum_sum`: horizontal form; for one column use Col(x).CumSum()
 - `pl.from_dicts`: reverse direction only; build frames with FromMap

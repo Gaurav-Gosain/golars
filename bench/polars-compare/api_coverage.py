@@ -350,12 +350,12 @@ PARTIAL: dict[str, dict[str, tuple[str, str]]] = {
         ),
     },
     "dataframe": {
-        "join": ("Join", "single key; inner, left and cross only (no right, full, semi, anti)"),
+        "join": ("Join", "keys are column names (WithJoinKeys for left_on/right_on), not expressions"),
         "select": ("Select", "takes column names; use golars.SelectExpr for expressions"),
         "with_columns": ("WithColumns", "takes Series; use golars.WithColumnsExpr for expressions"),
     },
     "lazyframe": {
-        "join": ("Join", "single key; inner, left and cross only (no right, full, semi, anti)"),
+        "join": ("Join", "keys are column names (WithJoinKeys for left_on/right_on), not expressions"),
     },
     "toplevel": {
         "union": ("golars.Concat", "vertical concat; polars union does not keep order"),

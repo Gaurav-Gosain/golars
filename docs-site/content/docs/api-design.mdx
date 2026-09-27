@@ -156,7 +156,7 @@ show
 
 `cmd/golars` is the reference host: `golars run path.glr` runs a file one-shot and exits, `.source path.glr` runs one inline from the REPL. Third-party programs plug in via `script.ExecutorFunc`.
 
-Multi-source: `load PATH as NAME` stages a frame in a registry without promoting it to focus; `use NAME` focuses a clone of it and leaves NAME in the registry, discarding the prior focus (run `stash NAME` first to keep it); `join PATH|NAME on KEY` looks up a staged frame by name (it joins a clone, so NAME stays staged) before trying it as a path. See the full language reference in [`docs/scripting.md`](/docs/scripting). A Tree-sitter grammar + highlight queries ship at [`editors/tree-sitter-golars/`](https://github.com/Gaurav-Gosain/golars/tree/main/editors/tree-sitter-golars) for editor integrations.
+Multi-source: `load PATH as NAME` stages a frame in a registry without promoting it to focus; `use NAME` focuses a clone of it and leaves NAME in the registry, discarding the prior focus (run `stash NAME` first to keep it); `join PATH|NAME on KEYS` looks up a staged frame by name (it joins a clone, so NAME stays staged) before trying it as a path. See the full language reference in [`docs/scripting.md`](/docs/scripting). A Tree-sitter grammar + highlight queries ship at [`editors/tree-sitter-golars/`](https://github.com/Gaurav-Gosain/golars/tree/main/editors/tree-sitter-golars) for editor integrations.
 
 
 ## Nullability and zero values

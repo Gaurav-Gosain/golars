@@ -65,10 +65,12 @@ Group-by: hash group-by over dictionary-encoded keys, with
 partition-parallel aggregation above a row cutoff. Primitive, string
 and categorical keys, multiple keys, multiple aggregates.
 
-Joins: inner, left, cross (hash join with parallel build and probe),
+Joins: inner, left, right, full, semi, anti and cross, on one or
+more keys (hash join with parallel build and probe), with polars'
+suffix, coalesce, nulls_equal, validate and maintain_order options;
 asof (`JoinAsof`, with `By` groups, tolerance and
 backward/forward/nearest strategies) and inequality joins
-(`JoinWhere`). Outer, semi and anti joins are not implemented yet.
+(`JoinWhere`).
 
 IO: CSV (native parallel reader that parses record-aligned chunks
 straight into arrow buffers; arrow-go handles writing and a few reader
@@ -189,7 +191,6 @@ Shipped:
 
 Pending:
 
-- Outer, semi and anti joins
 - Object-store scans (S3, GCS, Azure)
 - Delta Lake and Iceberg read paths
 - Excel/Avro adapters
