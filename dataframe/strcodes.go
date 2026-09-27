@@ -140,6 +140,23 @@ func (e *strEncoder) encodeRange(start, end int, out []int32) {
 			continue
 		}
 		if t-s <= 15 {
+			// Hit path of midCode inlined: pack both words with two
+			// in-bounds loads and check the first probe slot. Misses,
+			// collisions and keys near the end of data take midCode.
+			if int(s)+16 <= len(data) {
+				lo := binary.LittleEndian.Uint64(data[s:])
+				n := uint(t - s - 8)
+				hi := binary.LittleEndian.Uint64(data[s+8:])&(uint64(1)<<(8*n)-1) | uint64(n)<<56 | 1<<63
+				h := pairHash(lo, hi)
+				slots := e.mid.slots
+				sl := slots[(h>>e.mid.shift)&uint64(len(slots)-1)]
+				if sl>>32 == pairTag(h) {
+					if en := &e.mid.entries[uint32(sl)-1]; en.lo == lo && en.hi == hi {
+						out[i-start] = en.code
+						continue
+					}
+				}
+			}
 			out[i-start] = e.midCode(i, s, t)
 			continue
 		}

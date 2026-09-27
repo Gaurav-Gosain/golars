@@ -201,3 +201,24 @@ func TestEncodeStringCodesPartitionedMatchesSerial(t *testing.T) {
 		s.Release()
 	}
 }
+
+func TestEstimateDistinct(t *testing.T) {
+	for _, card := range []int{1, 1000, 100_000, 262_144, 500_000} {
+		n := max(card*2, 1000)
+		sk := make([]uint64, strSketchWords)
+		r := rand.New(rand.NewPCG(1, uint64(card)))
+		keys := make([]uint64, card)
+		for i := range keys {
+			keys[i] = r.Uint64()
+		}
+		for i := range n {
+			h := keys[i%card]
+			b := (h * 0xD6E8FEB86659FD93) >> (64 - strSketchBits)
+			sk[b>>6] |= 1 << (b & 63)
+		}
+		got := estimateDistinct([][]uint64{sk}, n)
+		if lo, hi := card*9/10, card*11/10+2; got < lo || got > hi {
+			t.Fatalf("card=%d: estimate %d outside [%d, %d]", card, got, lo, hi)
+		}
+	}
+}

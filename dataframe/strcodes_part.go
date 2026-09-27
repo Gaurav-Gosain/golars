@@ -1,6 +1,7 @@
 package dataframe
 
 import (
+	"math"
 	mbits "math/bits"
 	"slices"
 
@@ -99,7 +100,17 @@ func (e *strEncoder) encodeBucketRows(hashes []uint64, bucket []uint8, b int, ou
 				}
 			case t-s <= 15:
 				lo, hi := packMid(data, s, t)
-				code, inserted = e.mid.insertOrGet(lo, hi, hashes[i], int32(len(e.firstRows)))
+				h := hashes[i]
+				// First probe inlined; see encodeRange.
+				slots := e.mid.slots
+				sl := slots[(h>>e.mid.shift)&uint64(len(slots)-1)]
+				if sl>>32 == pairTag(h) {
+					if en := &e.mid.entries[uint32(sl)-1]; en.lo == lo && en.hi == hi {
+						code = en.code
+						break
+					}
+				}
+				code, inserted = e.mid.insertOrGet(lo, hi, h, int32(len(e.firstRows)))
 			default:
 				code, inserted = e.long.insertOrGet(data, s, t, hashes[i], int32(len(e.firstRows)))
 			}
@@ -111,6 +122,49 @@ func (e *strEncoder) encodeBucketRows(hashes []uint64, bucket []uint8, b int, ou
 			out[i] = code
 		}
 	}
+}
+
+// The distinct-key estimate uses linear counting over a bitmap of
+// 1 << strSketchBits bits (32 KB per worker).
+const (
+	strSketchBits  = 18
+	strSketchWords = 1 << strSketchBits / 64
+)
+
+// estimateDistinct ORs the per-worker sketches (returning them to the
+// scratch pool) and applies linear counting: with z of m bits still
+// zero, about m*ln(m/z) distinct hashes were seen. A full bitmap means
+// more keys than the sketch can tell apart, so the estimate falls back
+// to n.
+func estimateDistinct(sketches [][]uint64, n int) int {
+	var acc []uint64
+	for _, sk := range sketches {
+		if sk == nil {
+			continue
+		}
+		if acc == nil {
+			acc = sk
+			continue
+		}
+		for i, w := range sk {
+			acc[i] |= w
+		}
+		uint64Scratch.put(sk)
+	}
+	if acc == nil {
+		return 0
+	}
+	ones := 0
+	for _, w := range acc {
+		ones += mbits.OnesCount64(w)
+	}
+	uint64Scratch.put(acc)
+	const m = 1 << strSketchBits
+	zeros := m - ones
+	if zeros == 0 {
+		return n
+	}
+	return min(int(m*math.Log(float64(m)/float64(zeros)))+1, n)
 }
 
 // strPartitioned holds the result of the partition phase shared by the
@@ -138,14 +192,21 @@ func partitionStrings(arr *array.String, codes []int32) strPartitioned {
 	proto.release()
 	// classRows[p] counts worker p's rows of at most 7, 8 to 15 and more
 	// bytes, which decides how to split the table presize below.
+	// sketches[p] is a linear-counting bitmap of worker p's hashes, used
+	// to estimate the number of distinct keys.
 	classRows := make([][3]int, k)
+	sketches := make([][]uint64, k)
 	runChunks(n, k, func(p, s, e int) {
 		var c [3]int
 		offs := proto.offs
+		sk := uint64Scratch.get(strSketchWords)
+		clear(sk)
 		for i := s; i < e; i++ {
 			h := proto.strRowHash(i)
 			hashes[i] = h
 			bucket[i] = uint8(strBucketOf(h))
+			b := (h * 0xD6E8FEB86659FD93) >> (64 - strSketchBits)
+			sk[b>>6] |= 1 << (b & 63)
 			switch l := offs[i+1] - offs[i]; {
 			case l <= 7:
 				c[0]++
@@ -156,6 +217,7 @@ func partitionStrings(arr *array.String, codes []int32) strPartitioned {
 			}
 		}
 		classRows[p] = c
+		sketches[p] = sk
 	})
 	var class [3]int
 	for _, c := range classRows {
@@ -163,13 +225,16 @@ func partitionStrings(arr *array.String, codes []int32) strPartitioned {
 		class[1] += c[1]
 		class[2] += c[2]
 	}
+	distinct := estimateDistinct(sketches, n)
 
 	const parts = 1 << strPartBits
 	encs := make([]*strEncoder, parts)
-	// The sampler already saw high cardinality, so presize each
-	// partition's tables to skip most of the growth steps, splitting the
-	// estimate over the length classes in proportion to their rows.
-	hint := max(min(n/(parts*4), 1<<16), 1024)
+	// Presize each partition's tables for its share of the estimated
+	// distinct keys (plus slack for the estimate's error), split over
+	// the length classes in proportion to their rows. Too small a table
+	// rehashes as it grows; too large a one spreads probes over more
+	// cache lines than the keys need.
+	hint := max(distinct/parts+distinct/(parts*8), 64)
 	classHint := func(c int) int { return max(int(int64(hint)*int64(class[c])/int64(n)), 16) }
 	runChunks(parts, parts, func(b, _, _ int) {
 		e := newStrEncoderSized(arr, classHint(0), classHint(1), classHint(2))
