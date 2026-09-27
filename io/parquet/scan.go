@@ -18,12 +18,31 @@ import (
 // footer cannot be read yet, the schema is left unknown and errors
 // surface at Collect as before.
 func Scan(path string, opts ...Option) lazy.LazyFrame {
-	return lazy.FromSourceProjected("parquet:"+path, scanSchema(path, opts), func(ctx context.Context, cols []string) (*dataframe.DataFrame, error) {
+	load := func(ctx context.Context, cols []string) (*dataframe.DataFrame, error) {
 		if cols == nil {
 			return ReadFile(ctx, path, opts...)
 		}
 		return ReadFile(ctx, path, append(append([]Option(nil), opts...), WithColumns(cols...))...)
-	})
+	}
+	open := func(_ context.Context, cols []string) (lazy.BatchSource, error) {
+		if cols == nil {
+			cols = resolve(opts).columns
+		}
+		r, err := OpenRowGroups(path, cols, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return rowGroupBatches{r}, nil
+	}
+	return lazy.FromSourceBatched("parquet:"+path, scanSchema(path, opts), load, open)
+}
+
+// rowGroupBatches adapts RowGroupReader to lazy.BatchSource.
+type rowGroupBatches struct{ *RowGroupReader }
+
+func (b rowGroupBatches) NumBatches() int { return b.NumRowGroups() }
+func (b rowGroupBatches) ReadBatch(ctx context.Context, i int) (*dataframe.DataFrame, error) {
+	return b.Read(ctx, i)
 }
 
 func scanSchema(path string, opts []Option) *schema.Schema {

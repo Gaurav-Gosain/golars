@@ -90,6 +90,12 @@ func executeNodeProfiled(ctx context.Context, cfg execConfig, n Node) (*datafram
 }
 
 func executeNodeRaw(ctx context.Context, cfg execConfig, n Node) (*dataframe.DataFrame, error) {
+	switch n.(type) {
+	case Filter, WithColumns, Projection, Rename, Drop:
+		if out, ok, err := tryMorselChain(ctx, cfg, n); ok {
+			return out, err
+		}
+	}
 	switch node := n.(type) {
 	case DataFrameScan:
 		return executeScan(ctx, cfg, node)
@@ -149,6 +155,11 @@ func executeNodeRaw(ctx context.Context, cfg execConfig, n Node) (*dataframe.Dat
 }
 
 func executeAggregate(ctx context.Context, cfg execConfig, a Aggregate) (*dataframe.DataFrame, error) {
+	if len(a.Keys) > 0 {
+		if out, ok, err := tryMorselAggregate(ctx, cfg, a.Input, a.Keys, a.Aggs); ok {
+			return out, err
+		}
+	}
 	input, err := executeNode(ctx, cfg, a.Input)
 	if err != nil {
 		return nil, err
@@ -216,6 +227,9 @@ func executeScan(ctx context.Context, cfg execConfig, s DataFrameScan) (*datafra
 }
 
 func executeProjection(ctx context.Context, cfg execConfig, p Projection) (*dataframe.DataFrame, error) {
+	if out, ok, err := tryMorselAggregate(ctx, cfg, p.Input, nil, p.Exprs); ok {
+		return out, err
+	}
 	input, err := executeNode(ctx, cfg, p.Input)
 	if err != nil {
 		return nil, err

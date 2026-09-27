@@ -31,6 +31,20 @@ type SourceFunc struct {
 	LoadColumns func(ctx context.Context, cols []string) (*dataframe.DataFrame, error)
 	// Projection is the pushed-down column subset. Empty means all.
 	Projection []string
+	// OpenBatches, when non-nil, opens the source for morsel reads of
+	// the named columns (nil means all). Sources stored as independent
+	// pieces (parquet row groups) set it so the executor can filter,
+	// project and pre-aggregate one piece at a time; see morsel.go.
+	OpenBatches func(ctx context.Context, cols []string) (BatchSource, error)
+}
+
+// BatchSource reads a source one batch at a time. ReadBatch must be safe
+// for concurrent calls with different indices; every batch has the
+// same schema.
+type BatchSource interface {
+	NumBatches() int
+	ReadBatch(ctx context.Context, i int) (*dataframe.DataFrame, error)
+	Close() error
 }
 
 func (SourceFunc) isLogicalNode()   {}
@@ -148,10 +162,20 @@ func FromSource(name string, known *schema.Schema, load func(context.Context) (*
 // exact columns the rest of the plan references (in the source's
 // schema order when the schema is known, otherwise sorted by name).
 func FromSourceProjected(name string, known *schema.Schema, loadCols func(ctx context.Context, cols []string) (*dataframe.DataFrame, error)) LazyFrame {
+	return FromSourceBatched(name, known, loadCols, nil)
+}
+
+// FromSourceBatched is FromSourceProjected for sources that can also be
+// read in independent batches (see BatchSource). openBatches may be nil.
+func FromSourceBatched(name string, known *schema.Schema,
+	loadCols func(ctx context.Context, cols []string) (*dataframe.DataFrame, error),
+	openBatches func(ctx context.Context, cols []string) (BatchSource, error),
+) LazyFrame {
 	return LazyFrame{plan: SourceFunc{
 		Name:        name,
 		KnownSchema: known,
 		Load:        func(ctx context.Context) (*dataframe.DataFrame, error) { return loadCols(ctx, nil) },
 		LoadColumns: loadCols,
+		OpenBatches: openBatches,
 	}}
 }
