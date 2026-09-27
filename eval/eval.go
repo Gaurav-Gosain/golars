@@ -211,7 +211,12 @@ func evalUnary(ctx context.Context, ec EvalContext, n expr.UnaryNode, df *datafr
 			return out, err
 		}
 		switch inner.DType().ID() {
-		case dtype.Int32().ID(), dtype.Int64().ID():
+		case dtype.Int64().ID():
+			// Scalar kernel: no n-row column of -1 to build.
+			return compute.MulLit(ctx, inner, int64(-1), kernelOpts(ec)...)
+		case dtype.Float64().ID():
+			return compute.MulLit(ctx, inner, float64(-1), kernelOpts(ec)...)
+		case dtype.Int32().ID():
 			one, err := series.FromInt64("one", fillInt64(-1, inner.Len()), nil,
 				series.WithAllocator(ec.Alloc))
 			if err != nil {
@@ -219,7 +224,7 @@ func evalUnary(ctx context.Context, ec EvalContext, n expr.UnaryNode, df *datafr
 			}
 			defer one.Release()
 			return compute.Mul(ctx, inner, one, kernelOpts(ec)...)
-		case dtype.Float32().ID(), dtype.Float64().ID():
+		case dtype.Float32().ID():
 			one, err := series.FromFloat64("one", fillFloat64(-1, inner.Len()), nil,
 				series.WithAllocator(ec.Alloc))
 			if err != nil {

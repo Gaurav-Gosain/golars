@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
@@ -594,26 +596,22 @@ func scatterFloat64Over(
 			}
 		}
 	}
+	// Outputs are written straight into the arrow buffer. A group whose
+	// values are all null has a null mean, min and max (its sum is 0,
+	// as in polars).
 	switch op {
 	case expr.AggSum:
-		out := make([]float64, height)
-		for i := range height {
-			out[i] = sums[rowToGroup[i]]
-		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, sums, nil, ec)
 	case expr.AggMean:
-		out := make([]float64, height)
-		for i := range height {
-			g := rowToGroup[i]
-			c := counts[g]
-			if c == 0 {
-				continue
+		means := make([]float64, len(sums))
+		valid := make([]bool, len(sums))
+		for g, c := range counts {
+			if c > 0 {
+				means[g] = sums[g] / float64(c)
+				valid[g] = true
 			}
-			out[i] = sums[g] / float64(c)
 		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, means, valid, ec)
 	case expr.AggCount:
 		outI := make([]uint32, height)
 		for i := range height {
@@ -622,19 +620,9 @@ func scatterFloat64Over(
 		s, err := series.FromUint32(outName, outI, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggMin:
-		out := make([]float64, height)
-		for i := range height {
-			out[i] = mins[rowToGroup[i]]
-		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, mins, seen, ec)
 	case expr.AggMax:
-		out := make([]float64, height)
-		for i := range height {
-			out[i] = maxs[rowToGroup[i]]
-		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, maxs, seen, ec)
 	}
 	return nil, false, nil
 }
@@ -736,3 +724,39 @@ func scatterInt64SumOver(
 // shift/mul sequence, so this is a 12-cycle saving per hash probe.
 // Measured at ~20% faster on the SumOverGroup hot loop.
 const goldenRatio64 uint64 = 0x9E3779B97F4A7C15
+
+// scatterGroupFloat64 builds the per-row column holding each row's group
+// value. groupValid, when non-nil, marks groups whose value is null.
+func scatterGroupFloat64(name string, height int, rowToGroup []int32, groupVals []float64, groupValid []bool, ec EvalContext) (*series.Series, bool, error) {
+	fill := func(out []float64) {
+		for i, g := range rowToGroup[:height] {
+			out[i] = groupVals[g]
+		}
+	}
+	allValid := true
+	for _, v := range groupValid {
+		allValid = allValid && v
+	}
+	mem := ec.Alloc
+	if mem == nil {
+		mem = memory.DefaultAllocator
+	}
+	if allValid {
+		s, err := series.BuildFloat64Direct(name, height, mem, fill)
+		return s, true, err
+	}
+	nulls := memory.NewResizableBuffer(mem)
+	nulls.Resize(int(bitutil.BytesForBits(int64(height))))
+	bits := nulls.Bytes()
+	clear(bits)
+	nullCount := 0
+	for i, g := range rowToGroup[:height] {
+		if groupValid[g] {
+			bitutil.SetBit(bits, i)
+		} else {
+			nullCount++
+		}
+	}
+	s, err := series.BuildFloat64DirectWithValidity(name, height, mem, fill, nulls, nullCount)
+	return s, true, err
+}
