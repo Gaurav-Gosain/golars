@@ -9,6 +9,7 @@ import (
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -20,6 +21,12 @@ func isNaN(v float64) bool { return v != v }
 // series kernel. Multi-arg functions (fill_null with another Expr)
 // evaluate each arg first.
 func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *dataframe.DataFrame) (*series.Series, error) {
+	if isTemporalFunction(n.Name) {
+		return evalTemporalFunction(ctx, ec, n, df)
+	}
+	if fn, ok := coreFuncs[n.Name]; ok {
+		return fn(ctx, ec, n, df)
+	}
 	// Argless constructors: int_range, ones, zeros don't reference a
 	// column. Handle before the len==0 guard below.
 	switch n.Name {
@@ -33,6 +40,8 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		return evalCoalesce(ctx, ec, n, df)
 	case "concat_str":
 		return evalConcatStr(ctx, ec, n, df)
+	case "struct.field_ref":
+		return evalFieldRef(ctx, n)
 	}
 	if len(n.Args) == 0 {
 		return nil, fmt.Errorf("eval: function %q requires at least one argument", n.Name)
@@ -47,6 +56,9 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 	}
 	if len(n.Name) > 7 && n.Name[:7] == "struct." {
 		return evalStructFunction(ctx, ec, n, df)
+	}
+	if out, ok, err := evalNamespaceFunction(ctx, ec, n, df); ok {
+		return out, err
 	}
 	arg0, err := evalNode(ctx, ec, n.Args[0], df)
 	if err != nil {
@@ -196,6 +208,7 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 				length = x
 			}
 		}
+		off, length = series.ClampSlice(off, length, arg0.Len())
 		out, err := arg0.Slice(off, length)
 		releaseOnErr = nil
 		arg0.Release()
@@ -221,6 +234,12 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 			return nil, err
 		}
 		defer fillArg.Release()
+		if fillArg.Len() > 1 && fillArg.Len() == arg0.Len() {
+			// A column-valued fill (fill_null(col("b"))) fills row by row.
+			releaseOnErr = nil
+			defer arg0.Release()
+			return fillNullFrom(ctx, ec, arg0, fillArg)
+		}
 		// Extract the first element of fillArg as the fill scalar.
 		v := scalarOf(fillArg)
 		out, err := arg0.FillNull(v, opt)
@@ -568,9 +587,20 @@ func evalScalarAgg(n expr.FunctionNode, s *series.Series) (*series.Series, error
 		}
 		return series.FromBool(s.Name(), []bool{v}, nil)
 	case "product":
+		// polars: integer products are i64, f32 stays f32.
+		if s.DType().IsInteger() {
+			v, err := s.ProductInt64()
+			if err != nil {
+				return nil, err
+			}
+			return series.FromInt64(s.Name(), []int64{v}, nil)
+		}
 		v, err := s.Product()
 		if err != nil {
 			return nil, err
+		}
+		if s.DType().Equal(dtype.Float32()) {
+			return series.FromFloat32(s.Name(), []float32{float32(v)}, nil)
 		}
 		return series.FromFloat64(s.Name(), []float64{v}, nil)
 	case "quantile":

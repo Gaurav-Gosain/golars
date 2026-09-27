@@ -59,9 +59,15 @@ func rowsByStringKey(t *testing.T, df *dataframe.DataFrame, keyCol, valCol strin
 	}
 	out := make(map[string]int64, df.Height())
 	kArr := k.Chunk(0).(*array.String)
-	vArr := v.Chunk(0).(*array.Int64)
 	for i := range kArr.Len() {
-		out[kArr.Value(i)] = vArr.Value(i)
+		switch vArr := v.Chunk(0).(type) {
+		case *array.Int64:
+			out[kArr.Value(i)] = vArr.Value(i)
+		case *array.Uint32: // count columns are u32, as in polars
+			out[kArr.Value(i)] = int64(vArr.Value(i))
+		default:
+			t.Fatalf("column %q: unexpected dtype %s", valCol, v.DType())
+		}
 	}
 	return out
 }
@@ -315,7 +321,14 @@ func TestParityGroupByMultiKeyBruteForce(t *testing.T) {
 	}
 	mVals := ms.Chunk(0).(*array.Float64)
 	miArr, maArr := col("mi"), col("ma")
-	cArr, ncArr := col("c"), col("nc")
+	u32col := func(name string) *array.Uint32 {
+		s, err := out.Column(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.Chunk(0).(*array.Uint32)
+	}
+	cArr, ncArr := u32col("c"), u32col("nc")
 	fArr, lArr := col("f"), col("l")
 	for i, k := range order {
 		if regVals.IsValid(i) != k.hasReg || (k.hasReg && regVals.Value(i) != k.region) {
@@ -328,10 +341,10 @@ func TestParityGroupByMultiKeyBruteForce(t *testing.T) {
 		if v := sArr.Value(i); v != a.sum {
 			t.Fatalf("row %d sum=%d want %d", i, v, a.sum)
 		}
-		if v := cArr.Value(i); v != a.count {
+		if v := int64(cArr.Value(i)); v != a.count {
 			t.Fatalf("row %d count=%d want %d", i, v, a.count)
 		}
-		if v := ncArr.Value(i); v != a.nullCount {
+		if v := int64(ncArr.Value(i)); v != a.nullCount {
 			t.Fatalf("row %d nullcount=%d want %d", i, v, a.nullCount)
 		}
 		if a.count == 0 {

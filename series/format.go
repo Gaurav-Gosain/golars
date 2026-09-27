@@ -128,6 +128,9 @@ func renderSeriesCell(arr any, i int, maxRune int) string {
 		}
 	case *array.String:
 		s = strconv.Quote(a.Value(i))
+	case *array.Dictionary:
+		// Categorical / Enum: show the decoded category like a string.
+		s = strconv.Quote(a.ValueStr(i))
 	default:
 		if v, ok := arr.(interface{ ValueStr(int) string }); ok {
 			s = v.ValueStr(i)

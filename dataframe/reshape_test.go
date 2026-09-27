@@ -66,14 +66,19 @@ func TestDataFrameTopKTiesAndNulls(t *testing.T) {
 		}
 	}
 
-	// Null keys never rank, even when k covers the frame.
+	// polars: null keys rank after every value and only appear when k
+	// exceeds the non-null count.
 	all, err := df.TopK(context.Background(), 99, "v")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer all.Release()
-	if all.Height() != 5 {
-		t.Fatalf("height = %d, want 5 (null excluded)", all.Height())
+	if all.Height() != 6 {
+		t.Fatalf("height = %d, want 6", all.Height())
+	}
+	ids, _ := all.Column("id")
+	if last := ids.Chunk(0).(*array.Int64).Value(5); last != 1 {
+		t.Fatalf("last id = %d, want 1 (the null key)", last)
 	}
 }
 

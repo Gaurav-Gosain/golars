@@ -8,6 +8,9 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	"github.com/Gaurav-Gosain/golars/internal/mempool"
+	"github.com/Gaurav-Gosain/golars/internal/radix"
 )
 
 // RankMethod controls how ties are broken in Rank. Polars-compatible
@@ -32,6 +35,11 @@ const (
 // default; tie handling follows `method`. Nulls stay null.
 func (s *Series) Rank(method RankMethod, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
+	if a, ok := s.Chunk(0).(*array.Int64); ok && a.NullN() == 0 && s.NumChunks() == 1 {
+		if out, ok, err := rankPackedInt64(s.Name(), a.Int64Values(), method, cfg.alloc); ok {
+			return out, err
+		}
+	}
 	idx, err := s.ArgSort()
 	if err != nil {
 		return nil, err
@@ -107,6 +115,56 @@ func fillRanks(ranks []float64, valid []bool, idx []int, i, j, dense int, method
 		ranks[pos] = rv
 		valid[pos] = true
 	}
+}
+
+// rankPackedInt64 ranks a no-null int64 column through one radix sort
+// of packed (value, row) words. The tie-group walk then reads keys and
+// rows straight from the sorted words instead of gathering vals[idx[j]]
+// at random, and the output buffer comes from the hot pool since every
+// slot is written. ok=false when the value span is too wide to pack.
+func rankPackedInt64(name string, vals []int64, method RankMethod, alloc memory.Allocator) (*Series, bool, error) {
+	packed, idxBits, sigBits, ok := packInt64Keys(vals)
+	if !ok {
+		return nil, false, nil
+	}
+	radix.SortUint64(packed, sigBits)
+	n := len(vals)
+	mask := uint64(1)<<idxBits - 1
+	out, err := BuildFloat64Direct(name, n, mempool.Pooling(alloc), func(ranks []float64) {
+		ranks = ranks[:n]
+		dense := 0
+		i := 0
+		for i < n {
+			key := packed[i] >> idxBits
+			j := i + 1
+			for j < n && packed[j]>>idxBits == key {
+				j++
+			}
+			if method == RankOrdinal {
+				for k := i; k < j; k++ {
+					ranks[packed[k]&mask] = float64(k + 1)
+				}
+			} else {
+				var rv float64
+				switch method {
+				case RankAverage:
+					rv = float64(i+1) + float64(j-i-1)/2
+				case RankMin:
+					rv = float64(i + 1)
+				case RankMax:
+					rv = float64(j)
+				default:
+					rv = float64(dense + 1)
+				}
+				for k := i; k < j; k++ {
+					ranks[packed[k]&mask] = rv
+				}
+			}
+			dense++
+			i = j
+		}
+	})
+	return out, true, err
 }
 
 // rankSortedInt64 assigns ranks over a no-null int64 column given its
@@ -737,7 +795,7 @@ func (s *Series) ApplyFloat64(fn func(float64) float64, opts ...Option) (*Series
 	}
 	n := a.Len()
 	valid := validFromChunk(a)
-	return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
+	return BuildFloat64DirectNullable(s.Name(), n, cfg.alloc, func(out []float64) {
 		raw := a.Float64Values()
 		for i := range n {
 			if valid != nil && !valid[i] {
@@ -745,7 +803,7 @@ func (s *Series) ApplyFloat64(fn func(float64) float64, opts ...Option) (*Series
 			}
 			out[i] = fn(raw[i])
 		}
-	})
+	}, valid)
 }
 
 // ApplyString is the utf8 counterpart.

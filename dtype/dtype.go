@@ -73,6 +73,10 @@ func timeUnitFromArrow(u arrow.TimeUnit) TimeUnit {
 // when Equal returns true; they are not required to be == comparable.
 type DType struct {
 	inner arrow.DataType
+	// enum carries the fixed categories of a dtype built by Enum. It is
+	// nil for every other dtype, including an Enum dtype read back from
+	// an arrow array (the categories then live in the array dictionary).
+	enum *enumInfo
 }
 
 // FromArrow wraps an existing arrow.DataType into a DType.
@@ -102,6 +106,9 @@ func (d DType) ID() arrow.Type {
 func (d DType) Equal(other DType) bool {
 	if d.inner == nil || other.inner == nil {
 		return d.inner == nil && other.inner == nil
+	}
+	if d.enum != nil && other.enum != nil && !d.enum.equal(other.enum) {
+		return false
 	}
 	return arrow.TypeEqual(d.inner, other.inner)
 }
@@ -283,6 +290,8 @@ func reprArrow(t arrow.DataType) string {
 		return fmt.Sprintf("list[%s]", reprArrow(t.Elem()))
 	case *arrow.FixedSizeListType:
 		return fmt.Sprintf("list[%s; %d]", reprArrow(t.Elem()), t.Len())
+	case *arrow.DictionaryType:
+		return reprDictionary(t)
 	case *arrow.StructType:
 		var b strings.Builder
 		b.WriteString("struct{")

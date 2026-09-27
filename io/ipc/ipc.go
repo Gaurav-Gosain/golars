@@ -90,13 +90,6 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 func buildDataFrameFromChunks(sch *arrow.Schema, chunks [][]arrow.Array) (*dataframe.DataFrame, error) {
 	numCols := sch.NumFields()
 	cols := make([]*series.Series, numCols)
-	releaseChunks := func() {
-		for _, cs := range chunks {
-			for _, c := range cs {
-				c.Release()
-			}
-		}
-	}
 	for i := range numCols {
 		name := sch.Field(i).Name
 		if len(chunks[i]) == 0 {
@@ -105,12 +98,17 @@ func buildDataFrameFromChunks(sch *arrow.Schema, chunks [][]arrow.Array) (*dataf
 		}
 		s, err := series.New(name, chunks[i]...)
 		if err != nil {
+			// Columns before i own their chunks through the Series
+			// built from them; series.New does not consume on error,
+			// so column i onward still holds raw references.
 			for _, pc := range cols[:i] {
-				if pc != nil {
-					pc.Release()
+				pc.Release()
+			}
+			for _, cs := range chunks[i:] {
+				for _, c := range cs {
+					c.Release()
 				}
 			}
-			releaseChunks()
 			return nil, fmt.Errorf("ipc: build series %q: %w", name, err)
 		}
 		cols[i] = s

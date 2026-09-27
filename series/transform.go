@@ -147,8 +147,9 @@ func (s *Series) Shuffle(seed uint64, opts ...Option) (*Series, error) {
 	return s.Sample(s.Len(), false, seed, opts...)
 }
 
-// TopK returns the k largest non-null elements, sorted descending.
-// Stable across ties. Empty/all-null returns an empty Series.
+// TopK returns the k largest elements, sorted descending and stable
+// across ties. Like polars, nulls fill the tail when there are fewer
+// than k non-null values.
 func (s *Series) TopK(k int, opts ...Option) (*Series, error) {
 	if k < 0 {
 		return nil, fmt.Errorf("series: TopK k must be non-negative")
@@ -157,10 +158,11 @@ func (s *Series) TopK(k int, opts ...Option) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.takeIndices(idx, opts)
+	return s.takeIndices(s.PadTopKNulls(idx, k), opts)
 }
 
-// BottomK returns the k smallest non-null elements, sorted ascending.
+// BottomK returns the k smallest elements, sorted ascending, with nulls
+// filling the tail like TopK.
 func (s *Series) BottomK(k int, opts ...Option) (*Series, error) {
 	if k < 0 {
 		return nil, fmt.Errorf("series: BottomK k must be non-negative")
@@ -169,7 +171,25 @@ func (s *Series) BottomK(k int, opts ...Option) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.takeIndices(idx, opts)
+	return s.takeIndices(s.PadTopKNulls(idx, k), opts)
+}
+
+// PadTopKNulls extends top-k row indices (which only cover non-null
+// rows) with null rows in input order, up to min(k, s.Len()). polars
+// top_k and bottom_k return nulls when there are fewer than k non-null
+// values.
+func (s *Series) PadTopKNulls(idx []int, k int) []int {
+	want := min(k, s.Len())
+	if len(idx) >= want || s.NullCount() == 0 {
+		return idx
+	}
+	chunk := s.Chunk(0)
+	for i := 0; i < chunk.Len() && len(idx) < want; i++ {
+		if chunk.IsNull(i) {
+			idx = append(idx, i)
+		}
+	}
+	return idx
 }
 
 // Equal reports whether two Series are element-wise equal (names +

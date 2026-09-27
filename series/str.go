@@ -3,7 +3,6 @@ package series
 import (
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 )
@@ -81,41 +80,31 @@ func (o StrOps) mapBool(op string, fn func(string) bool, opts []Option) (*Series
 
 // ToUppercase uppercases every character.
 //
-// Three tiers. Columns whose entire values buffer is ASCII route to
-// caseFoldAsciiWhole, which folds the whole buffer in one tight loop
-// and reuses the input's offsets verbatim (no per-row dispatch).
-// Non-ASCII columns fall back to stdlib strings.ToUpper via
-// mapString; they're the slow path but correctness-preserving.
+// Pure-ASCII columns take caseFoldAscii, which folds the flat values
+// buffer eight bytes at a time (in parallel for large inputs) and
+// copies the offsets unchanged. Other columns fall back to
+// strings.ToUpper per row.
 func (o StrOps) ToUppercase(opts ...Option) (*Series, error) {
-	cfg := resolve(opts)
-	a, err := o.stringArr("ToUppercase")
-	if err != nil {
-		return nil, err
-	}
-	if isAsciiOnly(a.ValueBytes()) {
-		return caseFoldAsciiWhole(o.s.Name(), a, cfg.alloc, foldUpper)
-	}
-	return o.mapString("ToUppercase", strings.ToUpper, opts)
+	return o.caseFold("ToUppercase", true, strings.ToUpper, opts)
 }
 
-// ToLowercase is the symmetric counterpart; ASCII lowercase is
-// `b | 0x20` for A..Z, unchanged for everything else.
+// ToLowercase is the symmetric counterpart of ToUppercase.
 func (o StrOps) ToLowercase(opts ...Option) (*Series, error) {
+	return o.caseFold("ToLowercase", false, strings.ToLower, opts)
+}
+
+func (o StrOps) caseFold(op string, upper bool, slow func(string) string, opts []Option) (*Series, error) {
 	cfg := resolve(opts)
-	a, err := o.stringArr("ToLowercase")
+	a, err := o.stringArr(op)
 	if err != nil {
 		return nil, err
 	}
-	if isAsciiOnly(a.ValueBytes()) {
-		return caseFoldAsciiWhole(o.s.Name(), a, cfg.alloc, foldLower)
+	out, ok, err := caseFoldAscii(o.s.Name(), a, cfg.alloc, upper)
+	if ok || err != nil {
+		return out, err
 	}
-	return o.mapString("ToLowercase", strings.ToLower, opts)
+	return o.mapString(op, slow, opts)
 }
-
-const (
-	foldLower = iota
-	foldUpper
-)
 
 // Upper is the polars-style alias for ToUppercase.
 func (o StrOps) Upper(opts ...Option) (*Series, error) { return o.ToUppercase(opts...) }
@@ -152,34 +141,28 @@ func (o StrOps) LenBytes(opts ...Option) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	return lenBytesDirect(o.s.Name(), a, cfg.alloc)
+	return int64FromOffsets(o.s.Name(), a, cfg.alloc, lenBytesFill(a.ValueOffsets()))
 }
 
 // LenChars returns the rune-count of each string as an int64 Series.
-// For ASCII-only input this equals LenBytes.
+// For ASCII-only input this equals LenBytes, and the kernel reads only
+// the offsets.
 func (o StrOps) LenChars(opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
 	a, err := o.stringArr("LenChars")
 	if err != nil {
 		return nil, err
 	}
-	n := a.Len()
-	valid := validFromChunk(a)
-	out := make([]int64, n)
-	for i := range n {
-		if valid != nil && !valid[i] {
-			continue
-		}
-		out[i] = int64(utf8.RuneCountInString(a.Value(i)))
-	}
-	return FromInt64(o.s.Name(), out, valid, WithAllocator(cfg.alloc))
+	return lenCharsKernel(o.s.Name(), a, cfg.alloc)
 }
 
 // Contains reports whether each string contains needle (plain substring,
-// not regex). Uses Go's SIMD-accelerated strings.Contains; for regex
-// patterns, use ContainsRegex. Null inputs yield null outputs.
+// not regex). For regex patterns, use ContainsRegex. Null inputs yield
+// null outputs.
 //
-// Empty-needle fast path: every non-null row is true.
+// A non-empty needle is searched over the flat values buffer in one
+// pass (see containsLiteralKernel). An empty needle matches every
+// non-null row.
 func (o StrOps) Contains(needle string, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
 	a, err := o.stringArr("Contains")
@@ -189,17 +172,7 @@ func (o StrOps) Contains(needle string, opts ...Option) (*Series, error) {
 	if needle == "" {
 		return boolResultFromStr(o.s.Name(), a, cfg.alloc, func(string) bool { return true })
 	}
-	// Single-byte needle: strings.Contains degrades to a byte scan but
-	// strings.IndexByte is a dedicated SIMD path; route to it.
-	if len(needle) == 1 {
-		b := needle[0]
-		return boolResultFromStr(o.s.Name(), a, cfg.alloc, func(s string) bool {
-			return strings.IndexByte(s, b) >= 0
-		})
-	}
-	return boolResultFromStr(o.s.Name(), a, cfg.alloc, func(s string) bool {
-		return strings.Contains(s, needle)
-	})
+	return containsLiteralKernel(o.s.Name(), a, cfg.alloc, []byte(needle))
 }
 
 // StartsWith reports whether each string begins with prefix. Direct
@@ -289,61 +262,6 @@ func (o StrOps) StripSuffix(suffix string, opts ...Option) (*Series, error) {
 	}, opts)
 }
 
-// PadStart pads each string on the left with pad (repeated as needed)
-// up to totalLen runes. Strings already ≥ totalLen are left as-is.
-func (o StrOps) PadStart(totalLen int, pad rune, opts ...Option) (*Series, error) {
-	return o.mapString("PadStart", func(s string) string {
-		diff := totalLen - utf8.RuneCountInString(s)
-		if diff <= 0 {
-			return s
-		}
-		return strings.Repeat(string(pad), diff) + s
-	}, opts)
-}
-
-// PadEnd is the symmetric counterpart.
-func (o StrOps) PadEnd(totalLen int, pad rune, opts ...Option) (*Series, error) {
-	return o.mapString("PadEnd", func(s string) string {
-		diff := totalLen - utf8.RuneCountInString(s)
-		if diff <= 0 {
-			return s
-		}
-		return s + strings.Repeat(string(pad), diff)
-	}, opts)
-}
-
-// ZFill left-pads strings with zeros to totalLen. A leading '+' or
-// '-' sign (polars convention) stays at the front.
-func (o StrOps) ZFill(totalLen int, opts ...Option) (*Series, error) {
-	return o.mapString("ZFill", func(s string) string {
-		if s == "" {
-			return strings.Repeat("0", totalLen)
-		}
-		sign := ""
-		body := s
-		if s[0] == '+' || s[0] == '-' {
-			sign = s[:1]
-			body = s[1:]
-		}
-		diff := totalLen - len(sign) - utf8.RuneCountInString(body)
-		if diff <= 0 {
-			return s
-		}
-		return sign + strings.Repeat("0", diff) + body
-	}, opts)
-}
-
-// Reverse reverses the runes of each string.
-func (o StrOps) Reverse(opts ...Option) (*Series, error) {
-	return o.mapString("Reverse", func(s string) string {
-		runes := []rune(s)
-		for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-			runes[i], runes[j] = runes[j], runes[i]
-		}
-		return string(runes)
-	}, opts)
-}
-
 // Slice returns runes[start:start+length] of each string. length=-1
 // means "to the end". start may be negative (polars convention: count
 // from end).
@@ -370,7 +288,7 @@ func (o StrOps) Slice(start, length int, opts ...Option) (*Series, error) {
 }
 
 // CountMatches counts the number of (non-overlapping) occurrences of
-// needle in each string.
+// needle in each string, as u32 like polars.
 func (o StrOps) CountMatches(needle string, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
 	a, err := o.stringArr("CountMatches")
@@ -379,14 +297,14 @@ func (o StrOps) CountMatches(needle string, opts ...Option) (*Series, error) {
 	}
 	n := a.Len()
 	valid := validFromChunk(a)
-	out := make([]int64, n)
+	out := make([]uint32, n) // polars: u32
 	for i := range n {
 		if valid != nil && !valid[i] {
 			continue
 		}
-		out[i] = int64(strings.Count(a.Value(i), needle))
+		out[i] = uint32(strings.Count(a.Value(i), needle))
 	}
-	return FromInt64(o.s.Name(), out, valid, WithAllocator(cfg.alloc))
+	return FromUint32(o.s.Name(), out, valid, WithAllocator(cfg.alloc))
 }
 
 // Concat appends suffix to every non-null string. Name-level:

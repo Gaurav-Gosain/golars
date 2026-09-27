@@ -835,7 +835,7 @@ TEXT cmpf64_op<>(SB), NOSPLIT, $0-0
 	CMP	$4, R4
 	BEQ	cmpf64_op_gt
 cmpf64_op_ge:
-	WORD	$0x6E60E424		// fcmge v4.2d, v1.2d, v0.2d
+	WORD	$0x6E61E404		// fcmge v4.2d, v0.2d, v1.2d  (a >= b)
 	RET
 cmpf64_op_eq:
 	WORD	$0x4E61E404		// fcmeq v4.2d, v0.2d, v1.2d
@@ -845,13 +845,13 @@ cmpf64_op_ne:
 	VEOR	V7.B16, V4.B16, V4.B16
 	RET
 cmpf64_op_lt:
-	WORD	$0x6EE1E404		// fcmgt v4.2d, v0.2d, v1.2d  (b > a)
+	WORD	$0x6EE0E424		// fcmgt v4.2d, v1.2d, v0.2d  (a < b iff b > a)
 	RET
 cmpf64_op_le:
-	WORD	$0x6E61E404		// fcmge v4.2d, v0.2d, v1.2d  (b >= a)
+	WORD	$0x6E60E424		// fcmge v4.2d, v1.2d, v0.2d  (a <= b iff b >= a)
 	RET
 cmpf64_op_gt:
-	WORD	$0x6EE0E424		// fcmgt v4.2d, v1.2d, v0.2d
+	WORD	$0x6EE1E404		// fcmgt v4.2d, v0.2d, v1.2d  (a > b)
 	RET
 
 // func simdCompareFloat64LitNEON(av []float64, lit float64, bits []byte, op compareOp) int
@@ -942,7 +942,7 @@ TEXT cmplf64_op<>(SB), NOSPLIT, $0-0
 	CMP	$4, R4
 	BEQ	cmplf64_op_gt
 cmplf64_op_ge:
-	WORD	$0x6E60E604		// fcmge v4.2d, v16.2d, v0.2d
+	WORD	$0x6E70E404		// fcmge v4.2d, v0.2d, v16.2d  (src >= lit)
 	RET
 cmplf64_op_eq:
 	WORD	$0x4E70E404		// fcmeq v4.2d, v0.2d, v16.2d
@@ -952,13 +952,13 @@ cmplf64_op_ne:
 	VEOR	V7.B16, V4.B16, V4.B16
 	RET
 cmplf64_op_lt:
-	WORD	$0x6EF0E404		// fcmgt v4.2d, v0.2d, v16.2d  (lit > src means src < lit when swapped; double check)
+	WORD	$0x6EE0E604		// fcmgt v4.2d, v16.2d, v0.2d  (src < lit iff lit > src)
 	RET
 cmplf64_op_le:
-	WORD	$0x6E70E404		// fcmge v4.2d, v0.2d, v16.2d  (same note)
+	WORD	$0x6E60E604		// fcmge v4.2d, v16.2d, v0.2d  (src <= lit iff lit >= src)
 	RET
 cmplf64_op_gt:
-	WORD	$0x6EE0E604		// fcmgt v4.2d, v16.2d, v0.2d  (src > lit)
+	WORD	$0x6EF0E404		// fcmgt v4.2d, v0.2d, v16.2d  (src > lit)
 	RET
 
 // =====================================================================

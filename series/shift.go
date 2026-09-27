@@ -31,7 +31,7 @@ func (s *Series) Shift(periods int, opts ...Option) (*Series, error) {
 		return s.Clone(), nil
 	}
 	if periods >= n || -periods >= n {
-		return nullSeries(s.Name(), s.DType(), n, cfg.alloc)
+		return nullSeries(s.Name(), s.data.DataType(), n, cfg.alloc)
 	}
 
 	dt := s.data.DataType()
@@ -91,31 +91,8 @@ func extractSingleChunk(s *Series, mem memory.Allocator) (arrow.Array, error) {
 }
 
 // nullSeries returns a new all-null Series of the given dtype and
-// length. Used for boundary cases like Shift(n+1).
-func nullSeries(name string, dt interface{ String() string }, n int, mem memory.Allocator) (*Series, error) {
-	// Convert from the generic dtype interface to an arrow.DataType via a
-	// single round-trip through the type-name switch (small N, warm path).
-	switch dt.String() {
-	case "i64":
-		arr := array.MakeArrayOfNull(mem, arrow.PrimitiveTypes.Int64, n)
-		defer arr.Release()
-		return New(name, arr)
-	case "f64":
-		arr := array.MakeArrayOfNull(mem, arrow.PrimitiveTypes.Float64, n)
-		defer arr.Release()
-		return New(name, arr)
-	case "i32":
-		arr := array.MakeArrayOfNull(mem, arrow.PrimitiveTypes.Int32, n)
-		defer arr.Release()
-		return New(name, arr)
-	case "bool":
-		arr := array.MakeArrayOfNull(mem, arrow.FixedWidthTypes.Boolean, n)
-		defer arr.Release()
-		return New(name, arr)
-	case "str":
-		arr := array.MakeArrayOfNull(mem, arrow.BinaryTypes.String, n)
-		defer arr.Release()
-		return New(name, arr)
-	}
-	return nil, fmt.Errorf("series: Shift unsupported for dtype %s", dt.String())
+// length. Used for boundary cases like Shift(n+1). New consumes the
+// array reference, so it must not be released here.
+func nullSeries(name string, dt arrow.DataType, n int, mem memory.Allocator) (*Series, error) {
+	return New(name, array.MakeArrayOfNull(mem, dt, n))
 }

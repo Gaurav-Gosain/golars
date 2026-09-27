@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"sync"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/internal/pool"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -87,6 +89,12 @@ func GeLit(ctx context.Context, a *series.Series, lit any, opts ...Option) (*ser
 // runCompareLit dispatches to fast scalar-literal paths for the common
 // int64 and float64 cases; other dtypes fall back to the broadcast form.
 func runCompareLit(ctx context.Context, a *series.Series, lit any, opts []Option, op compareOp) (*series.Series, error) {
+	if s, ok := lit.(string); ok && a.DType().IsDictionary() {
+		return catCompareLit(a, s, opts, op)
+	}
+	if out, ok, err := extraCompareLit(ctx, a, lit, opts, op); ok {
+		return out, err
+	}
 	cfg := resolve(opts)
 	aArr, err := extractChunk(a, cfg.alloc)
 	if err != nil {
@@ -126,11 +134,35 @@ func runCompareLit(ctx context.Context, a *series.Series, lit any, opts []Option
 			default:
 				goto fallback
 			}
+			if v != v {
+				// NaN literal: rare, take the NaN-aware generic path.
+				goto fallback
+			}
+			if op == opGt || op == opGe {
+				// polars orders NaN above every number, so x > lit is
+				// !(x <= lit): IEEE gives false for NaN on both sides,
+				// and inverting the complement fixes NaN rows for free.
+				return invertCompare(fastCompareFloat64Lit(ctx, name, float64Values(aArr), v, complementOp(op), cfg.alloc, par))
+			}
 			return fastCompareFloat64Lit(ctx, name, float64Values(aArr), v, op, cfg.alloc, par)
 		}
 	}
 
 fallback:
+	// An integer column against a float literal compares in f64, which
+	// is the polars supertype. Truncating the literal would make
+	// `a == 2.5` true for a == 2.
+	if a.DType().ID() == arrow.INT64 || a.DType().ID() == arrow.UINT64 {
+		switch lit.(type) {
+		case float64, float32:
+			fa, err := Cast(ctx, a, dtype.Float64(), WithAllocator(cfg.alloc))
+			if err != nil {
+				return nil, err
+			}
+			defer fa.Release()
+			return runCompareLit(ctx, fa, lit, opts, op)
+		}
+	}
 	// Broadcast fallback: materialise the literal and use the standard path.
 	bs, err := literalSeries(a, lit)
 	if err != nil {
@@ -152,6 +184,12 @@ const (
 )
 
 func runCompare(ctx context.Context, a, b *series.Series, opts []Option, kernel string, op compareOp) (*series.Series, error) {
+	if a.DType().IsDictionary() || b.DType().IsDictionary() {
+		return catCompare(ctx, a, b, opts, kernel, op)
+	}
+	if out, ok, err := extraCompare(ctx, a, b, opts, op); ok {
+		return out, err
+	}
 	if err := checkBinary(a, b); err != nil {
 		return nil, err
 	}
@@ -181,7 +219,11 @@ func runCompare(ctx context.Context, a, b *series.Series, opts []Option, kernel 
 		case arrow.INT64:
 			return fastCompareInt64(ctx, name, int64Values(aArr), int64Values(bArr), op, cfg.alloc, par)
 		case arrow.FLOAT64:
-			return fastCompareFloat64(ctx, name, float64Values(aArr), float64Values(bArr), op, cfg.alloc, par)
+			// The SIMD kernel uses IEEE semantics; NaN input goes to the
+			// generic path, which orders NaN like polars.
+			if !hasNaNFloat64(float64Values(aArr)) && !hasNaNFloat64(float64Values(bArr)) {
+				return fastCompareFloat64(ctx, name, float64Values(aArr), float64Values(bArr), op, cfg.alloc, par)
+			}
 		}
 	}
 
@@ -451,6 +493,36 @@ func literalSeries(a *series.Series, lit any) (*series.Series, error) {
 			out[i] = v
 		}
 		return series.FromFloat64("_lit", out, nil)
+	case arrow.FLOAT32:
+		v, err := coerceToFloat64(lit)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]float32, n)
+		for i := range out {
+			out[i] = float32(v)
+		}
+		return series.FromFloat32("_lit", out, nil)
+	case arrow.STRING:
+		v, ok := lit.(string)
+		if !ok {
+			return nil, fmt.Errorf("compute: cannot compare str with %T", lit)
+		}
+		out := make([]string, n)
+		for i := range out {
+			out[i] = v
+		}
+		return series.FromString("_lit", out, nil)
+	case arrow.BOOL:
+		v, ok := lit.(bool)
+		if !ok {
+			return nil, fmt.Errorf("compute: cannot compare bool with %T", lit)
+		}
+		out := make([]bool, n)
+		for i := range out {
+			out[i] = v
+		}
+		return series.FromBool("_lit", out, nil)
 	}
 	return nil, fmt.Errorf("compute: literal comparison not supported for %s", a.DType())
 }
@@ -655,6 +727,11 @@ func compareFillBits[T Ordered](bits []byte, aVals, bVals []T, fn func(T, T) boo
 }
 
 func orderedPredicate[T Ordered](op compareOp) func(T, T) bool {
+	var zero T
+	switch any(zero).(type) {
+	case float32, float64:
+		return floatTotalPredicate[T](op)
+	}
 	switch op {
 	case opEq:
 		return func(x, y T) bool { return x == y }
@@ -761,4 +838,94 @@ func compareBool(ctx context.Context, name string, aArr, bArr arrow.Array, op co
 		return nil, err
 	}
 	return fromBoolResult(name, out, valid, mem)
+}
+
+// floatTotalPredicate compares floats with the polars total order: NaN
+// equals NaN and is greater than every number. x != x is the NaN test.
+func floatTotalPredicate[T Ordered](op compareOp) func(T, T) bool {
+	switch op {
+	case opEq:
+		return func(x, y T) bool { return x == y || (x != x && y != y) }
+	case opNe:
+		return func(x, y T) bool { return x != y && (x == x || y == y) }
+	case opLt:
+		return func(x, y T) bool { return x < y || (y != y && x == x) }
+	case opLe:
+		return func(x, y T) bool { return x <= y || y != y }
+	case opGt:
+		return func(x, y T) bool { return x > y || (x != x && y == y) }
+	case opGe:
+		return func(x, y T) bool { return x >= y || x != x }
+	}
+	return nil
+}
+
+// hasNaNFloat64 reports whether vals holds a NaN. It reuses the SIMD
+// max kernel's NaN flag where available.
+func hasNaNFloat64(vals []float64) bool {
+	if len(vals) == 0 {
+		return false
+	}
+	if simdAvailable && hasSIMDInt64() {
+		_, nan := simdMaxFloat64(vals)
+		return nan
+	}
+	for _, v := range vals {
+		if v != v {
+			return true
+		}
+	}
+	return false
+}
+
+func complementOp(op compareOp) compareOp {
+	switch op {
+	case opGt:
+		return opLe
+	case opGe:
+		return opLt
+	case opLt:
+		return opGe
+	case opLe:
+		return opGt
+	case opEq:
+		return opNe
+	}
+	return opEq
+}
+
+// invertCompare flips every value bit of a freshly built, null-free
+// boolean result in place.
+func invertCompare(s *series.Series, err error) (*series.Series, error) {
+	if err != nil {
+		return nil, err
+	}
+	arr := s.Chunk(0)
+	buf := arr.Data().Buffers()[1]
+	if buf == nil {
+		return s, nil
+	}
+	n := arr.Len()
+	bits := buf.Bytes()
+	off := arr.Data().Offset()
+	end := off + n
+	i := off
+	for ; i < end && i%8 != 0; i++ {
+		bits[i/8] ^= 1 << (i % 8)
+	}
+	if wholeEnd := end / 8 * 8; i < wholeEnd {
+		whole := bits[i/8 : wholeEnd/8]
+		w := 0
+		for ; w+8 <= len(whole); w += 8 {
+			binary.LittleEndian.PutUint64(whole[w:], ^binary.LittleEndian.Uint64(whole[w:]))
+		}
+		for ; w < len(whole); w++ {
+			whole[w] = ^whole[w]
+		}
+		i = wholeEnd
+	}
+	for ; i < end; i++ {
+		bits[i/8] ^= 1 << (i % 8)
+	}
+	return s, nil
 }

@@ -108,7 +108,7 @@ func TestGroupByMultipleAggregations(t *testing.T) {
 	}
 
 	countCol, _ := out.Column("n")
-	ns := countCol.Chunk(0).(*array.Int64).Int64Values()
+	ns := countCol.Chunk(0).(*array.Uint32).Uint32Values() // polars: u32
 	if ns[0] != 3 || ns[1] != 2 {
 		t.Errorf("count = %v, want [3, 2]", ns)
 	}
@@ -215,8 +215,11 @@ func TestGroupByNullKeysFormGroup(t *testing.T) {
 	}
 }
 
-func TestGroupByRejectsNonAggExpr(t *testing.T) {
-	t.Parallel()
+// TestGroupByNonAggExprWithoutEvaluator checks the dataframe package on
+// its own: without the eval package installed as GenericAgg, a
+// non-aggregation expression is rejected. With eval linked in, polars
+// semantics apply instead (a list column per group).
+func TestGroupByNonAggExprWithoutEvaluator(t *testing.T) {
 	mem := testutil.NewCheckedAllocator(t)
 	ctx := context.Background()
 
@@ -225,10 +228,22 @@ func TestGroupByRejectsNonAggExpr(t *testing.T) {
 	df, _ := dataframe.New(k, v)
 	defer df.Release()
 
-	_, err := df.GroupBy("k").Agg(ctx,
+	out, err := df.GroupBy("k").Agg(ctx,
 		[]expr.Expr{expr.Col("v").Add(expr.LitInt64(1))},
 		dataframe.WithGroupByAllocator(mem))
-	if err == nil {
-		t.Error("expected error for non-aggregation expression")
+	if dataframe.GenericAgg == nil {
+		if err == nil {
+			out.Release()
+			t.Error("expected error for non-aggregation expression")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Release()
+	col, _ := out.Column("v")
+	if got := col.DType().String(); got != "list[i64]" {
+		t.Errorf("dtype = %s, want list[i64]", got)
 	}
 }

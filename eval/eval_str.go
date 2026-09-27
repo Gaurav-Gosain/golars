@@ -18,6 +18,12 @@ import (
 // defers its Release for the error path, and on success hands the
 // freshly-built result back up.
 func evalStrFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *dataframe.DataFrame) (*series.Series, error) {
+	if out, ok, err := evalStrJSONFunction(ctx, ec, n, df); ok {
+		return out, err
+	}
+	if out, ok, err := evalStrExtFunction(ctx, ec, n, df); ok {
+		return out, err
+	}
 	arg0, err := evalNode(ctx, ec, n.Args[0], df)
 	if err != nil {
 		return nil, err

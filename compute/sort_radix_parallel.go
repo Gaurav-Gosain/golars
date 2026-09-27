@@ -33,7 +33,6 @@ var radixWorkspacePool = sync.Pool{
 	New: func() any { return new(radixWorkspace) },
 }
 
-
 // auxBufPool caches aux uint64 slices by capacity-bucket. The 8 MB
 // allocation for a 1 M sort is a visible fraction (≈ 50 μs mallocgc zero)
 // of the total bench iteration: pooling reuses the backing array across
@@ -452,14 +451,33 @@ func serialFromFloatWithDetect(srcBits, out []uint64) (needsIEEE bool) {
 	// on amd64; fallback forwards to the generic scatterUint64 on
 	// other arches. The asm handles shift=0 (pass 0) correctly.
 	// 2-way unrolled: ~30 % faster than Go's generated scatter.
-	scatterUint64_8_prefetch2(srcBits, auxU, counts[0][:], 0)
-	scatterUint64_8_prefetch2(auxU, out, counts[1][:], 1)
-	scatterUint64_8_prefetch2(out, auxU, counts[2][:], 2)
-	scatterUint64_8_prefetch2(auxU, out, counts[3][:], 3)
-	scatterUint64_8_prefetch2(out, auxU, counts[4][:], 4)
-	scatterUint64_8_prefetch2(auxU, out, counts[5][:], 5)
-	scatterUint64_8_prefetch2(out, auxU, counts[6][:], 6)
-	scatterUint64_8_prefetch2(auxU, out, counts[7][:], 7)
+	//
+	// A byte position where every key has the same digit is a no-op
+	// pass (for floats in a narrow range the top exponent byte usually
+	// is), so it is skipped. The first real pass is aimed at out or
+	// auxU depending on how many real passes remain, so the last one
+	// always lands in out without a trailing copy.
+	var live [8]uint
+	nLive := 0
+	for p := range 8 {
+		if counts[p][(srcBits[0]>>(uint(p)*8))&0xFF] != n {
+			live[nLive] = uint(p)
+			nLive++
+		}
+	}
+	if nLive == 0 {
+		copy(out, srcBits)
+		return false
+	}
+	src := srcBits
+	dst, next := auxU, out
+	if nLive%2 == 1 {
+		dst, next = out, auxU
+	}
+	for _, p := range live[:nLive] {
+		scatterUint64_8_prefetch2(src, dst, counts[p][:], p)
+		src, dst, next = dst, next, dst
+	}
 	return false
 }
 

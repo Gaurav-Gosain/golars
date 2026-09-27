@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -17,11 +18,12 @@ import (
 type NullPosition uint8
 
 const (
-	// NullsLast places null values after all non-null values (polars default
-	// for ascending sorts).
-	NullsLast NullPosition = iota
-	// NullsFirst places null values before all non-null values.
-	NullsFirst
+	// NullsFirst places null values before all non-null values. It is the
+	// zero value because polars sorts with nulls_last=False by default, in
+	// both ascending and descending order.
+	NullsFirst NullPosition = iota
+	// NullsLast places null values after all non-null values.
+	NullsLast
 )
 
 // SortOptions tune the sort behavior.
@@ -40,6 +42,10 @@ func SortIndices(ctx context.Context, s *series.Series, so SortOptions, opts ...
 		return nil, err
 	}
 	defer arr.Release()
+
+	if sa, ok := arr.(*array.String); ok {
+		return sortIndicesString(sa, so), nil
+	}
 
 	n := arr.Len()
 	idx := make([]int, n)
@@ -285,6 +291,11 @@ func SortIndicesMulti(ctx context.Context, cols []*series.Series, opts []SortOpt
 		return indices, nil
 	}
 
+	// Single string key: prefix radix path in sort_string.go.
+	if len(cols) == 1 && cols[0].DType().ID() == arrow.STRING {
+		return SortIndices(ctx, cols[0], opts[0], kernelOpts...)
+	}
+
 	arrs := make([]arrow.Array, len(cols))
 	lessFuncs := make([]func(i, j int) int, len(cols))
 
@@ -424,6 +435,16 @@ func singleKeyCompare(arr arrow.Array, so SortOptions) (func(i, j int) int, erro
 			}
 		}, nil
 	}
+	if vals := temporalSortKeys(arr); vals != nil {
+		return buildCmp(vals, arr, nullCmp, flip), nil
+	}
+	if d, ok := arr.(*array.Dictionary); ok {
+		if ranks := lexicalDictRanks(d); ranks != nil {
+			// polars 1.39: Categorical sorts lexically by category
+			// string, Enum by category order.
+			return buildCmp(ranks, arr, nullCmp, flip), nil
+		}
+	}
 	return nil, fmt.Errorf("%w: sort on %s", ErrUnsupportedDType, arr.DataType())
 }
 
@@ -485,4 +506,42 @@ func buildFloatCmp[T float32 | float64](
 			return 0
 		}
 	}
+}
+
+// lexicalDictRanks maps each row of a string dictionary array to a sort
+// rank: the lexical rank of its category for Categorical, the code for
+// Enum. It returns nil for non-string dictionaries.
+func lexicalDictRanks(d *array.Dictionary) []int64 {
+	dict, ok := d.Dictionary().(*array.String)
+	if !ok {
+		return nil
+	}
+	if d.DataType().(*arrow.DictionaryType).Ordered {
+		// Enum: the codes follow the declared category order.
+		out := make([]int64, d.Len())
+		for i := range out {
+			if d.IsValid(i) {
+				out[i] = int64(d.GetValueIndex(i))
+			}
+		}
+		return out
+	}
+	order := make([]int, dict.Len())
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		return strings.Compare(dict.Value(a), dict.Value(b))
+	})
+	rankOf := make([]int64, dict.Len())
+	for r, code := range order {
+		rankOf[code] = int64(r)
+	}
+	out := make([]int64, d.Len())
+	for i := range out {
+		if d.IsValid(i) {
+			out[i] = rankOf[d.GetValueIndex(i)]
+		}
+	}
+	return out
 }

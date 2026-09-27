@@ -187,6 +187,9 @@ func DivLit(ctx context.Context, a *series.Series, lit any, opts ...Option) (*se
 }
 
 func runArithLit(ctx context.Context, a *series.Series, lit any, opts []Option, kernel string, op arithOp) (*series.Series, error) {
+	if out, ok, err := extraArithLit(ctx, a, lit, opts, op); ok {
+		return out, err
+	}
 	cfg := resolve(opts)
 	aArr, err := extractChunk(a, cfg.alloc)
 	if err != nil {
@@ -423,6 +426,9 @@ const (
 )
 
 func runArith(ctx context.Context, a, b *series.Series, opts []Option, kernel string, op arithOp) (*series.Series, error) {
+	if out, ok, err := temporalArith(ctx, a, b, opts, op); ok {
+		return out, err
+	}
 	if err := checkBinary(a, b); err != nil {
 		return nil, err
 	}

@@ -382,6 +382,9 @@ func Lit(v any) Expr {
 	case nil:
 		return Expr{LitNode{DType: dtype.Null(), Value: nil}}
 	}
+	if e, ok := litTemporal(v); ok {
+		return e
+	}
 	panic(fmt.Sprintf("expr.Lit: unsupported literal type %T", v))
 }
 
@@ -750,12 +753,16 @@ func OutputName(e Expr) string {
 	if e.node == nil {
 		return ""
 	}
-	if a, ok := e.node.(AliasNode); ok {
-		return a.Name
+	// Fixed-name functions (len, repeat, cum_sum_horizontal, ...) win
+	// first. Then aliases, name.* renames and struct field access are
+	// resolved in name.go; otherwise the left-most named input wins.
+	if f, ok := e.node.(FunctionNode); ok {
+		if name, ok := functionOutputName(f); ok {
+			return name
+		}
 	}
-	cols := Columns(e)
-	if len(cols) > 0 {
-		return cols[0]
+	if name, ok := outputNameOf(e); ok {
+		return name
 	}
 	// For literals, use the literal value as the default name.
 	if l, ok := e.node.(LitNode); ok {

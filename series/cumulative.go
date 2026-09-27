@@ -110,7 +110,7 @@ func (s *Series) Diff(periods int, opts ...Option) (*Series, error) {
 		return nil, fmt.Errorf("series: Diff periods must be non-zero")
 	}
 	if periods >= n || -periods >= n {
-		return nullSeries(s.Name(), s.DType(), n, cfg.alloc)
+		return nullSeries(s.Name(), s.data.DataType(), n, cfg.alloc)
 	}
 	switch a := chunk.(type) {
 	case *array.Int64:

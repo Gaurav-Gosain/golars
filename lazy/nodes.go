@@ -59,8 +59,15 @@ func (f FillNullNode) WithChildren(children []Node) Node {
 	return FillNullNode{Input: children[0], Value: f.Value}
 }
 
-func (f FillNullNode) Schema() (*schema.Schema, error) { return f.Input.Schema() }
-func (f FillNullNode) String() string                  { return fmt.Sprintf("FILL_NULL value=%v", f.Value) }
+func (f FillNullNode) Schema() (*schema.Schema, error) {
+	in, err := f.Input.Schema()
+	if err != nil {
+		return nil, err
+	}
+	return fillNullSchema(in, f.Value)
+}
+
+func (f FillNullNode) String() string { return fmt.Sprintf("FILL_NULL value=%v", f.Value) }
 
 // FillNull returns a LazyFrame where nulls in compatible columns are
 // replaced with value. Incompatible columns pass through unchanged.
@@ -186,16 +193,14 @@ func (c CacheNode) String() string                  { return "CACHE" }
 // Cache wraps lf so future Collects reuse the first materialised
 // result instead of re-running the whole plan. The cached frame is
 // retained on first Collect and released automatically when the
-// cache state is garbage-collected (via runtime.AddCleanup), so
+// cache state is garbage-collected (via runtime.SetFinalizer), so
 // callers do not need an explicit Release on the LazyFrame itself.
 func (lf LazyFrame) Cache() LazyFrame {
 	st := &cacheState{}
-	// Finalizer releases the cached frame when the state is GC'd.
-	// We use runtime.SetFinalizer rather than runtime.AddCleanup so
-	// the closure does not keep st itself reachable via the cleanup
-	// arg (AddCleanup requires arg != ptr and no reference from arg
-	// back to ptr, which would re-entrain st into the reachability
-	// graph through the runtime's cleanup table).
+	// The finalizer releases the cached frame when st is collected.
+	// runtime.AddCleanup is not a drop-in here: its callback must not
+	// receive st, and the frame lives inside st (written by the
+	// sync.Once), so it would need a separate holder object.
 	runtime.SetFinalizer(st, func(held *cacheState) {
 		if held.df != nil {
 			held.df.Release()
@@ -207,7 +212,7 @@ func (lf LazyFrame) Cache() LazyFrame {
 
 // --- WithRowIndex ------------------------------------------------------
 
-// WithRowIndexNode prepends an int64 row index column.
+// WithRowIndexNode prepends a u32 row index column.
 type WithRowIndexNode struct {
 	Input  Node
 	Name   string
@@ -231,7 +236,7 @@ func (w WithRowIndexNode) Schema() (*schema.Schema, error) {
 		return nil, err
 	}
 	fields := make([]schema.Field, 0, in.Len()+1)
-	fields = append(fields, schema.Field{Name: w.Name, DType: dtype.Int64()})
+	fields = append(fields, schema.Field{Name: w.Name, DType: dtype.Uint32()})
 	for i := range in.Len() {
 		f := in.Field(i)
 		fields = append(fields, f)
@@ -243,7 +248,7 @@ func (w WithRowIndexNode) String() string {
 	return fmt.Sprintf("WITH_ROW_INDEX %q offset=%d", w.Name, w.Offset)
 }
 
-// WithRowIndex returns a LazyFrame with a new int64 column `name`
+// WithRowIndex returns a LazyFrame with a new u32 column `name`
 // prepended, containing sequential row numbers starting at offset.
 func (lf LazyFrame) WithRowIndex(name string, offset int64) LazyFrame {
 	return LazyFrame{plan: WithRowIndexNode{Input: lf.plan, Name: name, Offset: offset}}

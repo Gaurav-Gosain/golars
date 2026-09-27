@@ -128,7 +128,7 @@ func FuzzGroupByMultiKey(f *testing.F) {
 		mArr := mc.Chunk(0).(*array.Float64)
 		miArr := mic.Chunk(0).(*array.Int64)
 		maArr := mac.Chunk(0).(*array.Int64)
-		cArr := cc.Chunk(0).(*array.Int64)
+		cArr := cc.Chunk(0).(*array.Uint32) // polars: count is u32
 		seen := map[key]bool{}
 		for i := range out.Height() {
 			kk := key{0, 0, kArr.IsValid(i), bArr.IsValid(i)}
@@ -149,7 +149,7 @@ func FuzzGroupByMultiKey(f *testing.F) {
 			if sArr.Value(i) != a.sum {
 				t.Fatalf("group %+v sum=%d want %d", kk, sArr.Value(i), a.sum)
 			}
-			if cArr.Value(i) != a.count {
+			if int64(cArr.Value(i)) != a.count {
 				t.Fatalf("group %+v count=%d want %d", kk, cArr.Value(i), a.count)
 			}
 			if !a.has {

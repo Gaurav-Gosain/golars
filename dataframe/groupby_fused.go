@@ -305,6 +305,10 @@ func float64SpecFromAcc(sp aggSpec, acc []fusedAccFloat64, numGroups int, mem me
 				continue
 			}
 			out[g] = acc[g].minVal
+			if acc[g].minVal > acc[g].maxVal {
+				// Only NaN values: the seeds never moved (polars: NaN).
+				out[g] = math.NaN()
+			}
 		}
 		if anyNull {
 			valid = make([]bool, numGroups)
@@ -323,6 +327,10 @@ func float64SpecFromAcc(sp aggSpec, acc []fusedAccFloat64, numGroups int, mem me
 				continue
 			}
 			out[g] = acc[g].maxVal
+			if acc[g].minVal > acc[g].maxVal {
+				// Only NaN values: the seeds never moved (polars: NaN).
+				out[g] = math.NaN()
+			}
 		}
 		if anyNull {
 			valid = make([]bool, numGroups)

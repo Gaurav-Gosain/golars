@@ -9,6 +9,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
 	"github.com/Gaurav-Gosain/golars/compute"
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -18,6 +19,9 @@ import (
 type GroupBy struct {
 	df   *DataFrame
 	keys []string
+	// maintainOrder emits groups in first-appearance order. Set by
+	// MaintainOrder (see groupby_methods.go).
+	maintainOrder bool
 }
 
 // GroupByOption configures Agg.
@@ -40,6 +44,49 @@ func WithGroupByAllocator(alloc memory.Allocator) GroupByOption {
 	return func(c *groupByConfig) { c.alloc = alloc }
 }
 
+// rechunkedForGroupBy returns a frame holding the key and aggregated
+// columns, with multi-chunk ones concatenated into one chunk
+// (single-chunk columns are shared, not copied). Columns the group-by
+// does not read are left out so they are never concatenated. ok=false
+// means every needed column was already single-chunk.
+func rechunkedForGroupBy(df *DataFrame, keys []string, specs []aggSpec) (*DataFrame, bool, error) {
+	needed := make(map[string]bool, len(keys)+len(specs))
+	for _, k := range keys {
+		needed[k] = true
+	}
+	for _, sp := range specs {
+		needed[sp.colName] = true
+	}
+	var src []*series.Series
+	multi := false
+	for _, c := range df.cols {
+		if !needed[c.Name()] {
+			continue
+		}
+		src = append(src, c)
+		multi = multi || c.NumChunks() > 1
+	}
+	if !multi {
+		return nil, false, nil
+	}
+	cols := make([]*series.Series, len(src))
+	for i, c := range src {
+		if c.NumChunks() > 1 {
+			cols[i] = c.Rechunk()
+		} else {
+			cols[i] = c.Clone()
+		}
+	}
+	out, err := New(cols...)
+	if err != nil {
+		for _, c := range cols {
+			c.Release()
+		}
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
 // GroupBy returns a group-by builder keyed on the given columns.
 func (df *DataFrame) GroupBy(keys ...string) *GroupBy {
 	return &GroupBy{df: df, keys: keys}
@@ -56,17 +103,89 @@ func (df *DataFrame) GroupBy(keys ...string) *GroupBy {
 // contiguous runs of equal keys form groups, and each aggregation is applied
 // per group.
 func (g *GroupBy) Agg(ctx context.Context, aggs []expr.Expr, opts ...GroupByOption) (*DataFrame, error) {
+	out, err := g.agg(ctx, aggs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return countsToUint32(ctx, out, aggs, resolveGroupBy(opts).alloc)
+}
+
+// countsToUint32 casts count and null_count results to u32, the polars
+// dtype. The kernels count in i64; the group count is small, so one
+// cast at the end keeps them unchanged.
+func countsToUint32(ctx context.Context, df *DataFrame, aggs []expr.Expr, alloc memory.Allocator) (*DataFrame, error) {
+	targets := map[string]bool{}
+	for _, e := range aggs {
+		node := e.Node()
+		if a, ok := node.(expr.AliasNode); ok {
+			node = a.Inner.Node()
+		}
+		if a, ok := node.(expr.AggNode); ok && (a.Op == expr.AggCount || a.Op == expr.AggNullCount) {
+			targets[expr.OutputName(e)] = true
+		}
+	}
+	needed := false
+	for name := range targets {
+		if c, err := df.Column(name); err == nil && c.DType().ID() == arrow.INT64 {
+			needed = true
+		}
+	}
+	if !needed {
+		return df, nil
+	}
+	cols := make([]*series.Series, df.Width())
+	for i := range df.Width() {
+		c := df.ColumnAt(i)
+		if targets[c.Name()] && c.DType().ID() == arrow.INT64 {
+			u, err := compute.Cast(ctx, c, dtype.Uint32(), compute.WithAllocator(alloc))
+			if err != nil {
+				for _, p := range cols[:i] {
+					p.Release()
+				}
+				df.Release()
+				return nil, err
+			}
+			cols[i] = u
+			continue
+		}
+		cols[i] = c.Clone()
+	}
+	df.Release()
+	return New(cols...)
+}
+
+func (g *GroupBy) agg(ctx context.Context, aggs []expr.Expr, opts ...GroupByOption) (*DataFrame, error) {
 	if len(g.keys) == 0 {
 		return nil, fmt.Errorf("dataframe.GroupBy: at least one key required")
+	}
+	if g.maintainOrder {
+		return g.aggMaintainOrder(ctx, aggs, opts...)
+	}
+	if out, ok, err := catGroupByAgg(ctx, g, aggs, opts); ok {
+		return out, err
 	}
 	// Empty aggs is valid: it emits the distinct key rows (polars-
 	// compatible semantics, used by df.Unique). parseAggs returns an
 	// empty slice so the downstream kernels handle it.
+	cfg := resolveGroupBy(opts)
 	specs, err := parseAggs(aggs)
 	if err != nil {
+		if GenericAgg != nil {
+			return GenericAgg(ctx, g.df, g.keys, aggs, cfg.alloc)
+		}
 		return nil, err
 	}
-	cfg := resolveGroupBy(opts)
+
+	// The hash kernels read a single contiguous chunk per column. Frames
+	// built by chunked readers (parallel parquet row groups, concat,
+	// streaming) arrive multi-chunk, which used to push them onto the
+	// much slower sort path. Consolidate those columns once up front.
+	if rechunked, ok, err := rechunkedForGroupBy(g.df, g.keys, specs); err != nil {
+		return nil, err
+	} else if ok {
+		defer rechunked.Release()
+		g = &GroupBy{df: rechunked, keys: g.keys}
+	}
 
 	// Fast path: single-key hash groupby. O(n) vs the sort-based O(n log n);
 	// measured ~80x faster on the GroupBySum benchmark. Falls through to the
@@ -428,7 +547,7 @@ func firstLastGroups(col *series.Series, sp aggSpec, boundaries []int, total int
 			indices[i] = end - 1
 		}
 	}
-	return compute.Take(context.Background(), col, indices, compute.WithAllocator(alloc))
+	return compute.Take(context.Background(), col, indices, compute.WithAllocator(alloc), compute.WithName(sp.outputName))
 }
 
 func groupEnd(boundaries []int, i, total int) int {

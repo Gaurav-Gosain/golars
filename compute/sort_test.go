@@ -53,13 +53,38 @@ func TestSortWithNullsLast(t *testing.T) {
 	defer s.Release()
 
 	got, _ := compute.Sort(context.Background(), s,
-		compute.SortOptions{},
+		compute.SortOptions{Nulls: compute.NullsLast},
 		compute.WithAllocator(mem))
 	defer got.Release()
 
 	assertInt64Values(t, got,
 		[]int64{3, 4, 5, 0, 0},
 		[]bool{true, true, true, false, false})
+}
+
+// polars sorts with nulls_last=False by default, ascending and
+// descending: pl.Series([3, None, 4, None, 5]).sort() == [None, None, 3, 4, 5].
+func TestSortDefaultNullsFirst(t *testing.T) {
+	t.Parallel()
+	mem := testutil.NewCheckedAllocator(t)
+
+	s, _ := series.FromInt64("x",
+		[]int64{3, 0, 4, 0, 5},
+		[]bool{true, false, true, false, true},
+		series.WithAllocator(mem))
+	defer s.Release()
+
+	got, _ := compute.Sort(context.Background(), s, compute.SortOptions{}, compute.WithAllocator(mem))
+	defer got.Release()
+	assertInt64Values(t, got,
+		[]int64{0, 0, 3, 4, 5},
+		[]bool{false, false, true, true, true})
+
+	desc, _ := compute.Sort(context.Background(), s, compute.SortOptions{Descending: true}, compute.WithAllocator(mem))
+	defer desc.Release()
+	assertInt64Values(t, desc,
+		[]int64{0, 0, 5, 4, 3},
+		[]bool{false, false, true, true, true})
 }
 
 func TestSortWithNullsFirst(t *testing.T) {

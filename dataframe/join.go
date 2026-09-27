@@ -123,8 +123,19 @@ func (df *DataFrame) Join(ctx context.Context, right *DataFrame, on []string, ho
 // paired index arrays. For LeftJoin, rightIdx entries of -1 mark left rows
 // with no match.
 func hashJoinIndices(left, right *series.Series, how JoinType) ([]int, []int, error) {
-	ra := right.Chunk(0)
-	la := left.Chunk(0)
+	// The kernels below index one contiguous array. Multi-chunk keys (a
+	// concat or a scan result) are consolidated first; the common
+	// single-chunk case is a retain.
+	ra, err := right.Consolidated()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer ra.Release()
+	la, err := left.Consolidated()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer la.Release()
 
 	switch left.DType().ID() {
 	case arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64,
@@ -136,6 +147,8 @@ func hashJoinIndices(left, right *series.Series, how JoinType) ([]int, []int, er
 		return hashJoinBool(la, ra, how)
 	case arrow.STRING:
 		return hashJoinString(la, ra, how)
+	case arrow.DICTIONARY:
+		return catJoinIndices(la, ra, how)
 	}
 	return nil, nil, fmt.Errorf("%w: %s", ErrJoinUnsupportedKey, left.DType())
 }
@@ -956,25 +969,27 @@ func hashJoinFloat(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
 	lv := toFloat64Slice(la)
 	rv := toFloat64Slice(ra)
 
-	table := make(map[float64][]int, ra.Len())
+	// Keys are canonical bits so NaN matches NaN and -0 matches +0, as in
+	// polars. A float64 map key would never match NaN.
+	table := make(map[uint64][]int, ra.Len())
 	for i := range rv {
-		if ra.IsNull(i) || rv[i] != rv[i] {
-			// NaN keys never match, polars convention.
+		if ra.IsNull(i) {
 			continue
 		}
-		table[rv[i]] = append(table[rv[i]], i)
+		k := canonicalFloatBits(rv[i])
+		table[k] = append(table[k], i)
 	}
 
 	var lOut, rOut []int
 	for i := range lv {
-		if la.IsNull(i) || lv[i] != lv[i] {
+		if la.IsNull(i) {
 			if how == LeftJoin {
 				lOut = append(lOut, i)
 				rOut = append(rOut, -1)
 			}
 			continue
 		}
-		matches := table[lv[i]]
+		matches := table[canonicalFloatBits(lv[i])]
 		if len(matches) == 0 {
 			if how == LeftJoin {
 				lOut = append(lOut, i)
@@ -1047,60 +1062,6 @@ func hashJoinBool(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
 		for _, m := range matches {
 			lOut = append(lOut, i)
 			rOut = append(rOut, m)
-		}
-	}
-	return lOut, rOut, nil
-}
-
-func hashJoinString(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
-	ls := la.(*array.String)
-	rs := ra.(*array.String)
-	rightLen := ra.Len()
-	leftLen := la.Len()
-
-	const noMatch = -1
-	heads := make(map[string]int, rightLen/2+1)
-	next := make([]int, rightLen)
-	rightNulls := ra.NullN() > 0
-
-	for i := rightLen - 1; i >= 0; i-- {
-		if rightNulls && ra.IsNull(i) {
-			next[i] = noMatch
-			continue
-		}
-		k := rs.Value(i)
-		if head, ok := heads[k]; ok {
-			next[i] = head
-		} else {
-			next[i] = noMatch
-		}
-		heads[k] = i
-	}
-
-	initCap := max(leftLen, 16)
-	lOut := make([]int, 0, initCap)
-	rOut := make([]int, 0, initCap)
-
-	leftNulls := la.NullN() > 0
-	for i := range leftLen {
-		if leftNulls && la.IsNull(i) {
-			if how == LeftJoin {
-				lOut = append(lOut, i)
-				rOut = append(rOut, -1)
-			}
-			continue
-		}
-		head, ok := heads[ls.Value(i)]
-		if !ok {
-			if how == LeftJoin {
-				lOut = append(lOut, i)
-				rOut = append(rOut, -1)
-			}
-			continue
-		}
-		for j := head; j != noMatch; j = next[j] {
-			lOut = append(lOut, i)
-			rOut = append(rOut, j)
 		}
 	}
 	return lOut, rOut, nil
@@ -1501,6 +1462,8 @@ func gatherNullable(ctx context.Context, src *series.Series, indices []int, n in
 			}
 		}
 		return series.FromString(name, out, valid, series.WithAllocator(alloc))
+	case arrow.DICTIONARY:
+		return catGatherNullable(src, indices, alloc)
 	}
 	return nil, fmt.Errorf("dataframe.Join: unsupported result dtype %s", src.DType())
 }

@@ -2,8 +2,11 @@ package series
 
 import (
 	"math"
+	"math/bits"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+
+	"github.com/Gaurav-Gosain/golars/internal/radix"
 )
 
 // This file mirrors the arg-radix pattern from compute/sort_arg_radix.go
@@ -15,6 +18,11 @@ import (
 // argSortInt64Asc returns stable ascending indices over vals, which
 // must already be the logical (offset-adjusted) values.
 func argSortInt64Asc(a *array.Int64, vals []int64, n int) []int {
+	if a.NullN() == 0 {
+		if idx, ok := argSortInt64Packed(vals); ok {
+			return idx
+		}
+	}
 	idx := make([]int, n)
 	for i := range idx {
 		idx[i] = i
@@ -36,6 +44,51 @@ func argSortInt64Asc(a *array.Int64, vals []int64, n int) []int {
 	}
 	argRadixSortInt64Local(vals, valid)
 	return append(valid, nulls...)
+}
+
+// packInt64Keys packs (vals[i]-lo, i) into one word per row, key in the
+// high bits and row index in the low idxBits bits, so an unsigned sort
+// of the words orders by value and then by position (a stable
+// argsort). ok=false when value span and index do not fit in 64 bits.
+func packInt64Keys(vals []int64) (packed []uint64, idxBits, sigBits int, ok bool) {
+	n := len(vals)
+	if n == 0 {
+		return nil, 0, 0, false
+	}
+	lo, hi := vals[0], vals[0]
+	for _, v := range vals[1:] {
+		lo = min(lo, v)
+		hi = max(hi, v)
+	}
+	span := uint64(hi) - uint64(lo) // exact even when hi-lo overflows int64
+	idxBits = bits.Len(uint(n - 1))
+	sigBits = idxBits + bits.Len64(span)
+	if sigBits > 64 {
+		return nil, 0, 0, false
+	}
+	packed = make([]uint64, n)
+	for i, v := range vals {
+		packed[i] = (uint64(v)-uint64(lo))<<idxBits | uint64(i)
+	}
+	return packed, idxBits, sigBits, true
+}
+
+// argSortInt64Packed is the fast argsort for no-null int64 columns
+// whose value span leaves room for the row index in a 64-bit word:
+// one streaming radix sort over packed words replaces the indirect
+// keys[idx] lookups of argRadixSortInt64Local.
+func argSortInt64Packed(vals []int64) ([]int, bool) {
+	packed, idxBits, sigBits, ok := packInt64Keys(vals)
+	if !ok {
+		return nil, false
+	}
+	radix.SortUint64(packed, sigBits)
+	mask := uint64(1)<<idxBits - 1
+	idx := make([]int, len(vals))
+	for i, p := range packed {
+		idx[i] = int(p & mask)
+	}
+	return idx, true
 }
 
 // floatRank maps v to ascending uint64 order: -0 ties +0, NaN ranks

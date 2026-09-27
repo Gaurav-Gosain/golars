@@ -443,7 +443,11 @@ func inferExprDType(e expr.Expr, in *schema.Schema) (dtype.DType, error) {
 		if err != nil {
 			return dtype.DType{}, err
 		}
-		return promote(lt, rt), nil
+		out := promote(lt, rt)
+		if n.Op == expr.OpDiv && out.IsInteger() {
+			return dtype.Float64(), nil // `/` is true division
+		}
+		return out, nil
 	case expr.UnaryNode:
 		if n.Op == expr.OpNot {
 			return dtype.Bool(), nil
@@ -460,13 +464,13 @@ func inferExprDType(e expr.Expr, in *schema.Schema) (dtype.DType, error) {
 		case expr.AggMean:
 			return dtype.Float64(), nil
 		case expr.AggCount, expr.AggNullCount:
-			return dtype.Int64(), nil
+			return dtype.Uint32(), nil
 		}
 		return inner, nil
 	case expr.WhenThenNode:
 		return inferExprDType(n.Then, in)
 	}
-	return dtype.Null(), nil
+	return inferByEmptyEval(e, in), nil
 }
 
 // promote returns the dtype both operands would need to share for a binary

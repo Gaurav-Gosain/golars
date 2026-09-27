@@ -18,6 +18,7 @@ package json
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
@@ -119,17 +121,37 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 	}
 	switch b {
 	case '[':
-		var rows []map[string]any
-		if err := json.NewDecoder(br).Decode(&rows); err != nil {
+		var raws []json.RawMessage
+		if err := json.NewDecoder(br).Decode(&raws); err != nil {
 			return nil, fmt.Errorf("json.Read: %w", err)
 		}
-		return buildFromRows(ctx, rows, cfg)
+		var ord keyOrder
+		rows := make([]map[string]any, len(raws))
+		for i, raw := range raws {
+			if err := json.Unmarshal(raw, &rows[i]); err != nil {
+				return nil, fmt.Errorf("json.Read: %w", err)
+			}
+			if err := ord.add(rows[i], raw); err != nil {
+				return nil, fmt.Errorf("json.Read: %w", err)
+			}
+		}
+		return buildFromRowsOrdered(ctx, rows, ord.names, cfg)
 	case '{':
-		var cols map[string][]any
-		if err := json.NewDecoder(br).Decode(&cols); err != nil {
+		var raw json.RawMessage
+		if err := json.NewDecoder(br).Decode(&raw); err != nil {
 			return nil, fmt.Errorf("json.Read: object-of-arrays: %w", err)
 		}
-		return buildFromColumns(ctx, cols, cfg)
+		var cols map[string][]any
+		if err := json.Unmarshal(raw, &cols); err != nil {
+			return nil, fmt.Errorf("json.Read: object-of-arrays: %w", err)
+		}
+		keys, err := objectKeys(raw)
+		if err != nil {
+			return nil, fmt.Errorf("json.Read: object-of-arrays: %w", err)
+		}
+		var ord keyOrder
+		ord.addKeys(keys)
+		return buildFromColumnsOrdered(ctx, cols, ord.names, cfg)
 	default:
 		return nil, fmt.Errorf("json.Read: expected '[' or '{' at document start, got %q", b)
 	}
@@ -175,6 +197,7 @@ func ReadNDJSON(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.Da
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 1<<26) // up to 64 MiB per line
 	var rows []map[string]any
+	var ord keyOrder
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -189,12 +212,15 @@ func ReadNDJSON(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.Da
 		if err := json.Unmarshal(trimmed, &row); err != nil {
 			return nil, fmt.Errorf("json.ReadNDJSON: line %d: %w", len(rows)+1, err)
 		}
+		if err := ord.add(row, trimmed); err != nil {
+			return nil, fmt.Errorf("json.ReadNDJSON: line %d: %w", len(rows)+1, err)
+		}
 		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("json.ReadNDJSON: %w", err)
 	}
-	return buildFromRows(ctx, rows, cfg)
+	return buildFromRowsOrdered(ctx, rows, ord.names, cfg)
 }
 
 // ReadNDJSONString is a convenience that parses an NDJSON-formatted string.
@@ -230,23 +256,77 @@ func ReadNDJSONURL(ctx context.Context, url string, opts ...Option) (*dataframe.
 	return ReadNDJSON(ctx, resp.Body, opts...)
 }
 
-// Write writes df as a JSON array of objects (one object per row). String
-// escapes and number formatting match encoding/json's defaults.
+// Write writes df as a JSON array of objects (one object per row), with
+// keys in column order as polars.DataFrame.write_json does. NaN and
+// infinities have no JSON form and are written as null, also matching
+// polars. The array is followed by a newline.
 func Write(ctx context.Context, w io.Writer, df *dataframe.DataFrame) error {
-	_ = ctx
-	rows := make([]map[string]any, df.Height())
-	for i := range rows {
-		rows[i] = map[string]any{}
+	rw, err := newRowWriter(df)
+	if err != nil {
+		return err
 	}
-	for _, s := range df.Columns() {
-		chunk := s.Chunk(0)
-		name := s.Name()
-		n := chunk.Len()
-		for i := range n {
-			rows[i][name] = arrowCellToGo(chunk, i)
+	bw := bufio.NewWriter(w)
+	bw.WriteByte('[')
+	for i := range df.Height() {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if i > 0 {
+			bw.WriteByte(',')
+		}
+		if err := rw.writeRow(bw, i); err != nil {
+			return err
 		}
 	}
-	return json.NewEncoder(w).Encode(rows)
+	bw.WriteString("]\n")
+	return bw.Flush()
+}
+
+// rowWriter encodes one DataFrame row as a JSON object. Keys are
+// pre-encoded once; values go through encoding/json.
+type rowWriter struct {
+	keys [][]byte
+	cols []arrow.Array
+}
+
+func newRowWriter(df *dataframe.DataFrame) (*rowWriter, error) {
+	rw := &rowWriter{}
+	if df.Height() == 0 {
+		return rw, nil // a zero-row series may have no chunk to read
+	}
+	for _, s := range df.Columns() {
+		key, err := json.Marshal(s.Name())
+		if err != nil {
+			return nil, err
+		}
+		rw.keys = append(rw.keys, key)
+		rw.cols = append(rw.cols, s.Chunk(0))
+	}
+	return rw, nil
+}
+
+func (rw *rowWriter) writeRow(bw *bufio.Writer, i int) error {
+	bw.WriteByte('{')
+	for c, col := range rw.cols {
+		if c > 0 {
+			bw.WriteByte(',')
+		}
+		bw.Write(rw.keys[c])
+		bw.WriteByte(':')
+		v := arrowCellToGo(col, i)
+		if f, isFloat := v.(float64); isFloat && (math.IsNaN(f) || math.IsInf(f, 0)) {
+			v = nil
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("json: column %s row %d: %w", rw.keys[c], i, err)
+		}
+		bw.Write(b)
+	}
+	bw.WriteByte('}')
+	return nil
 }
 
 // WriteFile writes df as a JSON array of objects to path.
@@ -275,41 +355,106 @@ func WriteNDJSONFile(ctx context.Context, path string, df *dataframe.DataFrame) 
 	return f.Close()
 }
 
-// WriteNDJSON writes df as newline-delimited JSON.
+// WriteNDJSON writes df as newline-delimited JSON, one object per row
+// with keys in column order. NaN and infinities are written as null.
 func WriteNDJSON(ctx context.Context, w io.Writer, df *dataframe.DataFrame) error {
-	_ = ctx
-	n := df.Height()
-	cols := df.Columns()
-	enc := json.NewEncoder(w)
-	for i := range n {
-		row := make(map[string]any, len(cols))
-		for _, s := range cols {
-			row[s.Name()] = arrowCellToGo(s.Chunk(0), i)
+	rw, err := newRowWriter(df)
+	if err != nil {
+		return err
+	}
+	bw := bufio.NewWriter(w)
+	for i := range df.Height() {
+		if i%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
-		if err := enc.Encode(row); err != nil {
+		if err := rw.writeRow(bw, i); err != nil {
 			return err
 		}
+		bw.WriteByte('\n')
 	}
+	return bw.Flush()
+}
+
+// keyOrder collects object keys in first-seen document order across
+// rows. Go maps lose key order, so a row that introduces a new key is
+// re-scanned for its key order; rows with only known keys cost a map
+// lookup per key.
+type keyOrder struct {
+	names []string
+	seen  map[string]struct{}
+}
+
+func (o *keyOrder) add(row map[string]any, raw []byte) error {
+	fresh := false
+	for k := range row {
+		if _, ok := o.seen[k]; !ok {
+			fresh = true
+			break
+		}
+	}
+	if !fresh {
+		return nil
+	}
+	keys, err := objectKeys(raw)
+	if err != nil {
+		return err
+	}
+	o.addKeys(keys)
 	return nil
 }
 
-// buildFromRows materializes rows into a DataFrame in column order of first
-// appearance. Missing fields become nulls; extra fields extend the schema.
-func buildFromRows(ctx context.Context, rows []map[string]any, cfg config) (*dataframe.DataFrame, error) {
+func (o *keyOrder) addKeys(keys []string) {
+	if o.seen == nil {
+		o.seen = map[string]struct{}{}
+	}
+	for _, k := range keys {
+		if _, ok := o.seen[k]; !ok {
+			o.seen[k] = struct{}{}
+			o.names = append(o.names, k)
+		}
+	}
+}
+
+// objectKeys returns the top-level keys of a JSON object in document
+// order.
+func objectKeys(raw []byte) ([]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	t, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if d, ok := t.(json.Delim); !ok || d != '{' {
+		return nil, fmt.Errorf("expected a JSON object")
+	}
+	var keys []string
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		k, _ := t.(string)
+		keys = append(keys, k)
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return nil, err
+		}
+	}
+	return keys, nil
+}
+
+// buildFromRowsOrdered materializes rows into a DataFrame with columns in
+// colNames order (first appearance in the document, like polars).
+// Missing fields become nulls; extra fields extend the schema.
+func buildFromRowsOrdered(ctx context.Context, rows []map[string]any, colNames []string, cfg config) (*dataframe.DataFrame, error) {
 	_ = ctx
 	if len(rows) == 0 {
 		return dataframe.New()
 	}
-	// Preserve insertion order.
-	var colNames []string
-	seen := map[string]struct{}{}
 	types := map[string]inferredType{}
 	for _, r := range rows {
 		for k, v := range r {
-			if _, ok := seen[k]; !ok {
-				seen[k] = struct{}{}
-				colNames = append(colNames, k)
-			}
 			types[k] = promote(types[k], inferValue(v))
 		}
 	}
@@ -331,20 +476,13 @@ func buildFromRows(ctx context.Context, rows []map[string]any, cfg config) (*dat
 	return dataframe.New(ss...)
 }
 
-// buildFromColumns handles the object-of-arrays input shape.
-func buildFromColumns(ctx context.Context, cols map[string][]any, cfg config) (*dataframe.DataFrame, error) {
+// buildFromColumnsOrdered handles the object-of-arrays input shape, with
+// columns in document key order like polars.
+func buildFromColumnsOrdered(ctx context.Context, cols map[string][]any, names []string, cfg config) (*dataframe.DataFrame, error) {
 	_ = ctx
 	if len(cols) == 0 {
 		return dataframe.New()
 	}
-	// Sort columns by name for deterministic order since Go maps don't
-	// preserve insertion.
-	names := make([]string, 0, len(cols))
-	for k := range cols {
-		names = append(names, k)
-	}
-	// Stable sort so tests are reproducible.
-	sortStrings(names)
 	ss := make([]*series.Series, 0, len(names))
 	release := func() {
 		for _, s := range ss {
@@ -565,17 +703,4 @@ func trimSpaces(b []byte) []byte {
 		j--
 	}
 	return b[i:j]
-}
-
-func sortStrings(s []string) {
-	// Simple insertion sort; column lists are short.
-	for i := 1; i < len(s); i++ {
-		x := s[i]
-		j := i - 1
-		for j >= 0 && s[j] > x {
-			s[j+1] = s[j]
-			j--
-		}
-		s[j+1] = x
-	}
 }

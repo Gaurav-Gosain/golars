@@ -19,7 +19,6 @@ package render
 
 import (
 	"fmt"
-	"html"
 	"strings"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
@@ -56,55 +55,7 @@ func HTMLWith(df *dataframe.DataFrame, lim Limits) string {
 	if df == nil {
 		return `<pre>&lt;nil dataframe&gt;</pre>`
 	}
-	h, w := df.Shape()
-	if w == 0 || h == 0 {
-		return fmt.Sprintf(`<div class="golars-df"><small style="opacity:0.6">shape: (%d, %d) - empty</small></div>`, h, w)
-	}
-	colIdx, colEllipsis := pickCols(w, lim.MaxCols)
-	rowIdx, rowEllipsisAt := pickRows(h, lim.MaxRows)
-
-	var b strings.Builder
-	b.WriteString(`<div class="golars-df" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:inherit">`)
-	fmt.Fprintf(&b, `<small style="opacity:0.6">shape: (%d, %d)</small>`, h, w)
-	b.WriteString(`<table style="border-collapse:collapse;margin-top:4px;border:1px solid;border-color:currentColor;border-color:rgba(128,128,128,0.4)">`)
-
-	b.WriteString(`<thead><tr>`)
-	for _, ci := range colIdx {
-		if ci < 0 {
-			b.WriteString(thHTML("…"))
-			continue
-		}
-		b.WriteString(thHTML(df.ColumnAt(ci).Name()))
-	}
-	b.WriteString(`</tr><tr>`)
-	for _, ci := range colIdx {
-		if ci < 0 {
-			b.WriteString(dtypeHTML("…"))
-			continue
-		}
-		b.WriteString(dtypeHTML(df.ColumnAt(ci).DType().String()))
-	}
-	b.WriteString(`</tr></thead><tbody>`)
-
-	for ri, rowPos := range rowIdx {
-		b.WriteString(`<tr>`)
-		for _, ci := range colIdx {
-			if ci < 0 || ri == rowEllipsisAt {
-				b.WriteString(tdHTML("…", false))
-				continue
-			}
-			cell, isNull := cellString(df.ColumnAt(ci), rowPos, lim.MaxCellRune)
-			b.WriteString(tdHTML(cell, isNull))
-		}
-		b.WriteString(`</tr>`)
-	}
-
-	b.WriteString(`</tbody></table>`)
-	if colEllipsis {
-		fmt.Fprintf(&b, `<small style="opacity:0.6">(showing %d of %d columns)</small>`, len(colIdx), w)
-	}
-	b.WriteString(`</div>`)
-	return b.String()
+	return df.HTMLWith(dataframe.FormatOptions{MaxRows: lim.MaxRows, MaxCols: lim.MaxCols, MaxCellRune: lim.MaxCellRune})
 }
 
 // Markdown renders df as a GFM pipe-table. Useful when the consumer
@@ -177,34 +128,6 @@ func MimeBundle(df *dataframe.DataFrame) map[string]string {
 
 // --- helpers ----------------------------------------------------
 
-// cellBorder is the rgba border every <th>/<td> uses. currentColor
-// would track text colour but breaks on themes that paint dark text on
-// dark backgrounds (charm-ish notebooks); a fixed translucent grey
-// reads cleanly on white, light grey, or near-black backgrounds.
-const cellBorder = "border:1px solid rgba(128,128,128,0.35)"
-
-func thHTML(s string) string {
-	return fmt.Sprintf(
-		`<th style="%s;padding:2px 6px;text-align:left;font-weight:600">%s</th>`,
-		cellBorder, html.EscapeString(s),
-	)
-}
-
-func dtypeHTML(s string) string {
-	return fmt.Sprintf(
-		`<th style="%s;padding:2px 6px;opacity:0.6;text-align:left;font-weight:400;font-size:11px">%s</th>`,
-		cellBorder, html.EscapeString(s),
-	)
-}
-
-func tdHTML(s string, isNull bool) string {
-	style := cellBorder + ";padding:2px 6px"
-	if isNull {
-		style += ";opacity:0.45;font-style:italic"
-	}
-	return fmt.Sprintf(`<td style="%s">%s</td>`, style, html.EscapeString(s))
-}
-
 // mdEscape escapes pipes + newlines so a cell value can't break the
 // GFM table grid.
 func mdEscape(s string) string {
@@ -224,12 +147,9 @@ func cellString(s *series.Series, i int, maxRune int) (string, bool) {
 	if i < 0 || i >= s.Len() {
 		return "", false
 	}
-	chunk := 0
-	for i >= s.Chunk(chunk).Len() {
-		i -= s.Chunk(chunk).Len()
-		chunk++
-	}
-	arr := s.Chunk(chunk)
+	// Chunk(0) consolidates a multi-chunk series, so index i is
+	// always within the first chunk.
+	arr := s.Chunk(0)
 	if n, ok := arr.(interface{ IsNull(int) bool }); ok && n.IsNull(i) {
 		return "null", true
 	}

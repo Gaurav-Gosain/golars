@@ -30,8 +30,17 @@ import (
 // Casting to the same dtype returns a clone of the input.
 func Cast(ctx context.Context, s *series.Series, to dtype.DType, opts ...Option) (*series.Series, error) {
 	cfg := resolve(opts)
+	// Dictionary dtypes (Categorical, Enum) go first: two Enum dtypes
+	// with different categories share one arrow type, so the Equal
+	// shortcut below would skip a needed remap.
+	if s.DType().IsDictionary() || to.IsDictionary() {
+		return castCategorical(ctx, s, to, cfg)
+	}
 	if s.DType().Equal(to) {
 		return s.Clone(), nil
+	}
+	if out, ok, err := castExtra(ctx, s, to, cfg); ok {
+		return out, err
 	}
 
 	arr, err := extractChunk(s, cfg.alloc)

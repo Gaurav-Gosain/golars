@@ -3,6 +3,7 @@ package dataframe
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -174,22 +175,18 @@ func dropNullsFastSingle(ctx context.Context, df *DataFrame, name string) (*Data
 }
 
 // FillNull returns a new DataFrame where nulls are replaced with
-// value in every column whose dtype is compatible with value's Go
-// type. Columns with incompatible dtypes are cloned unchanged
-// (mirrors polars' behaviour of per-column type coercion). Returns
-// the first error encountered; partial progress is released.
+// value in every column whose dtype matches the value's kind, mirroring
+// polars' fill_null(value, matches_supertype=True): a number fills every
+// numeric column (a float value widens integer columns to f64), a bool
+// fills boolean columns and a string fills string columns. Other columns
+// are cloned unchanged.
 func (df *DataFrame) FillNull(value any) (*DataFrame, error) {
 	out := make([]*series.Series, len(df.cols))
 	for i, c := range df.cols {
-		if c.NullCount() == 0 {
-			out[i] = c.Clone()
-			continue
-		}
-		filled, err := c.FillNull(value)
+		filled, err := fillNullValue(c, value)
 		if err != nil {
-			// Dtype mismatch: keep the original column unchanged.
-			out[i] = c.Clone()
-			continue
+			releaseAll(out)
+			return nil, err
 		}
 		out[i] = filled
 	}
@@ -249,22 +246,50 @@ func uniqueFastSingle(df *DataFrame) (*DataFrame, bool, error) {
 			return nil, true, err
 		}
 		return out, true, nil
+	case *array.String:
+		// Dictionary-encode and keep each code's first row: the same
+		// first-seen order the group-by path produces, without the
+		// per-row group id array or the aggregation machinery.
+		kc := encodeStringCodes(a)
+		int32Scratch.put(kc.codes)
+		vals := make([]string, len(kc.firstRows))
+		for g, r := range kc.firstRows {
+			vals[g] = a.Value(int(r))
+		}
+		s, err := series.FromString(col.Name(), vals, nil)
+		if err != nil {
+			return nil, true, err
+		}
+		out, err := New(s)
+		if err != nil {
+			s.Release()
+			return nil, true, err
+		}
+		return out, true, nil
 	}
 	return nil, false, nil
 }
 
-// WithRowIndex prepends an int64 column named `name` with row numbers
-// starting at `offset`. Polars default is offset=0 and name="index".
-// The returned frame shares every original column by reference.
+// WithRowIndex prepends a u32 column named `name` with row numbers
+// starting at `offset`, matching polars' IdxSize dtype. Polars default is
+// offset=0 and name="index". The offset must be non-negative and the last
+// index must fit in u32. The returned frame shares every original column
+// by reference.
 func (df *DataFrame) WithRowIndex(name string, offset int64) (*DataFrame, error) {
 	if df.Contains(name) {
 		return nil, fmt.Errorf("%w: %q", ErrDuplicateColumn, name)
 	}
-	vals := make([]int64, df.height)
-	for i := range vals {
-		vals[i] = offset + int64(i)
+	if offset < 0 {
+		return nil, fmt.Errorf("dataframe.WithRowIndex: offset %d must be non-negative", offset)
 	}
-	idx, err := series.FromInt64(name, vals, nil)
+	if offset+int64(df.height) > math.MaxUint32+1 {
+		return nil, fmt.Errorf("dataframe.WithRowIndex: row index overflows u32 (offset %d, height %d)", offset, df.height)
+	}
+	vals := make([]uint32, df.height)
+	for i := range vals {
+		vals[i] = uint32(offset + int64(i))
+	}
+	idx, err := series.FromUint32(name, vals, nil)
 	if err != nil {
 		return nil, err
 	}

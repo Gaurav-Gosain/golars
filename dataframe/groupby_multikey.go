@@ -166,7 +166,10 @@ func hashAggMultiKey(ctx context.Context, df *DataFrame, keys []string, specs []
 		cols[i] = c
 	}
 
-	groupIDs, uniques := assignGroupsMultiKey(cols, n)
+	groupIDs, uniques, ok := assignGroupsViaCodes(cols, n)
+	if !ok {
+		groupIDs, uniques = assignGroupsMultiKey(cols, n)
+	}
 	orderGroupsByKey(cols, uniques, groupIDs)
 
 	keyOuts := make([]*series.Series, len(cols))
@@ -182,7 +185,9 @@ func hashAggMultiKey(ctx context.Context, df *DataFrame, keys []string, specs []
 		}
 		keyOuts[i] = s
 	}
-	return hashAggWithGroups(ctx, df, groupIDs, groupLen(uniques[0]), keyOuts, specs, mem)
+	out, handled, err := hashAggWithGroups(ctx, df, groupIDs, groupLen(uniques[0]), keyOuts, specs, mem)
+	intScratch.put(groupIDs)
+	return out, handled, err
 }
 
 // multiKeyCol is one group-by key column in its concrete arrow type.
@@ -267,6 +272,64 @@ func rowKeyNull(c multiKeyCol, i int) bool {
 	default:
 		return c.bl.IsNull(i)
 	}
+}
+
+// assignGroupsViaCodes dictionary-encodes each key column on its own
+// (columns in parallel), then combines the per-column codes into a
+// mixed-radix integer key per row. This replaces hashing a byte-encoded
+// tuple per row with one cheap typed lookup per column plus an integer
+// lookup, and yields the same first-seen group numbering. ok=false
+// means the combined key space overflowed and the caller should use the
+// tuple path.
+func assignGroupsViaCodes(cols []multiKeyCol, n int) ([]int, []*keyUniques, bool) {
+	kcs := make([]keyCodes, len(cols))
+	if n >= strPartThreshold {
+		var wg sync.WaitGroup
+		for i, c := range cols {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				kcs[i] = encodeKeyColumn(c)
+			}()
+		}
+		wg.Wait()
+	} else {
+		for i, c := range cols {
+			kcs[i] = encodeKeyColumn(c)
+		}
+	}
+	groupIDs, firstRows, ok := assignGroupsFromCodes(kcs, n)
+	for _, kc := range kcs {
+		int32Scratch.put(kc.codes)
+	}
+	if !ok {
+		return nil, nil, false
+	}
+	uniques := make([]*keyUniques, len(cols))
+	for ci, c := range cols {
+		// Non-nil typed slices keep the dtype visible to series() even
+		// when there are zero groups.
+		u := &keyUniques{}
+		switch {
+		case c.i64 != nil:
+			u.i64 = make([]int64, 0, len(firstRows))
+		case c.i32 != nil:
+			u.i32 = make([]int32, 0, len(firstRows))
+		case c.str != nil:
+			u.str = make([]string, 0, len(firstRows))
+		default:
+			u.boolean = make([]bool, 0, len(firstRows))
+		}
+		for _, r := range firstRows {
+			if rowKeyNull(c, int(r)) {
+				u.appendNull(c)
+			} else {
+				u.appendValue(c, int(r))
+			}
+		}
+		uniques[ci] = u
+	}
+	return groupIDs, uniques, true
 }
 
 // assignGroupsMultiKey maps every row to a first-seen group id and

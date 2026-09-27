@@ -8,9 +8,13 @@ import (
 )
 
 // Scan returns a LazyFrame that reads the Parquet file at path only
-// when Collect runs. Options propagate to ReadFile.
+// when Collect runs. Options propagate to ReadFile. When the optimizer
+// can prove only some columns are used, only those are decoded.
 func Scan(path string, opts ...Option) lazy.LazyFrame {
-	return lazy.FromSource("parquet:"+path, nil, func(ctx context.Context) (*dataframe.DataFrame, error) {
-		return ReadFile(ctx, path, opts...)
+	return lazy.FromSourceProjected("parquet:"+path, nil, func(ctx context.Context, cols []string) (*dataframe.DataFrame, error) {
+		if cols == nil {
+			return ReadFile(ctx, path, opts...)
+		}
+		return ReadFile(ctx, path, append(append([]Option(nil), opts...), WithColumns(cols...))...)
 	})
 }

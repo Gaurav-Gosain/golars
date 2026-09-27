@@ -111,9 +111,7 @@ func TestParityCompareBothNullIsNull(t *testing.T) {
 	}
 }
 
-// Polars: NaN != NaN holds under == (both sides non-null): IEEE
-// semantics bubble through. Floats compared to NaN are always false
-// under <, <=, >, >= too.
+// polars compares floats with a total order, not IEEE: NaN == NaN.
 func TestParityCompareNaNInequalityHolds(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer alloc.AssertSize(t, 0)
@@ -133,10 +131,8 @@ func TestParityCompareNaNInequalityHolds(t *testing.T) {
 	}
 	defer eq.Release()
 	arr := eq.Chunk(0).(*array.Boolean)
-	// NaN == NaN → false (IEEE)
-	// 1 == 1    → true
-	// NaN == 2  → false
-	want := []bool{false, true, false}
+	// polars total order: NaN == NaN is true.
+	want := []bool{true, true, false}
 	for i, w := range want {
 		if arr.Value(i) != w {
 			t.Fatalf("Eq[%d] got %v want %v", i, arr.Value(i), w)
@@ -146,8 +142,7 @@ func TestParityCompareNaNInequalityHolds(t *testing.T) {
 	ne, _ := compute.Ne(context.Background(), a, b, compute.WithAllocator(alloc))
 	defer ne.Release()
 	arr = ne.Chunk(0).(*array.Boolean)
-	// NaN != NaN → true
-	want = []bool{true, false, true}
+	want = []bool{false, false, true}
 	for i, w := range want {
 		if arr.Value(i) != w {
 			t.Fatalf("Ne[%d] got %v want %v", i, arr.Value(i), w)
@@ -155,8 +150,9 @@ func TestParityCompareNaNInequalityHolds(t *testing.T) {
 	}
 }
 
-// Polars: Lt / Le / Gt / Ge vs NaN are all false.
-func TestParityCompareNaNOrderIsAlwaysFalse(t *testing.T) {
+// polars orders NaN above every number:
+// [NaN, 1, 2] < [1, NaN, NaN] == [False, True, True].
+func TestParityCompareNaNOrderIsTotal(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer alloc.AssertSize(t, 0)
 
@@ -172,20 +168,21 @@ func TestParityCompareNaNOrderIsAlwaysFalse(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		op   func(context.Context, *series.Series, *series.Series, ...compute.Option) (*series.Series, error)
+		want []bool
 	}{
-		{"Lt", compute.Lt},
-		{"Le", compute.Le},
-		{"Gt", compute.Gt},
-		{"Ge", compute.Ge},
+		{"Lt", compute.Lt, []bool{false, true, true}},
+		{"Le", compute.Le, []bool{false, true, true}},
+		{"Gt", compute.Gt, []bool{true, false, false}},
+		{"Ge", compute.Ge, []bool{true, false, false}},
 	} {
 		out, err := tc.op(context.Background(), a, b, compute.WithAllocator(alloc))
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		arr := out.Chunk(0).(*array.Boolean)
-		for i := range arr.Len() {
-			if arr.Value(i) {
-				t.Fatalf("%s[%d] involving NaN should be false, got true", tc.name, i)
+		for i, w := range tc.want {
+			if arr.Value(i) != w {
+				t.Errorf("%s[%d] = %v, want %v", tc.name, i, arr.Value(i), w)
 			}
 		}
 		out.Release()

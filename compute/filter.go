@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/bits"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -65,6 +66,14 @@ func Filter(ctx context.Context, s, mask *series.Series, opts ...Option) (*serie
 		}
 	}
 
+	// Strings: walk the mask words directly into offset and data
+	// buffers, skipping the []int index list.
+	if s.DType().ID() == arrow.STRING && sArr.NullN() == 0 && mArr.NullN() == 0 && mArr.Data().Offset() == 0 {
+		if bufs := mArr.Data().Buffers(); len(bufs) >= 2 && bufs[1] != nil {
+			return filterStringByBitmap(name, sArr.(*array.String), bufs[1].Bytes(), cfg.alloc)
+		}
+	}
+
 	// Fallback: precompute indices then gather. Used for Boolean / String
 	// dtypes, non-zero mask offsets, or when the source has nulls we must
 	// preserve.
@@ -112,6 +121,8 @@ func Filter(ctx context.Context, s, mask *series.Series, opts ...Option) (*serie
 		return takeInt64Typed(name, sArr, indices, cfg.alloc)
 	case arrow.DATE32, arrow.TIME32:
 		return takeInt32Typed(name, sArr, indices, cfg.alloc)
+	case arrow.DICTIONARY:
+		return catTake(name, sArr, indices, cfg.alloc)
 	}
 	return nil, isUnsupported("Filter", s.DType())
 }
@@ -173,8 +184,21 @@ func Take(ctx context.Context, s *series.Series, indices []int, opts ...Option) 
 		return takeInt64Typed(name, sArr, indices, cfg.alloc)
 	case arrow.DATE32, arrow.TIME32:
 		return takeInt32Typed(name, sArr, indices, cfg.alloc)
+	case arrow.DICTIONARY:
+		return catTake(name, sArr, indices, cfg.alloc)
 	}
-	return nil, isUnsupported("Take", s.DType())
+	// Nested and less common dtypes (lists, structs, small ints) go
+	// through the generic gather.
+	out, err := s.Gather(indices, series.WithAllocator(cfg.alloc))
+	if err != nil {
+		return nil, err
+	}
+	if out.Name() != name {
+		renamed := out.Rename(name)
+		out.Release()
+		return renamed, nil
+	}
+	return out, nil
 }
 
 // takeInt64Typed gathers rows from an int64-backed array (TIMESTAMP, DATE64,
@@ -242,72 +266,43 @@ func takeInt32Typed(name string, src arrow.Array, indices []int, mem memory.Allo
 // arrow int64 buffer, bypassing the []int64 → memcpy → arrow path used by
 // takeNumeric. At 256K+ this saves one 2 MB memcpy per call.
 func takeInt64Direct(name string, src []int64, indices []int, mem memory.Allocator) (*series.Series, error) {
-	n := len(indices)
-	return series.BuildInt64Direct(name, n, poolingMem(mem), func(out []int64) {
-		if n >= 64*1024 {
-			_ = pool.ParallelFor(context.Background(), n, 0, func(_ context.Context, s, e int) error {
-				j := s
-				for ; j+8 <= e; j += 8 {
-					i0, i1, i2, i3 := indices[j], indices[j+1], indices[j+2], indices[j+3]
-					i4, i5, i6, i7 := indices[j+4], indices[j+5], indices[j+6], indices[j+7]
-					out[j], out[j+1], out[j+2], out[j+3] = src[i0], src[i1], src[i2], src[i3]
-					out[j+4], out[j+5], out[j+6], out[j+7] = src[i4], src[i5], src[i6], src[i7]
-				}
-				for ; j < e; j++ {
-					out[j] = src[indices[j]]
-				}
-				return nil
-			})
-			return
-		}
-		// Serial path: 8-way unroll matches the parallel one so the
-		// compiler sees an identically-shaped loop. At N=16K this
-		// exposes ~4 cache-miss requests concurrently to the CPU's
-		// memory-level parallelism, narrowing the gap vs polars-rs'
-		// similarly-unrolled take.
-		j := 0
-		for ; j+8 <= n; j += 8 {
-			i0, i1, i2, i3 := indices[j], indices[j+1], indices[j+2], indices[j+3]
-			i4, i5, i6, i7 := indices[j+4], indices[j+5], indices[j+6], indices[j+7]
-			out[j], out[j+1], out[j+2], out[j+3] = src[i0], src[i1], src[i2], src[i3]
-			out[j+4], out[j+5], out[j+6], out[j+7] = src[i4], src[i5], src[i6], src[i7]
-		}
-		for ; j < n; j++ {
-			out[j] = src[indices[j]]
-		}
+	return series.BuildInt64Direct(name, len(indices), poolingMem(mem), func(out []int64) {
+		parallelGather(out, src, indices)
 	})
 }
 
 func takeFloat64Direct(name string, src []float64, indices []int, mem memory.Allocator) (*series.Series, error) {
-	n := len(indices)
-	return series.BuildFloat64Direct(name, n, poolingMem(mem), func(out []float64) {
-		if n >= 64*1024 {
-			_ = pool.ParallelFor(context.Background(), n, 0, func(_ context.Context, s, e int) error {
-				j := s
-				for ; j+8 <= e; j += 8 {
-					i0, i1, i2, i3 := indices[j], indices[j+1], indices[j+2], indices[j+3]
-					i4, i5, i6, i7 := indices[j+4], indices[j+5], indices[j+6], indices[j+7]
-					out[j], out[j+1], out[j+2], out[j+3] = src[i0], src[i1], src[i2], src[i3]
-					out[j+4], out[j+5], out[j+6], out[j+7] = src[i4], src[i5], src[i6], src[i7]
-				}
-				for ; j < e; j++ {
-					out[j] = src[indices[j]]
-				}
-				return nil
-			})
-			return
-		}
-		j := 0
-		for ; j+8 <= n; j += 8 {
-			i0, i1, i2, i3 := indices[j], indices[j+1], indices[j+2], indices[j+3]
-			i4, i5, i6, i7 := indices[j+4], indices[j+5], indices[j+6], indices[j+7]
-			out[j], out[j+1], out[j+2], out[j+3] = src[i0], src[i1], src[i2], src[i3]
-			out[j+4], out[j+5], out[j+6], out[j+7] = src[i4], src[i5], src[i6], src[i7]
-		}
-		for ; j < n; j++ {
-			out[j] = src[indices[j]]
-		}
+	return series.BuildFloat64Direct(name, len(indices), poolingMem(mem), func(out []float64) {
+		parallelGather(out, src, indices)
 	})
+}
+
+// takeParallelCutoff is the output length above which a gather fans out.
+// Below it, goroutine startup costs more than the gather itself.
+const takeParallelCutoff = 64 * 1024
+
+// parallelGather runs gatherInto over chunks of indices in parallel for
+// large outputs. A panic in a worker (out-of-range index) is re-raised
+// on the calling goroutine so Take's recover still sees it.
+func parallelGather[T any](out, src []T, indices []int) {
+	n := len(indices)
+	if n < takeParallelCutoff {
+		gatherInto(out, src, indices)
+		return
+	}
+	var bad atomic.Value
+	_ = pool.ParallelFor(context.Background(), n, 0, func(_ context.Context, s, e int) error {
+		defer func() {
+			if r := recover(); r != nil {
+				bad.Store(fmt.Sprint(r))
+			}
+		}()
+		gatherInto(out[s:e], src, indices[s:e])
+		return nil
+	})
+	if r := bad.Load(); r != nil {
+		panic(r)
+	}
 }
 
 // collectMaskIndices is the hot path of Filter. Profiling showed ~30% of
@@ -446,6 +441,44 @@ func fusedFilterInt64(name string, src []int64, maskBytes []byte, n int, mem mem
 // Measured at ~18% faster on DropNulls 262K - the prior bounds-check
 // elision happened sporadically depending on inliner state; the
 // explicit unsafe path is consistent.
+// compactWord64 copies the 8-byte elements src[base+b] for every set
+// bit b of the non-zero mask word w to out[idx...], returning the new
+// idx. Three shapes:
+//   - all 64 bits set: one bulk copy.
+//   - sparse words: iterate set bits with trailing-zero counts.
+//   - dense words: a branchless loop that stores every element up to
+//     the highest set bit and advances idx by the bit. Unselected
+//     elements land in the slot the next selected element overwrites,
+//     and stopping at the highest set bit means no store goes past the
+//     word's last output slot, so neighbouring workers never collide.
+//
+// The branchless form removes the data-dependent loop exit of the
+// trailing-zero loop, which mispredicts constantly on random masks of
+// middling density (DropNulls on 30% nulls is the benchmark case).
+func compactWord64(srcPtr, outPtr unsafe.Pointer, w uint64, base, idx int) int {
+	if w == ^uint64(0) {
+		copy(unsafe.Slice((*uint64)(unsafe.Add(outPtr, idx*8)), 64),
+			unsafe.Slice((*uint64)(unsafe.Add(srcPtr, base*8)), 64))
+		return idx + 64
+	}
+	if bits.OnesCount64(w) < 16 {
+		for w != 0 {
+			bit := bits.TrailingZeros64(w)
+			*(*uint64)(unsafe.Add(outPtr, idx*8)) = *(*uint64)(unsafe.Add(srcPtr, (base+bit)*8))
+			idx++
+			w &= w - 1
+		}
+		return idx
+	}
+	hi := 64 - bits.LeadingZeros64(w)
+	s := unsafe.Slice((*uint64)(unsafe.Add(srcPtr, base*8)), hi)
+	for b, v := range s {
+		*(*uint64)(unsafe.Add(outPtr, idx*8)) = v
+		idx += int(w >> uint(b) & 1)
+	}
+	return idx
+}
+
 func fusedFilterInt64Scatter(src []int64, maskBytes []byte, out []int64, wordBitStart, wordBitEnd, outOffset int) int {
 	_ = src[wordBitEnd-1] // bounds-check hoist: compiler may elide inner check
 	_ = out[outOffset:]
@@ -459,14 +492,7 @@ func fusedFilterInt64Scatter(src []int64, maskBytes []byte, out []int64, wordBit
 		if w == 0 {
 			continue
 		}
-		base := wordIdx * 64
-		for w != 0 {
-			bit := bits.TrailingZeros64(w)
-			v := *(*int64)(unsafe.Add(srcPtr, (base+bit)*8))
-			*(*int64)(unsafe.Add(outPtr, idx*8)) = v
-			idx++
-			w &= w - 1
-		}
+		idx = compactWord64(srcPtr, outPtr, w, wordIdx*64, idx)
 	}
 	// Tail bits (only used when wordBitEnd is not a multiple of 64, e.g.
 	// at the very end of the array).
@@ -588,14 +614,7 @@ func fusedFilterFloat64Scatter(src []float64, maskBytes []byte, out []float64, w
 		if w == 0 {
 			continue
 		}
-		base := wordIdx * 64
-		for w != 0 {
-			bit := bits.TrailingZeros64(w)
-			v := *(*float64)(unsafe.Add(srcPtr, (base+bit)*8))
-			*(*float64)(unsafe.Add(outPtr, idx*8)) = v
-			idx++
-			w &= w - 1
-		}
+		idx = compactWord64(srcPtr, outPtr, w, wordIdx*64, idx)
 	}
 	rem := wordBitEnd - w1*64
 	if rem > 0 {
@@ -762,20 +781,4 @@ func takeBool(name string, src arrow.Array, indices []int, mem memory.Allocator)
 		}
 	}
 	return fromBoolResult(name, out, valid, mem)
-}
-
-func takeString(name string, src arrow.Array, indices []int, mem memory.Allocator) (*series.Series, error) {
-	strArr := src.(*array.String)
-	out := make([]string, len(indices))
-	var valid []bool
-	if src.NullN() > 0 {
-		valid = make([]bool, len(indices))
-	}
-	for j, i := range indices {
-		out[j] = strArr.Value(i)
-		if valid != nil {
-			valid[j] = src.IsValid(i)
-		}
-	}
-	return series.FromString(name, out, valid, series.WithAllocator(mem))
 }

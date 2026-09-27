@@ -263,10 +263,27 @@ func (s *Series) Chunks() []arrow.Array { return s.data.Chunks() }
 // multi-chunk Series are a caller bug; callers that want safety should
 // rechunk up-front via s.Consolidated().
 func (s *Series) Chunk(i int) arrow.Array {
-	if i == 0 && len(s.data.Chunks()) > 1 {
-		s.consolidateInPlace()
+	if i == 0 {
+		switch len(s.data.Chunks()) {
+		case 0:
+			// A zero-chunk Series (Empty, a zero-length slice) gets one
+			// empty chunk so callers that read Chunk(0) never index an
+			// empty slice.
+			s.installEmptyChunk()
+		case 1:
+		default:
+			s.consolidateInPlace()
+		}
 	}
 	return s.data.Chunk(i)
+}
+
+func (s *Series) installEmptyChunk() {
+	arr := array.MakeArrayOfNull(memory.DefaultAllocator, s.data.DataType(), 0)
+	defer arr.Release()
+	newChunked := arrow.NewChunked(s.data.DataType(), []arrow.Array{arr})
+	s.data.Release()
+	s.data = newChunked
 }
 
 // consolidateInPlace replaces s.data with a single-chunk *arrow.Chunked
@@ -364,6 +381,24 @@ func (s *Series) Slice(offset, length int) (*Series, error) {
 	}
 	sliced := array.NewChunkedSlice(s.data, int64(offset), int64(offset+length))
 	return &Series{name: s.name, data: sliced}, nil
+}
+
+// ClampSlice resolves a polars-style slice against a length n. A
+// negative offset counts from the end, a negative length means "to the
+// end", and the window is clamped to [0, n]. The result is always a
+// valid argument pair for Slice.
+func ClampSlice(offset, length, n int) (int, int) {
+	start := offset
+	if start < 0 {
+		start += n
+	}
+	stop := n
+	if length >= 0 && start+length < n {
+		stop = start + length
+	}
+	start = min(max(start, 0), n)
+	stop = min(max(stop, 0), n)
+	return start, max(stop-start, 0)
 }
 
 // String returns a short one-line repr: name: dtype [len=N, nulls=M].

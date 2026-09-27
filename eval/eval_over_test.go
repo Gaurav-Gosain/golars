@@ -157,8 +157,9 @@ func TestOverGenericPath(t *testing.T) {
 	}
 	defer out.Release()
 	col, _ := out.Column("av")
-	arr := col.Chunk(0).(*array.Float64)
-	want := []float64{1, 2, 3, 4, 5}
+	// polars keeps abs() on i64 as i64 inside over().
+	arr := col.Chunk(0).(*array.Int64)
+	want := []int64{1, 2, 3, 4, 5}
 	for i, w := range want {
 		if !arr.IsValid(i) || arr.Value(i) != w {
 			t.Fatalf("idx %d: got valid=%v value=%v want %v",

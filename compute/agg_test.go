@@ -174,20 +174,41 @@ func TestMinMaxFloat(t *testing.T) {
 func TestMinMaxFloatNaN(t *testing.T) {
 	t.Parallel()
 	mem := testutil.NewCheckedAllocator(t)
-	s, _ := series.FromFloat64("x",
-		[]float64{1.0, math.NaN(), 3.0, 2.0},
-		nil,
-		series.WithAllocator(mem))
-	defer s.Release()
-
-	// Polars convention: NaN is treated as greater than non-NaN for max.
-	maxV, _, _ := compute.MaxFloat64(context.Background(), s, compute.WithAllocator(mem))
-	if !math.IsNaN(maxV) {
-		t.Errorf("Max = %v, want NaN", maxV)
+	nan := math.NaN()
+	ctx := context.Background()
+	big := make([]float64, 300_000)
+	for i := range big {
+		big[i] = float64(i % 1000)
 	}
-	minV, _, _ := compute.MinFloat64(context.Background(), s, compute.WithAllocator(mem))
-	if minV != 1.0 {
-		t.Errorf("Min = %v, want 1.0", minV)
+	big[0], big[7], big[len(big)-1] = nan, nan, nan
+	allNaN := make([]float64, 300_000)
+	for i := range allNaN {
+		allNaN[i] = nan
+	}
+	// polars 1.39: NaN is ignored by min/max unless every value is NaN.
+	cases := []struct {
+		name     string
+		vals     []float64
+		valid    []bool
+		min, max float64
+	}{
+		{"mixed", []float64{1.0, nan, 3.0, 2.0}, nil, 1, 3},
+		{"leading nan", []float64{nan, 3.0, 2.0}, nil, 2, 3},
+		{"all nan", []float64{nan, nan}, nil, nan, nan},
+		{"nan and null", []float64{nan, 0, 5}, []bool{true, false, true}, 5, 5},
+		{"nan only with null", []float64{nan, 0}, []bool{true, false}, nan, nan},
+		{"large", big, nil, 0, 999},
+		{"large all nan", allNaN, nil, nan, nan},
+	}
+	same := func(a, b float64) bool { return a == b || (math.IsNaN(a) && math.IsNaN(b)) }
+	for _, c := range cases {
+		s, _ := series.FromFloat64("x", c.vals, c.valid, series.WithAllocator(mem))
+		maxV, _, _ := compute.MaxFloat64(ctx, s, compute.WithAllocator(mem))
+		minV, _, _ := compute.MinFloat64(ctx, s, compute.WithAllocator(mem))
+		s.Release()
+		if !same(maxV, c.max) || !same(minV, c.min) {
+			t.Errorf("%s: min, max = %v, %v; want %v, %v", c.name, minV, maxV, c.min, c.max)
+		}
 	}
 }
 

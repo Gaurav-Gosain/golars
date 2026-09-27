@@ -56,7 +56,7 @@ func (df *DataFrame) Upsample(ctx context.Context, col string, every string) (*D
 	}
 
 	// Grab min/max from the sorted ts col. We don't verify sorting
-	// at runtime here — polars does the same; documented as a
+	// at runtime here. Polars does the same; documented as a
 	// caller invariant.
 	ts := s.Chunk(0).(*array.Timestamp)
 	if ts.Len() == 0 {

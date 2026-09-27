@@ -337,9 +337,9 @@ func minMaxInt(ctx context.Context, s *series.Series, opts []Option, isMax bool)
 	return 0, false, isUnsupported("MinInt64/MaxInt64", s.DType())
 }
 
-// MinFloat64, MaxFloat64 are the float analogues. NaN values participate in
-// ordering in a deterministic way: NaN is treated as greater than all
-// non-NaN values, matching polars' default ordering.
+// MinFloat64, MaxFloat64 are the float analogues. Like polars, NaN is
+// ignored unless every non-null value is NaN, in which case the result
+// is NaN.
 func MinFloat64(ctx context.Context, s *series.Series, opts ...Option) (float64, bool, error) {
 	return minMaxFloat(ctx, s, opts, false)
 }
@@ -475,8 +475,9 @@ func reduceIntChunks[T int32 | int64](
 }
 
 // reduceFloat64SIMD is the no-null float64 min/max kernel. Each worker
-// scans its partition for NaN, then if clean reduces with MINPD/MAXPD.
-// NaN semantics match polars: NaN wins max, loses min. All-NaN → NaN.
+// reduces with MINPD/MAXPD and falls back to a scalar pass only when its
+// partition holds a NaN. NaN semantics match polars: NaN is ignored
+// unless every value is NaN.
 func reduceFloat64SIMD(ctx context.Context, vals []float64, par, n int, isMax bool) (float64, bool, error) {
 	par = max(min(cappedReductionWorkers(par), n), 1)
 
@@ -537,9 +538,7 @@ func reduceFloat64SIMD(ctx context.Context, vals []float64, par, n int, isMax bo
 					}
 				}
 			}
-			if isMax && anyNaN {
-				parts[w] = result{val: math.NaN(), ok: true, anyNaN: true}
-			} else if !bestIsNaN {
+			if !bestIsNaN {
 				parts[w] = result{val: best, ok: true, anyNaN: anyNaN}
 			} else {
 				parts[w] = result{val: math.NaN(), ok: true, anyNaN: true}
@@ -561,14 +560,11 @@ func reduceFloat64SIMD(ctx context.Context, vals []float64, par, n int, isMax bo
 			continue
 		}
 		if isMax {
-			if p.anyNaN {
-				final.val = math.NaN()
-				final.anyNaN = true
-			} else if !final.anyNaN && p.val > final.val {
+			if greater(p.val, final.val) {
 				final.val = p.val
 			}
 		} else {
-			if p.val < final.val {
+			if less(p.val, final.val) {
 				final.val = p.val
 			}
 		}
@@ -600,10 +596,7 @@ func reduceFloatChunks[T float32 | float64](
 	chunk := (n + par - 1) / par
 	noNulls := arr.NullN() == 0
 
-	// For NaN: treat NaN as greater than any non-NaN for max, greater for min
-	// ordering. Polars places NaN at the end on default sort ascending; for
-	// aggregation we match: NaN "wins" a max and "loses" a min only against
-	// itself.
+	// NaN is ignored unless every value is NaN (polars min/max).
 	err := pool.ParallelFor(ctx, par, par, func(ctx context.Context, start, end int) error {
 		for w := start; w < end; w++ {
 			s := w * chunk
@@ -615,21 +608,17 @@ func reduceFloatChunks[T float32 | float64](
 			var r result
 			if noNulls {
 				// Single-pass tight loop. `v < best` is false for NaN, so NaN
-				// is silently skipped once best is non-NaN; if vals[s] is NaN,
-				// the loop cannot replace best, so we fix that up after. For
-				// max, NaN wins per polars semantics, which we model by
-				// tracking anyNaN and returning NaN at the end.
+				// is skipped once best is a number; a leading NaN is replaced
+				// by the first number. The result is NaN only when every
+				// value is NaN, matching polars.
 				chunk := vals[s:e]
 				best := chunk[0]
 				bestIsNaN := best != best
-				anyNaN := bestIsNaN
 				if isMax {
 					for _, v := range chunk[1:] {
 						if v > best {
 							best = v
-						} else if v != v {
-							anyNaN = true
-						} else if bestIsNaN {
+						} else if bestIsNaN && v == v {
 							best = v
 							bestIsNaN = false
 						}
@@ -638,24 +627,14 @@ func reduceFloatChunks[T float32 | float64](
 					for _, v := range chunk[1:] {
 						if v < best {
 							best = v
-						} else if v != v {
-							anyNaN = true
-						} else if bestIsNaN {
+						} else if bestIsNaN && v == v {
 							best = v
 							bestIsNaN = false
 						}
 					}
 				}
-				if isMax && anyNaN {
-					r.val = T(math.NaN())
-					r.ok = true
-				} else if !bestIsNaN {
-					r.val = best
-					r.ok = true
-				} else {
-					r.val = T(math.NaN())
-					r.ok = true
-				}
+				r.val = best
+				r.ok = true
 				parts[w] = r
 				continue
 			}
@@ -709,9 +688,14 @@ func reduceFloatChunks[T float32 | float64](
 	return final.val, final.ok, nil
 }
 
+// greater and less order floats for min/max with NaN ignored: NaN never
+// beats a number, and any number beats NaN.
 func greater[T float32 | float64](a, b T) bool {
 	if isNaN(a) {
-		return !isNaN(b)
+		return false
+	}
+	if isNaN(b) {
+		return true
 	}
 	return a > b
 }

@@ -94,7 +94,7 @@ func executeNodeRaw(ctx context.Context, cfg execConfig, n Node) (*dataframe.Dat
 	case DataFrameScan:
 		return executeScan(ctx, cfg, node)
 	case SourceFunc:
-		return node.Load(ctx)
+		return node.load(ctx)
 	case Projection:
 		return executeProjection(ctx, cfg, node)
 	case WithColumns:
@@ -137,6 +137,13 @@ func executeNodeRaw(ctx context.Context, cfg execConfig, n Node) (*dataframe.Dat
 		return executeAggregate(ctx, cfg, node)
 	case Join:
 		return executeJoin(ctx, cfg, node)
+	case FrameOpNode:
+		return executeFrameOp(ctx, cfg, node)
+	case BinaryFrameOpNode:
+		return executeBinaryFrameOp(ctx, cfg, node)
+	}
+	if out, ok, err := executeTemporalGroup(ctx, cfg, n); ok {
+		return out, err
 	}
 	return nil, fmt.Errorf("lazy: cannot execute node %T", n)
 }
@@ -197,7 +204,8 @@ func executeScan(ctx context.Context, cfg execConfig, s DataFrameScan) (*datafra
 
 	// Apply pushed-down slice.
 	if s.Length >= 0 {
-		out, err := projected.Slice(s.Offset, min(s.Length, projected.Height()-s.Offset))
+		off, length := series.ClampSlice(s.Offset, s.Length, projected.Height())
+		out, err := projected.Slice(off, length)
 		projected.Release()
 		if err != nil {
 			return nil, err
@@ -214,65 +222,121 @@ func executeProjection(ctx context.Context, cfg execConfig, p Projection) (*data
 	}
 	defer input.Release()
 
-	cols := make([]*series.Series, len(p.Exprs))
-	if len(p.Exprs) >= parallelSelectMinExprs {
-		// Fan out independent column evaluations. Each worker writes
-		// its own slot; on error every completed slot is released.
-		// WithColumns stays serial: later exprs observe earlier ones.
-		g := pool.NewGroup(ctx, 0)
-		for i, e := range p.Exprs {
-			g.Go(func(gctx context.Context) error {
-				s, err := eval.Eval(gctx, eval.EvalContext{Alloc: cfg.alloc}, e, input)
-				if err != nil {
-					return fmt.Errorf("projection %s: %w", e, err)
-				}
-				name := expr.OutputName(e)
-				if s.Name() != name {
-					renamed := s.Rename(name)
-					s.Release()
-					s = renamed
-				}
-				cols[i] = s
-				return nil
-			})
-		}
-		if err := g.Wait(); err != nil {
-			for _, c := range cols {
-				if c != nil {
-					c.Release()
-				}
-			}
-			return nil, err
-		}
-		return dataframe.New(cols...)
+	cols, err := evalOutputs(ctx, cfg, p.Exprs, input, "projection")
+	if err != nil {
+		return nil, err
 	}
-	for i, e := range p.Exprs {
-		s, err := eval.Eval(ctx, eval.EvalContext{Alloc: cfg.alloc}, e, input)
+	return newProjectedFrame(cols, cfg.alloc)
+}
+
+// Parallel expression evaluation cutoffs. Every expression in a
+// select/with_columns reads the same input frame, so they are
+// independent and can run concurrently, as polars does. Fan-out pays
+// once the frame is tall enough that one expression costs well over the
+// goroutine handoff (a few microseconds), or the list is wide enough
+// that the serial sum does. Kernels also split rows internally at large
+// heights; the Go scheduler absorbs the overlap.
+const (
+	parallelEvalMinExprs = 2
+	parallelEvalMinRows  = 8 * 1024
+	parallelSelectWide   = 8
+)
+
+func parallelEvalWorthIt(nexprs, height int) bool {
+	if nexprs < parallelEvalMinExprs {
+		return false
+	}
+	return height >= parallelEvalMinRows || nexprs >= parallelSelectWide
+}
+
+// evalOutputs evaluates every expression against input and renames each
+// result to its output name. On error every produced series is released
+// and the error of the lowest failing index is returned, so the error
+// does not depend on scheduling. what prefixes the error message when
+// non-empty.
+func evalOutputs(ctx context.Context, cfg execConfig, exprs []expr.Expr, input *dataframe.DataFrame, what string) ([]*series.Series, error) {
+	cols := make([]*series.Series, len(exprs))
+	one := func(ctx context.Context, src *dataframe.DataFrame, i int) error {
+		e := exprs[i]
+		s, err := eval.Eval(ctx, eval.EvalContext{Alloc: cfg.alloc}, e, src)
 		if err != nil {
-			for _, c := range cols[:i] {
-				if c != nil {
-					c.Release()
-				}
+			if what != "" {
+				return fmt.Errorf("%s %s: %w", what, e, err)
 			}
-			return nil, fmt.Errorf("projection %s: %w", e, err)
+			return err
 		}
-		name := expr.OutputName(e)
-		if s.Name() != name {
+		if name := expr.OutputName(e); s.Name() != name {
 			renamed := s.Rename(name)
 			s.Release()
 			s = renamed
 		}
 		cols[i] = s
+		return nil
 	}
-	return dataframe.New(cols...)
+
+	if !parallelEvalWorthIt(len(exprs), input.Height()) {
+		for i := range exprs {
+			if err := one(ctx, input, i); err != nil {
+				releaseSeries(cols[:i])
+				return nil, err
+			}
+		}
+		return cols, nil
+	}
+
+	// series.Chunk(0) consolidates a multi-chunk Series in place, which
+	// is not safe to do concurrently on one shared Series. When the input
+	// has such a column, each goroutine works on its own shallow clone
+	// (fresh Series wrappers over the same buffers).
+	shared := true
+	for _, c := range input.Columns() {
+		if c.NumChunks() > 1 {
+			shared = false
+			break
+		}
+	}
+	errs := make([]error, len(exprs))
+	g := pool.NewGroup(ctx, 0)
+	for i := range exprs {
+		g.Go(func(gctx context.Context) error {
+			src := input
+			if !shared {
+				src = input.Clone()
+				defer src.Release()
+			}
+			// Record instead of returning so one failure does not cancel
+			// siblings mid-flight; the lowest index wins below.
+			errs[i] = one(gctx, src, i)
+			return nil
+		})
+	}
+	_ = g.Wait()
+	for _, err := range errs {
+		if err != nil {
+			releaseSeries(cols)
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		releaseSeries(cols)
+		return nil, err
+	}
+	return cols, nil
 }
 
-// parallelSelectMinExprs is the minimum projection width that pays for
-// goroutine fan-out. Below this the errgroup setup exceeds the win;
-// kernels also parallelize rows internally at large heights, so width
-// is the gating dimension.
-const parallelSelectMinExprs = 8
+func releaseSeries(cols []*series.Series) {
+	for _, c := range cols {
+		if c != nil {
+			c.Release()
+		}
+	}
+}
 
+// executeWithColumns evaluates every expression against the input frame
+// (not against columns added earlier in the same call), matching polars
+// with_columns and the schema WithColumns.Schema reports. Outputs are
+// then applied in order, so a later expression with the same output
+// name replaces an earlier one.
 func executeWithColumns(ctx context.Context, cfg execConfig, w WithColumns) (*dataframe.DataFrame, error) {
 	input, err := executeNode(ctx, cfg, w.Input)
 	if err != nil {
@@ -280,23 +344,16 @@ func executeWithColumns(ctx context.Context, cfg execConfig, w WithColumns) (*da
 	}
 	defer input.Release()
 
+	cols, err := evalOutputs(ctx, cfg, w.Exprs, input, "")
+	if err != nil {
+		return nil, err
+	}
 	out := input.Clone()
-	for _, e := range w.Exprs {
-		s, err := eval.Eval(ctx, eval.EvalContext{Alloc: cfg.alloc}, e, out)
-		if err != nil {
-			out.Release()
-			return nil, err
-		}
-		name := expr.OutputName(e)
-		if s.Name() != name {
-			r := s.Rename(name)
-			s.Release()
-			s = r
-		}
+	for i, s := range cols {
 		updated, err := out.WithColumn(s)
 		out.Release()
 		if err != nil {
-			s.Release()
+			releaseSeries(cols[i:])
 			return nil, err
 		}
 		out = updated
@@ -339,14 +396,8 @@ func executeSlice(ctx context.Context, cfg execConfig, s SliceNode) (*dataframe.
 		return nil, err
 	}
 	defer input.Release()
-	length := s.Length
-	if s.Offset+length > input.Height() {
-		length = input.Height() - s.Offset
-	}
-	if s.Offset < 0 || length < 0 {
-		return nil, fmt.Errorf("%w: offset=%d length=%d", dataframe.ErrSliceOutOfBounds, s.Offset, length)
-	}
-	return input.Slice(s.Offset, length)
+	off, length := series.ClampSlice(s.Offset, s.Length, input.Height())
+	return input.Slice(off, length)
 }
 
 func executeRename(ctx context.Context, cfg execConfig, r Rename) (*dataframe.DataFrame, error) {

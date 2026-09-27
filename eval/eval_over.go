@@ -54,13 +54,7 @@ func evalOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *datafram
 	// Assign a group id per row, then bucket rows into exact-size lists
 	// (no append-growth waste). Binary tuple keys avoid the per-row
 	// decimal formatting and fresh string of overKey.
-	var groupIDs []int
-	var numGroups int
-	if dataframe.SupportedKeyTuple(keyCols) {
-		groupIDs, numGroups = assignOverGroupsBinary(keyCols, height)
-	} else {
-		groupIDs, numGroups = assignOverGroupsString(keyCols, height)
-	}
+	groupIDs, numGroups := groupIDsFor(keyCols, height)
 	counts := make([]int, numGroups)
 	for _, gid := range groupIDs {
 		counts[gid]++
@@ -79,8 +73,13 @@ func evalOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *datafram
 	if needed, ok := expr.ReferencedColumns(n.Inner); ok && len(needed) > 0 {
 		gatherNames = needed
 	}
-	var out overOut
-	out.height = height
+	// Each group's result is kept as-is and the output is assembled with
+	// one gather, so the inner expression's dtype (ints, lists, dates...)
+	// is preserved exactly.
+	parts := make([]*series.Series, 0, len(groupRows))
+	defer func() { releaseAll(parts) }()
+	gatherIdx := make([]int, height)
+	base := 0
 	for _, rows := range groupRows {
 		sub, err := gatherGroupFrameCols(ctx, df, rows, gatherNames)
 		if err != nil {
@@ -92,19 +91,36 @@ func evalOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *datafram
 			return nil, err
 		}
 		resLen := res.Len()
-		switch resLen {
-		case 1:
-			out.broadcast(res.Chunk(0), rows)
-		default:
-			if resLen != len(rows) {
-				res.Release()
-				return nil, fmt.Errorf("eval: over() inner produced len %d for %d rows", resLen, len(rows))
+		switch {
+		case resLen == 1:
+			for _, r := range rows {
+				gatherIdx[r] = base
 			}
-			out.scatter(res.Chunk(0), rows)
+		case resLen == len(rows):
+			for i, r := range rows {
+				gatherIdx[r] = base + i
+			}
+		default:
+			res.Release()
+			return nil, fmt.Errorf("eval: over() inner produced len %d for %d rows", resLen, len(rows))
 		}
-		res.Release()
+		base += resLen
+		parts = append(parts, res)
 	}
-	return out.materialize(n.String(), seriesAllocOpt(ec))
+	if len(parts) == 0 {
+		res, err := evalNode(ctx, ec, n.Inner, df)
+		if err != nil {
+			return nil, err
+		}
+		defer res.Release()
+		return series.FullNull(n.String(), res.Chunked().DataType(), 0, seriesAllocOpt(ec))
+	}
+	values, err := concatHarmonized(ctx, ec, n.String(), parts)
+	if err != nil {
+		return nil, err
+	}
+	defer values.Release()
+	return values.Gather(gatherIdx, seriesAllocOpt(ec))
 }
 
 // tryCumSumOver recognises pl.col("v").cum_sum().over(keys...): one
@@ -335,6 +351,10 @@ func gatherGroupFrameCols(ctx context.Context, df *dataframe.DataFrame, rows []i
 			return nil, err
 		}
 		taken, err := compute.Take(ctx, c, rows)
+		if err != nil {
+			// compute.Take covers the common dtypes; Gather handles the rest.
+			taken, err = c.Gather(rows)
+		}
 		if err != nil {
 			for _, p := range cols {
 				p.Release()

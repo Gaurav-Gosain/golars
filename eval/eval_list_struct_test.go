@@ -61,7 +61,7 @@ func TestEvalListLen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer out.Release()
-	arr := out.Chunk(0).(*array.Int64)
+	arr := out.Chunk(0).(*array.Uint32)
 	if arr.Value(0) != 3 || arr.Value(1) != 1 {
 		t.Errorf("got [%d,%d] want [3,1]", arr.Value(0), arr.Value(1))
 	}

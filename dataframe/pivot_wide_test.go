@@ -36,8 +36,9 @@ func TestDataFramePivot(t *testing.T) {
 	}
 	xCol, _ := out.Column("x")
 	yCol, _ := out.Column("y")
-	x := xCol.Chunk(0).(*array.Float64)
-	y := yCol.Chunk(0).(*array.Float64)
+	// polars keeps the value dtype for first.
+	x := xCol.Chunk(0).(*array.Int64)
+	y := yCol.Chunk(0).(*array.Int64)
 	if x.Value(0) != 1 || x.Value(1) != 3 {
 		t.Fatalf("x: got %v, %v", x.Value(0), x.Value(1))
 	}
@@ -63,7 +64,8 @@ func TestDataFramePivotSumAgg(t *testing.T) {
 	defer out.Release()
 
 	xCol, _ := out.Column("x")
-	x := xCol.Chunk(0).(*array.Float64)
+	// polars keeps the value dtype for sum.
+	x := xCol.Chunk(0).(*array.Int64)
 	// A: 1+2=3, B: 10
 	if x.Value(0) != 3 || x.Value(1) != 10 {
 		t.Fatalf("x sums: got %v, %v", x.Value(0), x.Value(1))

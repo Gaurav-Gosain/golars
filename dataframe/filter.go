@@ -70,7 +70,7 @@ func (df *DataFrame) Filter(ctx context.Context, mask *series.Series, opts ...Fi
 		g := pool.NewGroup(ctx, 0)
 		for i, c := range df.cols {
 			g.Go(func(gctx context.Context) error {
-				out, err := compute.Filter(gctx, c, mask, compute.WithAllocator(cfg.alloc))
+				out, err := filterColumn(gctx, c, mask, cfg.alloc)
 				if err != nil {
 					return fmt.Errorf("column %q: %w", c.Name(), err)
 				}
@@ -88,7 +88,7 @@ func (df *DataFrame) Filter(ctx context.Context, mask *series.Series, opts ...Fi
 		}
 	} else {
 		for i, c := range df.cols {
-			out, err := compute.Filter(ctx, c, mask, compute.WithAllocator(cfg.alloc))
+			out, err := filterColumn(ctx, c, mask, cfg.alloc)
 			if err != nil {
 				for _, r := range cols[:i] {
 					if r != nil {

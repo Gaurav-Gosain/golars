@@ -221,9 +221,19 @@ func (df *DataFrame) Rename(oldName, newName string) (*DataFrame, error) {
 
 // WithColumn appends s if its name is new, or replaces the existing column
 // with that name in place. The column must have the same length as the
-// DataFrame unless the DataFrame is empty of columns. On success WithColumn
-// consumes the caller's reference to s.
+// DataFrame unless the DataFrame is empty of columns; a length-1 column
+// broadcasts. On success WithColumn consumes the caller's reference to s.
 func (df *DataFrame) WithColumn(s *series.Series) (*DataFrame, error) {
+	if len(df.cols) > 0 && s.Len() == 1 && df.height != 1 {
+		// A length-1 column (a scalar such as col("a").sum()) broadcasts
+		// to the frame height, as in polars with_columns.
+		b, err := s.Broadcast(df.height)
+		if err != nil {
+			return nil, err
+		}
+		s.Release()
+		s = b
+	}
 	if len(df.cols) > 0 && s.Len() != df.height {
 		return nil, fmt.Errorf("%w: %q has length %d, expected %d",
 			ErrHeightMismatch, s.Name(), s.Len(), df.height)

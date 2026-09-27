@@ -451,11 +451,11 @@ func scatterInt64Over(
 		s, err := series.FromInt64(outName, out, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggCount:
-		out := make([]int64, height)
+		out := make([]uint32, height)
 		for i := range height {
-			out[i] = countPerGroup[rowToGroup[i]]
+			out[i] = uint32(countPerGroup[rowToGroup[i]])
 		}
-		s, err := series.FromInt64(outName, out, nil, seriesAlloc(ec))
+		s, err := series.FromUint32(outName, out, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggMean:
 		out := make([]float64, height)
@@ -615,11 +615,11 @@ func scatterFloat64Over(
 		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggCount:
-		outI := make([]int64, height)
+		outI := make([]uint32, height)
 		for i := range height {
-			outI[i] = counts[rowToGroup[i]]
+			outI[i] = uint32(counts[rowToGroup[i]])
 		}
-		s, err := series.FromInt64(outName, outI, nil, seriesAlloc(ec))
+		s, err := series.FromUint32(outName, outI, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggMin:
 		out := make([]float64, height)

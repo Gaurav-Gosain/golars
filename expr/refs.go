@@ -1,5 +1,7 @@
 package expr
 
+import "strings"
+
 // ReferencedColumns collects the column names an expression reads.
 // It reports complete=false on any unrecognised node so callers fall
 // back to a wider frame instead of silently dropping input.
@@ -47,6 +49,11 @@ func ReferencedColumns(e Expr) (cols []string, complete bool) {
 				return false
 			}
 		case FunctionNode:
+			if strings.HasPrefix(t.Name, "cols_") || t.Name == "cumulative_eval" {
+				// Selectors resolve against the schema, and nested
+				// expressions in Params may read other columns.
+				return false
+			}
 			for _, a := range t.Args {
 				if !walk(a.node) {
 					return false

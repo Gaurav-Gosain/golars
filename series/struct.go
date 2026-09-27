@@ -5,6 +5,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
@@ -16,27 +17,39 @@ type StructOps struct{ s *Series }
 // clear error when the underlying Series is not struct-typed.
 func (s *Series) Struct() StructOps { return StructOps{s: s} }
 
-// Field returns the named field of the struct as a new top-level
-// Series. Struct-level nulls propagate into the child's validity so
-// downstream kernels see consistent null rows.
-func (o StructOps) Field(name string) (*Series, error) {
+// structArray returns the consolidated struct array (caller releases).
+func (o StructOps) structArray(op string) (*array.Struct, error) {
 	if !o.s.DType().IsStruct() {
-		return nil, fmt.Errorf("series.struct.field: %q has dtype %s (need struct)",
-			o.s.Name(), o.s.DType())
+		return nil, fmt.Errorf("series.struct.%s: %q has dtype %s (need struct)",
+			op, o.s.Name(), o.s.DType())
 	}
-	r := o.s.Rechunk()
-	defer r.Release()
-	sa, ok := r.Chunk(0).(*array.Struct)
+	a, err := o.s.Consolidated()
+	if err != nil {
+		return nil, err
+	}
+	sa, ok := a.(*array.Struct)
 	if !ok {
-		return nil, fmt.Errorf("series.struct.field: chunk is not a struct array")
+		a.Release()
+		return nil, fmt.Errorf("series.struct.%s: chunk is not a struct array", op)
 	}
+	return sa, nil
+}
+
+// Field returns the named field of the struct as a new top-level
+// Series named after the field. Struct-level nulls propagate into the
+// child's validity so downstream kernels see consistent null rows.
+func (o StructOps) Field(name string, opts ...Option) (*Series, error) {
+	sa, err := o.structArray("field")
+	if err != nil {
+		return nil, err
+	}
+	defer sa.Release()
 	st := sa.DataType().(*arrow.StructType)
 	idx, ok := st.FieldIdx(name)
 	if !ok {
-		return nil, fmt.Errorf("series.struct.field: no field %q (struct has %s)", name, st)
+		return nil, fmt.Errorf("series.struct.field: no field %q (struct has %s)", name, dtypeName(st))
 	}
-	child := sa.Field(idx)
-	folded := foldStructNullsInto(sa, child)
+	folded := foldStructNullsInto(sa, sa.Field(idx), resolve(opts).alloc)
 	return New(name, folded)
 }
 
@@ -66,64 +79,191 @@ func (o StructOps) NumFields() (int, error) {
 	return len(names), nil
 }
 
-// foldStructNullsInto returns a child array whose validity buffer
-// has the parent struct's nulls OR-ed in. No-op (Retain only) when
-// the parent has no null rows.
-func foldStructNullsInto(parent *array.Struct, child arrow.Array) arrow.Array {
+// Unnest returns every field as its own Series (named after the
+// field), with struct-level nulls folded into each field. Polars
+// `struct.unnest`.
+func (o StructOps) Unnest(opts ...Option) ([]*Series, error) {
+	sa, err := o.structArray("unnest")
+	if err != nil {
+		return nil, err
+	}
+	defer sa.Release()
+	mem := resolve(opts).alloc
+	st := sa.DataType().(*arrow.StructType)
+	out := make([]*Series, 0, st.NumFields())
+	for f := range st.NumFields() {
+		s, err := New(st.Field(f).Name, foldStructNullsInto(sa, sa.Field(f), mem))
+		if err != nil {
+			for _, p := range out {
+				p.Release()
+			}
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// RenameFields renames the struct fields positionally. Extra names are
+// ignored; with fewer names the trailing fields are dropped, as in
+// polars `struct.rename_fields`.
+func (o StructOps) RenameFields(names []string) (*Series, error) {
+	sa, err := o.structArray("rename_fields")
+	if err != nil {
+		return nil, err
+	}
+	defer sa.Release()
+	st := sa.DataType().(*arrow.StructType)
+	k := min(len(names), st.NumFields())
+	fields := make([]arrow.Field, k)
+	children := make([]arrow.ArrayData, k)
+	for f := range k {
+		fields[f] = st.Field(f)
+		fields[f].Name = names[f]
+		children[f] = sa.Field(f).Data()
+	}
+	return rebuildStruct(o.s.Name(), sa, fields, children)
+}
+
+// MapFieldNames renames every field with fn (the name.*_fields
+// family).
+func (o StructOps) MapFieldNames(fn func(string) string) (*Series, error) {
+	names, err := o.FieldNames()
+	if err != nil {
+		return nil, err
+	}
+	for i, n := range names {
+		names[i] = fn(n)
+	}
+	return o.RenameFields(names)
+}
+
+// WithFields returns the struct with the given Series added as fields
+// (named after each Series). A Series whose name matches an existing
+// field replaces it in place. Length-1 Series broadcast. The struct's
+// own null rows are kept.
+func (o StructOps) WithFields(cols []*Series, opts ...Option) (*Series, error) {
+	sa, err := o.structArray("with_fields")
+	if err != nil {
+		return nil, err
+	}
+	defer sa.Release()
+	mem := resolve(opts).alloc
+	n := sa.Len()
+	st := sa.DataType().(*arrow.StructType)
+	fields := append([]arrow.Field(nil), st.Fields()...)
+	children := make([]arrow.Array, len(fields))
+	for f := range fields {
+		children[f] = sa.Field(f)
+		children[f].Retain()
+	}
+	defer func() {
+		for _, c := range children {
+			c.Release()
+		}
+	}()
+	for _, c := range cols {
+		a, err := c.Consolidated()
+		if err != nil {
+			return nil, err
+		}
+		if a.Len() != n {
+			if a.Len() != 1 {
+				a.Release()
+				return nil, fmt.Errorf("series.struct.with_fields: field %q has length %d, struct has %d", c.Name(), a.Len(), n)
+			}
+			idx := make([]int, n)
+			b, err := takeArrow(a, idx, mem)
+			a.Release()
+			if err != nil {
+				return nil, err
+			}
+			a = b
+		}
+		field := arrow.Field{Name: c.Name(), Type: a.DataType(), Nullable: true}
+		replaced := false
+		for f := range fields {
+			if fields[f].Name == c.Name() {
+				fields[f] = field
+				children[f].Release()
+				children[f] = a
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			fields = append(fields, field)
+			children = append(children, a)
+		}
+	}
+	datas := make([]arrow.ArrayData, len(children))
+	for f, c := range children {
+		datas[f] = c.Data()
+	}
+	return rebuildStruct(o.s.Name(), sa, fields, datas)
+}
+
+// rebuildStruct makes a struct array with parent's length and validity
+// around new fields and children. Children taken from Struct.Field are
+// already sliced to the parent's rows, so the result uses offset 0 and
+// a re-based validity bitmap.
+func rebuildStruct(name string, parent *array.Struct, fields []arrow.Field, children []arrow.ArrayData) (*Series, error) {
+	var validity *memory.Buffer
+	owned := false
+	if parent.NullN() > 0 {
+		if parent.Data().Offset() == 0 {
+			validity = parent.Data().Buffers()[0]
+		} else {
+			validity = CopyValidityBitmap(parent, memory.DefaultAllocator)
+			owned = true
+		}
+	}
+	data := array.NewData(arrow.StructOf(fields...), parent.Len(), []*memory.Buffer{validity}, children, parent.NullN(), 0)
+	if owned {
+		validity.Release()
+	}
+	arr := array.MakeFromData(data)
+	data.Release()
+	return New(name, arr)
+}
+
+// foldStructNullsInto returns a child array whose validity also marks
+// the parent struct's null rows as null. Retain-only when the parent
+// has no null rows.
+func foldStructNullsInto(parent *array.Struct, child arrow.Array, mem memory.Allocator) arrow.Array {
 	if parent.NullN() == 0 {
 		child.Retain()
 		return child
 	}
-	n := parent.Len()
-	mem := memory.DefaultAllocator
-	merged := memory.NewResizableBuffer(mem)
-	merged.Resize((n + 7) / 8)
-	dst := merged.Bytes()
-	for i := range dst {
-		dst[i] = 0
+	if mem == nil {
+		mem = memory.DefaultAllocator
 	}
-	pBits := parent.NullBitmapBytes()
-	pOff := parent.Data().Offset()
-	cBits := child.NullBitmapBytes()
-	cOff := child.Data().Offset()
-	allChildValid := len(cBits) == 0
+	n := parent.Len()
+	cd := child.Data()
+	cOff := cd.Offset()
+	// The new bitmap lives in the child's coordinate space (bit
+	// cOff+i is row i) so the child's own offset stays valid.
+	merged := memory.NewResizableBuffer(mem)
+	merged.Resize(int(bitutil.BytesForBits(int64(cOff + n))))
+	dst := merged.Bytes()
+	clear(dst)
 	nulls := 0
-	for i := 0; i < n; i++ {
-		pValid := bitGetFold(pBits, pOff+i)
-		cValid := allChildValid || bitGetFold(cBits, cOff+i)
-		if pValid && cValid {
-			dst[i>>3] |= 1 << (uint(i) & 7)
+	for i := range n {
+		if parent.IsValid(i) && child.IsValid(i) {
+			bitutil.SetBit(dst, cOff+i)
 		} else {
 			nulls++
 		}
 	}
-	oldData := child.Data()
-	oldBufs := oldData.Buffers()
-	newBufs := make([]*memory.Buffer, len(oldBufs))
-	if len(newBufs) == 0 {
-		newBufs = []*memory.Buffer{merged}
+	bufs := append([]*memory.Buffer(nil), cd.Buffers()...)
+	if len(bufs) == 0 {
+		bufs = []*memory.Buffer{merged}
 	} else {
-		newBufs[0] = merged
-		for i := 1; i < len(oldBufs); i++ {
-			if b := oldBufs[i]; b != nil {
-				b.Retain()
-				newBufs[i] = b
-			}
-		}
+		bufs[0] = merged
 	}
-	children := oldData.Children()
-	for _, cd := range children {
-		cd.Retain()
-	}
-	newData := array.NewData(child.DataType(), n, newBufs, children, nulls, oldData.Offset())
+	newData := array.NewData(child.DataType(), n, bufs, cd.Children(), nulls, cOff)
+	merged.Release()
 	out := array.MakeFromData(newData)
 	newData.Release()
 	return out
-}
-
-func bitGetFold(bits []byte, i int) bool {
-	if len(bits) == 0 {
-		return true
-	}
-	return bits[i>>3]&(1<<(uint(i)&7)) != 0
 }

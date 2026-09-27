@@ -2,7 +2,9 @@ package series
 
 import (
 	"fmt"
+	"runtime"
 	"slices"
+	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -37,6 +39,9 @@ func topKIndices(s *Series, k int, descending bool) ([]int, error) {
 	switch a := chunk.(type) {
 	case *array.Int64:
 		if k*heapTopKDivisor < nn {
+			if a.NullN() == 0 {
+				return topKInt64NoNull(a.Int64Values(), k, descending), nil
+			}
 			return heapTopKInt64(a, n, k, descending), nil
 		}
 	case *array.Float64:
@@ -171,6 +176,100 @@ func heapTopKInt64(a *array.Int64, n, k int, descending bool) []int {
 		}
 	}
 	sortHeapInt64(h, vals, descending)
+	return h
+}
+
+// topKParallelCutoff is the input length above which no-null top-k
+// splits the scan across workers.
+const topKParallelCutoff = 128 * 1024
+
+// topKInt64NoNull is heap top-k for a no-null int64 column. Once the
+// heap is full, the root's value is held in a register as a threshold
+// and the scan rejects rows with a single comparison: a row that ties
+// the root always has a larger index, so it ranks worse and is
+// rejected too. Large inputs keep a heap per worker chunk and merge
+// the at most workers*k candidates; ties still break by row index, so
+// the result is identical to the serial scan.
+func topKInt64NoNull(vals []int64, k int, descending bool) []int {
+	n := len(vals)
+	workers := min(runtime.GOMAXPROCS(0), 8)
+	if n < topKParallelCutoff || workers < 2 || k*workers*8 > n {
+		h := topKInt64Range(vals, 0, n, k, descending)
+		sortHeapInt64(h, vals, descending)
+		return h
+	}
+	chunk := (n + workers - 1) / workers
+	parts := make([][]int, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		start := w * chunk
+		end := min(start+chunk, n)
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			parts[w] = topKInt64Range(vals, start, end, k, descending)
+		}()
+	}
+	wg.Wait()
+	var cand []int
+	for _, p := range parts {
+		cand = append(cand, p...)
+	}
+	sortHeapInt64(cand, vals, descending)
+	return cand[:min(k, len(cand))]
+}
+
+// topKInt64Range returns (unordered) the indices of the k best rows in
+// [start, end).
+func topKInt64Range(vals []int64, start, end, k int, descending bool) []int {
+	h := make([]int, 0, k)
+	i := start
+	for ; i < end && len(h) < k; i++ {
+		h = append(h, i)
+		for j := len(h) - 1; j > 0; {
+			p := (j - 1) >> 1
+			if !int64Worse(descending, vals, h[j], h[p]) {
+				break
+			}
+			h[j], h[p] = h[p], h[j]
+			j = p
+		}
+	}
+	if len(h) < k {
+		return h
+	}
+	thr := vals[h[0]]
+	seg := vals[:end]
+	for ; i < end; i++ {
+		v := seg[i]
+		if descending {
+			if v <= thr {
+				continue
+			}
+		} else if v >= thr {
+			continue
+		}
+		h[0] = i
+		for j := 0; ; {
+			l, r := 2*j+1, 2*j+2
+			m := j
+			if l < k && int64Worse(descending, vals, h[l], h[m]) {
+				m = l
+			}
+			if r < k && int64Worse(descending, vals, h[r], h[m]) {
+				m = r
+			}
+			if m == j {
+				break
+			}
+			h[j], h[m] = h[m], h[j]
+			j = m
+		}
+		thr = vals[h[0]]
+	}
 	return h
 }
 

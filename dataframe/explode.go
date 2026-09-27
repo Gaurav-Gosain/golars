@@ -66,7 +66,7 @@ func (df *DataFrame) Explode(ctx context.Context, col string) (*DataFrame, error
 			out = append(out, ser)
 			continue
 		}
-		taken, err := compute.Take(ctx, c, takeIdx)
+		taken, err := takeOptional(ctx, c, takeIdx, memory.DefaultAllocator)
 		if err != nil {
 			values.Release()
 			for _, o := range out {
@@ -167,8 +167,11 @@ func explodeValues(la arrayList, nullMask []bool, totalLen int) arrow.Array {
 	}
 	// Wrap the child as a Series, Take via compute, then null-fill
 	// the positions in nullMask.
+	// child is borrowed from la; FromArrowArray consumes a reference.
+	child.Retain()
 	childSer, err := series.FromArrowArray("", child)
 	if err != nil {
+		child.Release()
 		return makeAllNull(mem, child.DataType(), totalLen)
 	}
 	defer childSer.Release()

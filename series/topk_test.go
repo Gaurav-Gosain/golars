@@ -59,13 +59,21 @@ func TestTopKBottomKAgainstBruteForce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		kk := min(k, nn)
+		// polars fills the tail with nulls when k exceeds the non-null
+		// count.
+		kk := min(k, len(rngVals))
 		arr := top.Chunk(0).(*array.Float64)
 		if arr.Len() != kk {
 			top.Release()
 			t.Fatalf("k=%d: len=%d want %d", k, arr.Len(), kk)
 		}
-		for i := range kk {
+		for i := nn; i < kk; i++ {
+			if arr.IsValid(i) {
+				top.Release()
+				t.Fatalf("k=%d idx %d: got %v want null", k, i, arr.Value(i))
+			}
+		}
+		for i := range min(kk, nn) {
 			want := elems[nn-1-i]
 			got := arr.Value(i)
 			if math.IsNaN(want.v) {
@@ -91,7 +99,13 @@ func TestTopKBottomKAgainstBruteForce(t *testing.T) {
 			bot.Release()
 			t.Fatalf("k=%d bottom len=%d want %d", k, barr.Len(), kk)
 		}
-		for i := range kk {
+		for i := nn; i < kk; i++ {
+			if barr.IsValid(i) {
+				bot.Release()
+				t.Fatalf("k=%d bottom idx %d: got %v want null", k, i, barr.Value(i))
+			}
+		}
+		for i := range min(kk, nn) {
 			want := elems[i]
 			got := barr.Value(i)
 			if math.IsNaN(want.v) {

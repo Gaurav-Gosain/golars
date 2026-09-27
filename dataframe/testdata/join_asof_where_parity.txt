@@ -1,0 +1,278 @@
+=== asof_backward
+t:i64|a:str|b:i64|a_right:str
+1|"x"|null|null
+5|"y"|200|"r2"
+10|"z"|200|"r2"
+15|"w"|300|"r3"
+20|"v"|300|"r3"
+=== asof_backward_noexact
+t:i64|a:str|b:i64|a_right:str
+1|"x"|null|null
+5|"y"|100|"r1"
+10|"z"|200|"r2"
+15|"w"|300|"r3"
+20|"v"|300|"r3"
+=== asof_backward_tol1
+t:i64|a:str|b:i64|a_right:str
+1|"x"|null|null
+5|"y"|200|"r2"
+10|"z"|null|null
+15|"w"|null|null
+20|"v"|null|null
+=== asof_forward
+t:i64|a:str|b:i64|a_right:str
+1|"x"|100|"r1"
+5|"y"|200|"r2"
+10|"z"|300|"r3"
+15|"w"|400|"r4"
+20|"v"|400|"r4"
+=== asof_forward_noexact
+t:i64|a:str|b:i64|a_right:str
+1|"x"|100|"r1"
+5|"y"|300|"r3"
+10|"z"|300|"r3"
+15|"w"|400|"r4"
+20|"v"|400|"r4"
+=== asof_forward_tol1
+t:i64|a:str|b:i64|a_right:str
+1|"x"|100|"r1"
+5|"y"|200|"r2"
+10|"z"|300|"r3"
+15|"w"|null|null
+20|"v"|null|null
+=== asof_nearest
+t:i64|a:str|b:i64|a_right:str
+1|"x"|100|"r1"
+5|"y"|200|"r2"
+10|"z"|300|"r3"
+15|"w"|300|"r3"
+20|"v"|300|"r3"
+=== asof_nearest_noexact
+t:i64|a:str|b:i64|a_right:str
+1|"x"|100|"r1"
+5|"y"|100|"r1"
+10|"z"|300|"r3"
+15|"w"|300|"r3"
+20|"v"|300|"r3"
+=== asof_nearest_tol1
+t:i64|a:str|b:i64|a_right:str
+1|"x"|100|"r1"
+5|"y"|200|"r2"
+10|"z"|300|"r3"
+15|"w"|null|null
+20|"v"|null|null
+=== asof_left_on
+t:i64|a:str|rt:i64|b:i64|a_right:str
+1|"x"|null|null|null
+5|"y"|5|200|"r2"
+10|"z"|5|200|"r2"
+15|"w"|11|300|"r3"
+20|"v"|11|300|"r3"
+=== asof_nocoalesce
+t:i64|a:str|t_right:i64|b:i64|a_right:str
+1|"x"|null|null|null
+5|"y"|5|200|"r2"
+10|"z"|5|200|"r2"
+15|"w"|11|300|"r3"
+20|"v"|11|300|"r3"
+=== asof_suffix
+t:i64|a:str|b:i64|a_R:str
+1|"x"|null|null
+5|"y"|200|"r2"
+10|"z"|200|"r2"
+15|"w"|300|"r3"
+20|"v"|300|"r3"
+=== asof_nulls_first
+t:i64|b:i64
+null|null
+1|2
+6|3
+=== asof_by_backward
+g:str|t:i64|v:i64|w:i64
+"a"|1|1|10
+"b"|2|2|null
+"a"|3|3|30
+"b"|4|4|20
+null|5|5|null
+=== asof_by_forward
+g:str|t:i64|v:i64|w:i64
+"a"|1|1|30
+"b"|2|2|20
+"a"|3|3|null
+"b"|4|4|null
+null|5|5|null
+=== asof_by_nearest
+g:str|t:i64|v:i64|w:i64
+"a"|1|1|30
+"b"|2|2|20
+"a"|3|3|30
+"b"|4|4|20
+null|5|5|null
+=== asof_by_left_right
+g:str|t:i64|v:i64|t_right:i64|w:i64
+"a"|1|1|0|10
+"b"|2|2|null|null
+"a"|3|3|2|30
+"b"|4|4|3|20
+null|5|5|null|null
+=== asof_multi_by
+g:i64|h:str|t:i64|w:i64
+1|"x"|5|1
+1|"y"|5|2
+2|"x"|5|4
+3|"x"|5|null
+=== asof_nearest_ties
+t:i64|b:i64
+4|2
+5|4
+6|4
+=== asof_dup_back_fwd
+t:i64|b:i64|t2:i64|b2:i64
+4|2|2|1
+=== asof_dt_1h
+t:datetime[us]|b:i64
+2020-01-01T10:00:00.000000|1
+2020-01-01T12:00:00.000000|2
+2020-01-02T12:00:00.000000|null
+=== asof_dt_30m
+t:datetime[us]|b:i64
+2020-01-01T10:00:00.000000|null
+2020-01-01T12:00:00.000000|2
+2020-01-02T12:00:00.000000|null
+=== asof_date_2d
+t:date|b:i64
+2020-01-01|1
+2020-01-05|2
+2020-01-09|null
+=== asof_float_nearest
+t:f64|b:i64
+1.0|1
+2.5|null
+2.6|3
+=== asof_i32_i64
+t:i32|b:i64
+1|null
+5|2
+=== asof_empty_right
+t:i64|b:i64
+1|null
+5|null
+=== asof_key_collision
+t:i64|rt:i64|rt_right:i64|b:i64
+1|0|null|null
+5|0|5|2
+=== jw_one_ineq
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|498|130|13|2
+100|120|12|2|676|150|15|1
+100|120|12|2|742|170|16|4
+101|140|8|8|676|150|15|1
+101|140|8|8|742|170|16|4
+102|160|7|4|742|170|16|4
+=== jw_one_le
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|404|90|9|4
+100|120|12|2|498|130|13|2
+100|120|12|2|742|170|16|4
+102|160|7|4|404|90|9|4
+102|160|7|4|742|170|16|4
+=== jw_two_ineq
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|498|130|13|2
+100|120|12|2|676|150|15|1
+100|120|12|2|742|170|16|4
+101|140|8|8|676|150|15|1
+101|140|8|8|742|170|16|4
+102|160|7|4|742|170|16|4
+=== jw_two_ineq_ge
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|404|90|9|4
+=== jw_reversed
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|498|130|13|2
+100|120|12|2|676|150|15|1
+100|120|12|2|742|170|16|4
+101|140|8|8|676|150|15|1
+101|140|8|8|742|170|16|4
+102|160|7|4|742|170|16|4
+=== jw_eq_ineq
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|498|130|13|2
+102|160|7|4|742|170|16|4
+=== jw_ne
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|404|90|9|4
+100|120|12|2|676|150|15|1
+100|120|12|2|742|170|16|4
+101|140|8|8|404|90|9|4
+101|140|8|8|498|130|13|2
+101|140|8|8|676|150|15|1
+101|140|8|8|742|170|16|4
+102|160|7|4|498|130|13|2
+102|160|7|4|676|150|15|1
+=== jw_three
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|498|130|13|2
+100|120|12|2|742|170|16|4
+102|160|7|4|742|170|16|4
+=== jw_lit
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+100|120|12|2|676|150|15|1
+100|120|12|2|742|170|16|4
+101|140|8|8|676|150|15|1
+101|140|8|8|742|170|16|4
+102|160|7|4|742|170|16|4
+=== jw_suffix
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_X:i64
+100|120|12|2|676|150|15|1
+101|140|8|8|404|90|9|4
+101|140|8|8|498|130|13|2
+101|140|8|8|676|150|15|1
+101|140|8|8|742|170|16|4
+102|160|7|4|498|130|13|2
+102|160|7|4|676|150|15|1
+=== jw_empty
+id:i64|dur:i64|rev:i64|cores:i64|t_id:i64|time:i64|cost:i64|cores_right:i64
+=== jw_nulls_lt
+a:i64|b:i64
+1|2
+1|4
+3|4
+=== jw_nulls_ne
+a:i64|b:i64
+1|2
+1|4
+3|2
+3|4
+5|2
+5|4
+=== jw_nulls_eq
+a:i64|b:i64
+=== jw_two_ineq_nulls
+a:i64|x:i64|b:i64|y:i64
+1|5|2|4
+=== jw_nan_lt
+a:f64|b:f64
+1.0|2.0
+1.0|nan
+3.0|nan
+=== jw_nan_ge
+a:f64|b:f64
+3.0|2.0
+nan|2.0
+nan|nan
+=== jw_string
+a:str|b:str
+"a"|"b"
+"a"|"c"
+"b"|"b"
+"b"|"c"
+"c"|"c"
+=== jw_dups_two
+a:i64|x:i64|b:i64|y:i64
+1|5|2|5
+2|5|2|5
+2|6|2|5
+2|6|2|6
+2|6|3|6
+3|7|3|6

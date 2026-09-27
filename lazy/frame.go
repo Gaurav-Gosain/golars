@@ -66,6 +66,7 @@ func (lf LazyFrame) Schema() (*schema.Schema, error) { return lf.plan.Schema() }
 //
 //	lf.Select(expr.Col("name"), expr.Col("salary").Alias("pay"))
 func (lf LazyFrame) Select(exprs ...expr.Expr) LazyFrame {
+	exprs = expandExprs(lf.plan, expandSelectors(lf.plan, exprs, nil), nil)
 	return LazyFrame{plan: Projection{Input: lf.plan, Exprs: exprs}}
 }
 
@@ -87,6 +88,7 @@ func (lf LazyFrame) Select(exprs ...expr.Expr) LazyFrame {
 //	    expr.Col("name").Str().ToUpper().Alias("name_upper"),
 //	)
 func (lf LazyFrame) WithColumns(exprs ...expr.Expr) LazyFrame {
+	exprs = expandExprs(lf.plan, expandSelectors(lf.plan, exprs, nil), nil)
 	return LazyFrame{plan: WithColumns{Input: lf.plan, Exprs: exprs}}
 }
 
@@ -165,6 +167,9 @@ func (lf LazyFrame) Drop(cols ...string) LazyFrame {
 type LazyGroupBy struct {
 	input Node
 	keys  []string
+	// ext carries expression-key renames and maintain_order; see
+	// groupby_methods.go.
+	ext groupByExt
 }
 
 // GroupBy starts a group-by on lf. Close it with
@@ -205,6 +210,10 @@ func (lf LazyFrame) GroupBy(keys ...string) LazyGroupBy {
 //
 // Bare-column inputs (the fast path) pass through unchanged.
 func (g LazyGroupBy) Agg(exprs ...expr.Expr) LazyFrame {
+	exprs = resolveNameOps(expandExprs(g.input, expandSelectors(g.input, exprs, g.keys), g.keys))
+	if g.ext.active() {
+		return g.aggExt(exprs)
+	}
 	hoisted := make([]expr.Expr, 0, len(exprs))
 	rewritten := make([]expr.Expr, len(exprs))
 	nextID := 0
@@ -248,6 +257,12 @@ func rewriteAggInput(e expr.Expr, nextID *int) (expr.Expr, expr.Expr, bool) {
 	}
 	// Already a bare column: nothing to hoist.
 	if _, isCol := agg.Inner.Node().(expr.ColNode); isCol {
+		return e, expr.Expr{}, false
+	}
+	// Only row-wise inputs can be computed before grouping. Inputs such
+	// as filter or sort_by depend on the group's rows and are left for
+	// the per-group evaluator.
+	if !expr.IsElementwise(agg.Inner) {
 		return e, expr.Expr{}, false
 	}
 	// Hoist the inner expression.

@@ -23,7 +23,7 @@ func (o StrOps) Head(n int, opts ...Option) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	if isAsciiOnly(a.ValueBytes()) {
+	if isAsciiSWAR(a.ValueBytes()) {
 		return headTailAsciiSlice(o.s.Name(), a, cfg.alloc, n, true)
 	}
 	return o.mapString("Head", func(s string) string {
@@ -42,7 +42,7 @@ func (o StrOps) Tail(n int, opts ...Option) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	if isAsciiOnly(a.ValueBytes()) {
+	if isAsciiSWAR(a.ValueBytes()) {
 		return headTailAsciiSlice(o.s.Name(), a, cfg.alloc, n, false)
 	}
 	return o.mapString("Tail", func(s string) string {
@@ -54,26 +54,32 @@ func (o StrOps) Tail(n int, opts ...Option) (*Series, error) {
 }
 
 // Find returns the byte offset of the first occurrence of needle in
-// each string, or -1 when not found. Null inputs stay null. Matches
-// polars str.find (byte-indexed).
+// each string as u32, or null when needle is not found. Null inputs
+// stay null. Matches polars str.find (byte-indexed, literal needle).
 func (o StrOps) Find(needle string, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
 	a, err := o.stringArr("Find")
 	if err != nil {
 		return nil, err
 	}
-	if needle == "" {
-		return int64ResultFromStr(o.s.Name(), a, cfg.alloc, func(string) int64 { return 0 })
-	}
+	index := func(s string) int { return strings.Index(s, needle) }
 	if len(needle) == 1 {
 		b := needle[0]
-		return int64ResultFromStr(o.s.Name(), a, cfg.alloc, func(s string) int64 {
-			return int64(strings.IndexByte(s, b))
-		})
+		index = func(s string) int { return strings.IndexByte(s, b) }
 	}
-	return int64ResultFromStr(o.s.Name(), a, cfg.alloc, func(s string) int64 {
-		return int64(strings.Index(s, needle))
-	})
+	n := a.Len()
+	out := make([]uint32, n)
+	valid := make([]bool, n)
+	for i := range n {
+		if !a.IsValid(i) {
+			continue
+		}
+		if at := index(a.Value(i)); at >= 0 {
+			out[i] = uint32(at)
+			valid[i] = true
+		}
+	}
+	return FromUint32(o.s.Name(), out, valid, WithAllocator(cfg.alloc))
 }
 
 // headTailAsciiSlice is the ASCII-only same-buffer slice. We rebuild

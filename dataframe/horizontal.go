@@ -9,10 +9,10 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dtype"
+	"github.com/Gaurav-Gosain/golars/internal/mempool"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -86,7 +86,7 @@ func (df *DataFrame) sumHorizontalFast(ctx context.Context, strategy NullStrateg
 		for i, c := range selected {
 			slices[i] = c.Chunk(0).(*array.Int64).Int64Values()
 		}
-		out, err := series.BuildInt64Direct("sum", n, memory.DefaultAllocator, func(buf []int64) {
+		out, err := series.BuildInt64Direct("sum", n, mempool.Default(), func(buf []int64) {
 			rowSumInt64(buf, slices)
 		})
 		releaseAll(selected)
@@ -96,7 +96,7 @@ func (df *DataFrame) sumHorizontalFast(ctx context.Context, strategy NullStrateg
 		for i, c := range selected {
 			slices[i] = c.Chunk(0).(*array.Float64).Float64Values()
 		}
-		out, err := series.BuildFloat64Direct("sum", n, memory.DefaultAllocator, func(buf []float64) {
+		out, err := series.BuildFloat64Direct("sum", n, mempool.Default(), func(buf []float64) {
 			rowSumFloat64(buf, slices)
 		})
 		releaseAll(selected)
@@ -140,10 +140,44 @@ func rowSumInt64(buf []int64, slices [][]int64) {
 }
 
 func rowSumInt64Serial(buf []int64, slices [][]int64, start, end int) {
-	copy(buf[start:end], slices[0][start:end])
-	for _, s := range slices[1:] {
-		for i := start; i < end; i++ {
-			buf[i] += s[i]
+	rowSumFused(buf[start:end], slices, start, end)
+}
+
+// rowSumFused writes the left-to-right row sum of cols[*][start:end]
+// into out. The first pass fuses up to three columns and later passes
+// fold two more columns each, so K columns cost about K/2 passes over
+// out instead of K. Every pass adds in column order, so float results
+// match the sequential ((a+b)+c)+... evaluation exactly. Reslicing all
+// operands to len(out) lets the compiler drop the bounds checks.
+func rowSumFused[T int64 | float64](out []T, cols [][]T, start, end int) {
+	n := len(out)
+	switch len(cols) {
+	case 1:
+		copy(out, cols[0][start:end])
+		return
+	case 2:
+		a, b := cols[0][start:end][:n], cols[1][start:end][:n]
+		for i := range out {
+			out[i] = a[i] + b[i]
+		}
+		return
+	}
+	a, b, c := cols[0][start:end][:n], cols[1][start:end][:n], cols[2][start:end][:n]
+	for i := range out {
+		out[i] = a[i] + b[i] + c[i]
+	}
+	rest := cols[3:]
+	for len(rest) >= 2 {
+		d, e := rest[0][start:end][:n], rest[1][start:end][:n]
+		for i := range out {
+			out[i] = out[i] + d[i] + e[i]
+		}
+		rest = rest[2:]
+	}
+	if len(rest) == 1 {
+		d := rest[0][start:end][:n]
+		for i := range out {
+			out[i] += d[i]
 		}
 	}
 }
@@ -179,12 +213,7 @@ func rowSumFloat64(buf []float64, slices [][]float64) {
 }
 
 func rowSumFloat64Serial(buf []float64, slices [][]float64, start, end int) {
-	copy(buf[start:end], slices[0][start:end])
-	for _, s := range slices[1:] {
-		for i := start; i < end; i++ {
-			buf[i] += s[i]
-		}
-	}
+	rowSumFused(buf[start:end], slices, start, end)
 }
 
 // MeanHorizontal returns a Float64 Series with row-wise mean. Denominator
@@ -248,7 +277,7 @@ func (df *DataFrame) minMaxHorizontalFast(ctx context.Context, strategy NullStra
 		for i, c := range selected {
 			slices[i] = c.Chunk(0).(*array.Int64).Int64Values()
 		}
-		out, err := series.BuildInt64Direct(outName, n, memory.DefaultAllocator, func(buf []int64) {
+		out, err := series.BuildInt64Direct(outName, n, mempool.Default(), func(buf []int64) {
 			rowReduceInt64(buf, slices, isMax)
 		})
 		return out, true, err
@@ -257,7 +286,7 @@ func (df *DataFrame) minMaxHorizontalFast(ctx context.Context, strategy NullStra
 		for i, c := range selected {
 			slices[i] = c.Chunk(0).(*array.Float64).Float64Values()
 		}
-		out, err := series.BuildFloat64Direct(outName, n, memory.DefaultAllocator, func(buf []float64) {
+		out, err := series.BuildFloat64Direct(outName, n, mempool.Default(), func(buf []float64) {
 			rowReduceFloat64(buf, slices, isMax)
 		})
 		return out, true, err
@@ -429,6 +458,9 @@ func (df *DataFrame) reduceHorizontal(
 	defer releaseAll(selected)
 
 	n := df.height
+	if out, ok, err := horizontalTyped(outName, selected, strategy, n); ok {
+		return out, err
+	}
 	values := make([][]float64, len(selected))
 	valid := make([][]bool, len(selected))
 	for i, c := range selected {

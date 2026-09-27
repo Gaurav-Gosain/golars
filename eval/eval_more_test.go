@@ -138,8 +138,9 @@ func TestExprRankAndUniqueDuplicated(t *testing.T) {
 
 	r := selectCol(t, alloc, []int64{3, 1, 2, 2, 5}, expr.Col("a").Rank("min").Alias("r"))
 	defer r.Release()
-	rArr := r.Chunk(0).(*array.Float64)
-	for i, w := range []float64{4, 1, 2, 2, 5} {
+	// polars returns u32 ranks for every method except average.
+	rArr := r.Chunk(0).(*array.Uint32)
+	for i, w := range []uint32{4, 1, 2, 2, 5} {
 		if rArr.Value(i) != w {
 			t.Errorf("Rank.min[%d] = %v, want %v", i, rArr.Value(i), w)
 		}
@@ -179,7 +180,8 @@ func TestExprNUnique(t *testing.T) {
 
 	n := selectCol(t, alloc, []int64{1, 2, 1, 3, 2}, expr.Col("a").NUnique().Alias("n"))
 	defer n.Release()
-	arr := n.Chunk(0).(*array.Int64)
+	// polars returns n_unique as u32.
+	arr := n.Chunk(0).(*array.Uint32)
 	if arr.Value(0) != 3 {
 		t.Errorf("NUnique = %d, want 3", arr.Value(0))
 	}

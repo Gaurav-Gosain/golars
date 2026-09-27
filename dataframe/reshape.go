@@ -32,11 +32,13 @@ func (df *DataFrame) topKImpl(ctx context.Context, k int, col string, descending
 		return nil, err
 	}
 	// Index selection plus per-column Take avoids sorting the whole
-	// wide frame. Null keys never rank (matching Series.TopK).
+	// wide frame. Null keys only fill the tail when fewer than k keys
+	// are non-null (matching polars and Series.TopK).
 	idx, err := keyCol.TopKIndices(k, descending)
 	if err != nil {
 		return nil, err
 	}
+	idx = keyCol.PadTopKNulls(idx, k)
 	out := make([]*series.Series, 0, df.Width())
 	for _, name := range df.ColumnNames() {
 		c, err := df.Column(name)

@@ -1,0 +1,534 @@
+{
+"i64": {
+"input": "[[3, 1, null], [2, 2, 7], null, [null, null, null], [5, 4, 5]]",
+"ops": {
+"len": [
+"UInt32",
+"[3, 3, None, 3, 3]"
+],
+"sum": [
+"Int64",
+"[4, 11, None, 0, 14]"
+],
+"mean": [
+"Float64",
+"[2.0, 3.6666666666666665, None, None, 4.666666666666667]"
+],
+"median": [
+"Float64",
+"[2.0, 2.0, None, None, 5.0]"
+],
+"std": [
+"Float64",
+"[1.4142135623730951, 2.886751345948129, None, None, 0.5773502691896258]"
+],
+"var0": [
+"Float64",
+"[1.0, 5.555555555555556, None, None, 0.22222222222222224]"
+],
+"min": [
+"Int64",
+"[1, 2, None, None, 4]"
+],
+"max": [
+"Int64",
+"[3, 7, None, None, 5]"
+],
+"arg_min": [
+"UInt32",
+"[1, 0, None, None, 1]"
+],
+"arg_max": [
+"UInt32",
+"[0, 2, None, None, 0]"
+],
+"n_unique": [
+"UInt32",
+"[3, 2, None, 1, 2]"
+],
+"any": [
+"ERR",
+"expected boolean elements in array"
+],
+"all": [
+"ERR",
+"expected boolean elements in array"
+],
+"first": [
+"Int64",
+"[3, 2, None, None, 5]"
+],
+"last": [
+"Int64",
+"[None, 7, None, None, 5]"
+],
+"get1": [
+"Int64",
+"[1, 2, None, None, 4]"
+],
+"get5": [
+"Int64",
+"[None, None, None, None, None]"
+],
+"get5_err": [
+"ERR",
+"get index 5 is out of bounds for array of width 3"
+],
+"reverse": [
+"Array(Int64, shape=(3,))",
+"[[None, 1, 3], [7, 2, 2], None, [None, None, None], [5, 4, 5]]"
+],
+"sort": [
+"Array(Int64, shape=(3,))",
+"[[None, 1, 3], [2, 2, 7], None, [None, None, None], [4, 5, 5]]"
+],
+"sort_desc_nl": [
+"Array(Int64, shape=(3,))",
+"[[3, 1, None], [7, 2, 2], None, [None, None, None], [5, 5, 4]]"
+],
+"unique": [
+"List(Int64)",
+"[[3, 1, None], [2, 7], None, [None], [5, 4]]"
+],
+"head2": [
+"List(Int64)",
+"[[3, 1], [2, 2], None, [None, None], [5, 4]]"
+],
+"tail1": [
+"List(Int64)",
+"[[None], [7], None, [None], [5]]"
+],
+"slice": [
+"List(Int64)",
+"[[1], [2], None, [None], [4]]"
+],
+"shift1": [
+"Array(Int64, shape=(3,))",
+"[[None, 3, 1], [None, 2, 2], None, [None, None, None], [None, 5, 4]]"
+],
+"explode": [
+"Int64",
+"[3, 1, None, 2, 2, 7, None, None, None, None, 5, 4, 5]"
+],
+"to_list": [
+"List(Int64)",
+"[[3, 1, None], [2, 2, 7], None, [None, None, None], [5, 4, 5]]"
+],
+"to_struct": [
+"Struct({'field_0': Int64, 'field_1': Int64, 'field_2': Int64})",
+"[{'field_0': 3, 'field_1': 1, 'field_2': None}, {'field_0': 2, 'field_1': 2, 'field_2': 7}, {'field_0': None, 'field_1': None, 'field_2': None}, {'field_0': None, 'field_1': None, 'field_2': None}, {'field_0': 5, 'field_1': 4, 'field_2': 5}]"
+],
+"count_null": [
+"UInt32",
+"[1, 0, None, 3, 0]"
+],
+"contains_null": [
+"Boolean",
+"[True, False, None, True, False]"
+],
+"join": [
+"ERR",
+"`array.join` operation not supported for dtype `i64` (expected: String)"
+]
+}
+},
+"f64": {
+"input": "[[1.5, null], [\"NaN\", 1.0], null, [4.0, -1.0]]",
+"ops": {
+"len": [
+"UInt32",
+"[2, 2, None, 2]"
+],
+"sum": [
+"Float64",
+"[1.5, nan, None, 3.0]"
+],
+"mean": [
+"Float64",
+"[1.5, nan, None, 1.5]"
+],
+"median": [
+"Float64",
+"[1.5, nan, None, 1.5]"
+],
+"std": [
+"Float64",
+"[None, nan, None, 3.5355339059327378]"
+],
+"var0": [
+"Float64",
+"[0.0, nan, None, 6.25]"
+],
+"min": [
+"Float64",
+"[1.5, 1.0, None, -1.0]"
+],
+"max": [
+"Float64",
+"[1.5, 1.0, None, 4.0]"
+],
+"arg_min": [
+"UInt32",
+"[0, 1, None, 1]"
+],
+"arg_max": [
+"UInt32",
+"[0, 1, None, 0]"
+],
+"n_unique": [
+"UInt32",
+"[2, 2, None, 2]"
+],
+"any": [
+"ERR",
+"expected boolean elements in array"
+],
+"all": [
+"ERR",
+"expected boolean elements in array"
+],
+"first": [
+"Float64",
+"[1.5, nan, None, 4.0]"
+],
+"last": [
+"Float64",
+"[None, 1.0, None, -1.0]"
+],
+"get1": [
+"Float64",
+"[None, 1.0, None, -1.0]"
+],
+"get5": [
+"Float64",
+"[None, None, None, None]"
+],
+"get5_err": [
+"ERR",
+"get index 5 is out of bounds for array of width 2"
+],
+"reverse": [
+"Array(Float64, shape=(2,))",
+"[[None, 1.5], [1.0, nan], None, [-1.0, 4.0]]"
+],
+"sort": [
+"Array(Float64, shape=(2,))",
+"[[None, 1.5], [1.0, nan], None, [-1.0, 4.0]]"
+],
+"sort_desc_nl": [
+"Array(Float64, shape=(2,))",
+"[[1.5, None], [nan, 1.0], None, [4.0, -1.0]]"
+],
+"unique": [
+"List(Float64)",
+"[[1.5, None], [nan, 1.0], None, [4.0, -1.0]]"
+],
+"head2": [
+"List(Float64)",
+"[[1.5, None], [nan, 1.0], None, [4.0, -1.0]]"
+],
+"tail1": [
+"List(Float64)",
+"[[None], [1.0], None, [-1.0]]"
+],
+"slice": [
+"List(Float64)",
+"[[None], [1.0], None, [-1.0]]"
+],
+"shift1": [
+"Array(Float64, shape=(2,))",
+"[[None, 1.5], [None, nan], None, [None, 4.0]]"
+],
+"explode": [
+"Float64",
+"[1.5, None, nan, 1.0, None, 4.0, -1.0]"
+],
+"to_list": [
+"List(Float64)",
+"[[1.5, None], [nan, 1.0], None, [4.0, -1.0]]"
+],
+"to_struct": [
+"Struct({'field_0': Float64, 'field_1': Float64})",
+"[{'field_0': 1.5, 'field_1': None}, {'field_0': nan, 'field_1': 1.0}, {'field_0': None, 'field_1': None}, {'field_0': 4.0, 'field_1': -1.0}]"
+],
+"count_null": [
+"UInt32",
+"[1, 0, None, 0]"
+],
+"contains_null": [
+"Boolean",
+"[True, False, None, False]"
+],
+"join": [
+"ERR",
+"`array.join` operation not supported for dtype `f64` (expected: String)"
+]
+}
+},
+"bool": {
+"input": "[[true, null], [false, false], null, [true, true]]",
+"ops": {
+"len": [
+"UInt32",
+"[2, 2, None, 2]"
+],
+"sum": [
+"UInt32",
+"[1, 0, None, 2]"
+],
+"mean": [
+"Float64",
+"[1.0, 0.0, None, 1.0]"
+],
+"median": [
+"Float64",
+"[None, None, None, None]"
+],
+"std": [
+"Float64",
+"[None, None, None, None]"
+],
+"var0": [
+"Float64",
+"[None, None, None, None]"
+],
+"min": [
+"ERR",
+"not implemented for dtype Boolean"
+],
+"max": [
+"ERR",
+"not implemented for dtype Boolean"
+],
+"arg_min": [
+"UInt32",
+"[0, 0, None, 0]"
+],
+"arg_max": [
+"UInt32",
+"[0, 0, None, 0]"
+],
+"n_unique": [
+"UInt32",
+"[2, 1, None, 1]"
+],
+"any": [
+"Boolean",
+"[True, False, None, True]"
+],
+"all": [
+"Boolean",
+"[True, False, None, True]"
+],
+"first": [
+"Boolean",
+"[True, False, None, True]"
+],
+"last": [
+"Boolean",
+"[None, False, None, True]"
+],
+"get1": [
+"Boolean",
+"[None, False, None, True]"
+],
+"get5": [
+"Boolean",
+"[None, None, None, None]"
+],
+"get5_err": [
+"ERR",
+"get index 5 is out of bounds for array of width 2"
+],
+"reverse": [
+"Array(Boolean, shape=(2,))",
+"[[None, True], [False, False], None, [True, True]]"
+],
+"sort": [
+"Array(Boolean, shape=(2,))",
+"[[None, True], [False, False], None, [True, True]]"
+],
+"sort_desc_nl": [
+"Array(Boolean, shape=(2,))",
+"[[True, None], [False, False], None, [True, True]]"
+],
+"unique": [
+"List(Boolean)",
+"[[True, None], [False], None, [True]]"
+],
+"head2": [
+"List(Boolean)",
+"[[True, None], [False, False], None, [True, True]]"
+],
+"tail1": [
+"List(Boolean)",
+"[[None], [False], None, [True]]"
+],
+"slice": [
+"List(Boolean)",
+"[[None], [False], None, [True]]"
+],
+"shift1": [
+"Array(Boolean, shape=(2,))",
+"[[None, True], [None, False], None, [None, True]]"
+],
+"explode": [
+"Boolean",
+"[True, None, False, False, None, True, True]"
+],
+"to_list": [
+"List(Boolean)",
+"[[True, None], [False, False], None, [True, True]]"
+],
+"to_struct": [
+"Struct({'field_0': Boolean, 'field_1': Boolean})",
+"[{'field_0': True, 'field_1': None}, {'field_0': False, 'field_1': False}, {'field_0': None, 'field_1': None}, {'field_0': True, 'field_1': True}]"
+],
+"count_null": [
+"UInt32",
+"[1, 0, None, 0]"
+],
+"contains_null": [
+"Boolean",
+"[True, False, None, False]"
+],
+"join": [
+"ERR",
+"`array.join` operation not supported for dtype `bool` (expected: String)"
+]
+}
+},
+"str": {
+"input": "[[\"b\", \"a\"], [null, \"é\"], null, [\"x\", \"x\"]]",
+"ops": {
+"len": [
+"UInt32",
+"[2, 2, None, 2]"
+],
+"sum": [
+"ERR",
+"summing array with dtype: array[str, 2] not yet supported"
+],
+"mean": [
+"Float64",
+"[None, None, None, None]"
+],
+"median": [
+"Float64",
+"[None, None, None, None]"
+],
+"std": [
+"Float64",
+"[None, None, None, None]"
+],
+"var0": [
+"Float64",
+"[None, None, None, None]"
+],
+"min": [
+"ERR",
+"not implemented for dtype String"
+],
+"max": [
+"ERR",
+"not implemented for dtype String"
+],
+"arg_min": [
+"UInt32",
+"[1, 1, None, 0]"
+],
+"arg_max": [
+"UInt32",
+"[0, 1, None, 1]"
+],
+"n_unique": [
+"UInt32",
+"[2, 2, None, 1]"
+],
+"any": [
+"ERR",
+"expected boolean elements in array"
+],
+"all": [
+"ERR",
+"expected boolean elements in array"
+],
+"first": [
+"String",
+"['b', None, None, 'x']"
+],
+"last": [
+"String",
+"['a', 'é', None, 'x']"
+],
+"get1": [
+"String",
+"['a', 'é', None, 'x']"
+],
+"get5": [
+"String",
+"[None, None, None, None]"
+],
+"get5_err": [
+"ERR",
+"get index 5 is out of bounds for array of width 2"
+],
+"reverse": [
+"Array(String, shape=(2,))",
+"[['a', 'b'], ['é', None], None, ['x', 'x']]"
+],
+"sort": [
+"Array(String, shape=(2,))",
+"[['a', 'b'], [None, 'é'], None, ['x', 'x']]"
+],
+"sort_desc_nl": [
+"Array(String, shape=(2,))",
+"[['b', 'a'], ['é', None], None, ['x', 'x']]"
+],
+"unique": [
+"List(String)",
+"[['b', 'a'], [None, 'é'], None, ['x']]"
+],
+"head2": [
+"List(String)",
+"[['b', 'a'], [None, 'é'], None, ['x', 'x']]"
+],
+"tail1": [
+"List(String)",
+"[['a'], ['é'], None, ['x']]"
+],
+"slice": [
+"List(String)",
+"[['a'], ['é'], None, ['x']]"
+],
+"shift1": [
+"Array(String, shape=(2,))",
+"[[None, 'b'], [None, None], None, [None, 'x']]"
+],
+"explode": [
+"String",
+"['b', 'a', None, 'é', None, 'x', 'x']"
+],
+"to_list": [
+"List(String)",
+"[['b', 'a'], [None, 'é'], None, ['x', 'x']]"
+],
+"to_struct": [
+"Struct({'field_0': String, 'field_1': String})",
+"[{'field_0': 'b', 'field_1': 'a'}, {'field_0': None, 'field_1': 'é'}, {'field_0': None, 'field_1': None}, {'field_0': 'x', 'field_1': 'x'}]"
+],
+"count_null": [
+"UInt32",
+"[0, 1, None, 0]"
+],
+"contains_null": [
+"Boolean",
+"[False, True, None, False]"
+],
+"join": [
+"String",
+"['b-a', 'é', None, 'x-x']"
+]
+}
+}
+}

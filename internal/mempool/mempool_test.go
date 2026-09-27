@@ -86,11 +86,11 @@ func TestReallocate(t *testing.T) {
 func TestConcurrentUse(t *testing.T) {
 	a := Default()
 	var wg sync.WaitGroup
-	for w := 0; w < 8; w++ {
+	for w := range 8 {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			for i := 0; i < 200; i++ {
+			for i := range 200 {
 				b := a.Allocate(64 + (i*37+w)%1024)
 				b[0] = byte(w)
 				a.Free(b)
