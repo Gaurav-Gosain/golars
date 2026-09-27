@@ -300,7 +300,11 @@ def main() -> int:
     speed, mem = [], []
     for q in qs:
         tp = time_polars(QUERIES[q], args.data, args.runs)
-        tg, g_rss = run_golars(binary, q, args.data, args.runs)
+        tg, _ = run_golars(binary, q, args.data, args.runs)
+        # Peak RSS from a process that runs the query once, like the
+        # polars measurement; repeated runs in one Go process keep the
+        # heap high-water mark of every run.
+        _, g_rss = run_golars(binary, q, args.data, 0)
         p_rss = polars_peak_rss(q, args.data) - base
         speed.append(tp / tg)
         mem.append(g_rss / max(p_rss, 1))
@@ -308,7 +312,7 @@ def main() -> int:
               f" {p_rss / 2**20:>7.0f}MB {g_rss / 2**20:>7.0f}MB {g_rss / max(p_rss, 1):>6.2f}x")
     print(f"median speedup {statistics.median(speed):.2f}x, median memory {statistics.median(mem):.2f}x")
     print(f"polars {pl.__version__}; speedup > 1 means golars is faster; mem = golars peak RSS "
-          "over polars peak RSS (polars minus its import footprint; golars runs warmup + runs)")
+          "over polars peak RSS, one query per process (polars minus its import footprint)")
     return 0
 
 
