@@ -1,0 +1,84 @@
+{
+  "name": "date_minus_huge_duration",
+  "status": "known",
+  "note": "date - duration that overflows: polars null, golars wraps (column \"c0\" row 0: golars 918203961, polars null)",
+  "plan": {
+    "seed": 200527,
+    "ops": [
+      {
+        "op": "with_columns",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "bin",
+                "name": "-",
+                "args": [
+                  {
+                    "k": "fn",
+                    "name": "date",
+                    "args": [
+                      {
+                        "k": "raw",
+                        "val": 1997
+                      },
+                      {
+                        "k": "raw",
+                        "val": 3
+                      },
+                      {
+                        "k": "raw",
+                        "val": 26
+                      }
+                    ]
+                  },
+                  {
+                    "k": "col",
+                    "name": "c1"
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "c0"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c1",
+      "type": "duration[ms]",
+      "values": [
+        -2305843009213693952
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "duration[ms]",
+        "values": [
+          -2305843009213693952
+        ]
+      },
+      {
+        "name": "c0",
+        "type": "date",
+        "values": [
+          null
+        ]
+      }
+    ]
+  }
+}

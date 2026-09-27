@@ -1,0 +1,67 @@
+{
+  "name": "strftime_date_time_directive",
+  "status": "known",
+  "note": "strftime with a time directive on a date: polars raises, golars formats (polars raised ComputeError: cannot format Date with format '%s')",
+  "plan": {
+    "seed": 201182,
+    "ops": [
+      {
+        "op": "with_columns",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "dt.strftime",
+                "args": [
+                  {
+                    "k": "fn",
+                    "name": "date",
+                    "args": [
+                      {
+                        "k": "raw",
+                        "val": 2009
+                      },
+                      {
+                        "k": "raw",
+                        "val": 11
+                      },
+                      {
+                        "k": "raw",
+                        "val": 15
+                      }
+                    ]
+                  },
+                  {
+                    "k": "raw",
+                    "val": "%s"
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "c1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "str",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": false,
+    "error": "ComputeError: cannot format Date with format '%s'"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "name": "literal_rolling_max",
+  "status": "known",
+  "note": "rolling_max of a literal: literal broadcast before the window (literal semantics) (column \"o4\" row 0: golars 1, polars null)",
+  "plan": {
+    "seed": 200062,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "quantile",
+                "args": [
+                  {
+                    "k": "call",
+                    "name": "rolling_max",
+                    "args": [
+                      {
+                        "k": "lit",
+                        "val": 1,
+                        "f": true
+                      },
+                      {
+                        "k": "raw",
+                        "val": 3
+                      }
+                    ]
+                  },
+                  {
+                    "k": "raw",
+                    "val": 0,
+                    "f": true
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o4"
+              }
+            ]
+          }
+        ],
+        "resets_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c4",
+      "type": "datetime[us]",
+      "values": [
+        null,
+        null,
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "o4",
+        "type": "f64",
+        "values": [
+          null
+        ]
+      }
+    ]
+  }
+}

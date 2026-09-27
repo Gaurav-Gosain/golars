@@ -1,0 +1,81 @@
+{
+  "name": "rolling_min_periods_gt_window",
+  "status": "known",
+  "note": "rolling with min_periods > window must raise (polars raised InvalidOperationError: `min_periods` should be <= `window_size`)",
+  "plan": {
+    "seed": 201905,
+    "ops": [
+      {
+        "op": "with_columns",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "col",
+                "name": "c1"
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "rolling_min",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "o1"
+                  },
+                  {
+                    "k": "raw",
+                    "val": 1
+                  }
+                ],
+                "kw": [
+                  {
+                    "name": "min_samples",
+                    "val": {
+                      "k": "raw",
+                      "val": 2
+                    }
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o3"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c1",
+      "type": "f64",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": false,
+    "error": "InvalidOperationError: `min_periods` should be <= `window_size`"
+  }
+}

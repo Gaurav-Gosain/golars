@@ -1,0 +1,64 @@
+{
+  "name": "list_tail_empty_column",
+  "status": "fixed",
+  "note": "list.tail on an empty list column panicked (golars panicked: runtime error: invalid memory address or nil pointer dereference)",
+  "plan": {
+    "seed": 203516,
+    "ops": [
+      {
+        "op": "with_columns",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "list.tail",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c1"
+                  },
+                  {
+                    "k": "raw",
+                    "val": 1
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o2"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c1",
+      "type": "list[f64]",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "list[f64]",
+        "values": []
+      },
+      {
+        "name": "o2",
+        "type": "list[f64]",
+        "values": []
+      }
+    ]
+  }
+}

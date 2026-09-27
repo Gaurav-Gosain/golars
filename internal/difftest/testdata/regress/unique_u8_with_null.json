@@ -1,0 +1,40 @@
+{
+  "name": "unique_u8_with_null",
+  "status": "known",
+  "note": "unique on a u8 column with a null loses the non-null value (column \"c1\" row 0: golars null, polars 243)",
+  "plan": {
+    "seed": 200367,
+    "ops": [
+      {
+        "op": "unique",
+        "maintain_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c1",
+      "type": "u8",
+      "values": [
+        243,
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "u8",
+        "values": [
+          243,
+          null
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "unique_maintain_order_null_first",
+  "status": "known",
+  "note": "DataFrame.Unique documents first-occurrence order, but a null row sorts first (column \"c0\" row 0: golars null, polars \"z.10\")",
+  "plan": {
+    "seed": 200216,
+    "ops": [
+      {
+        "op": "unique",
+        "maintain_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "str",
+      "values": [
+        "z.10",
+        null
+      ]
+    },
+    {
+      "name": "c1",
+      "type": "u64",
+      "values": [
+        null,
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c0",
+        "type": "str",
+        "values": [
+          "z.10",
+          null
+        ]
+      },
+      {
+        "name": "c1",
+        "type": "u64",
+        "values": [
+          null,
+          null
+        ]
+      }
+    ]
+  }
+}

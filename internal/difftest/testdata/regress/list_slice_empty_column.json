@@ -1,0 +1,68 @@
+{
+  "name": "list_slice_empty_column",
+  "status": "fixed",
+  "note": "list.slice on an empty list column panicked in takeArrow (golars panicked: runtime error: invalid memory address or nil pointer dereference)",
+  "plan": {
+    "seed": 201598,
+    "ops": [
+      {
+        "op": "with_columns",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "list.slice",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c2"
+                  },
+                  {
+                    "k": "raw",
+                    "val": 0
+                  },
+                  {
+                    "k": "raw",
+                    "val": 1
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o2"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c2",
+      "type": "list[i64]",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c2",
+        "type": "list[i64]",
+        "values": []
+      },
+      {
+        "name": "o2",
+        "type": "list[i64]",
+        "values": []
+      }
+    ]
+  }
+}

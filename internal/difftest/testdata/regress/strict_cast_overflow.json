@@ -1,0 +1,58 @@
+{
+  "name": "strict_cast_overflow",
+  "status": "known",
+  "note": "cast is not strict in golars: out of range values become null instead of raising (intentional difference) (polars raised InvalidOperationError: conversion from `i16` to `u16` failed in column 'c2' for 4 out of 4 values: [-1, -5, … -32767])",
+  "plan": {
+    "seed": 201722,
+    "ops": [
+      {
+        "op": "with_columns",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "cast",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c2"
+                  },
+                  {
+                    "k": "dtype",
+                    "dtype": "u16"
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c2",
+      "type": "i16",
+      "values": [
+        -1,
+        -5,
+        -1,
+        -32767
+      ]
+    }
+  ],
+  "want": {
+    "ok": false,
+    "error": "InvalidOperationError: conversion from `i16` to `u16` failed in column 'c2' for 4 out of 4 values: [-1, -5, … -32767]"
+  }
+}

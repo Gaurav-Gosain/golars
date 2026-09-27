@@ -1,0 +1,77 @@
+{
+  "name": "date_plus_subday_duration",
+  "status": "known",
+  "note": "date + duration[ns] of -1: golars 9642, polars 9643 (date is cast to datetime before adding) (column \"o4\" row 0: golars 9642, polars 9643)",
+  "plan": {
+    "seed": 200043,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "bin",
+                "name": "+",
+                "args": [
+                  {
+                    "k": "fn",
+                    "name": "date",
+                    "args": [
+                      {
+                        "k": "raw",
+                        "val": 1996
+                      },
+                      {
+                        "k": "raw",
+                        "val": 5
+                      },
+                      {
+                        "k": "raw",
+                        "val": 27
+                      }
+                    ]
+                  },
+                  {
+                    "k": "col",
+                    "name": "c3"
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o4"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c3",
+      "type": "duration[ns]",
+      "values": [
+        -1
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "o4",
+        "type": "date",
+        "values": [
+          9643
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "name": "group_by_duration_far_keys",
+  "status": "fixed",
+  "note": "distinct duration keys -1 and 2^61-1 fell into one group (golars 1 rows, polars 2 rows)",
+  "plan": {
+    "seed": 200609,
+    "ops": [
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "fn",
+                "name": "len"
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c0"
+        ],
+        "maintain_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "duration[us]",
+      "values": [
+        -1,
+        2305843009213693951
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c0",
+        "type": "duration[us]",
+        "values": [
+          -1,
+          2305843009213693951
+        ]
+      },
+      {
+        "name": "o1",
+        "type": "u32",
+        "values": [
+          1,
+          1
+        ]
+      }
+    ]
+  }
+}
