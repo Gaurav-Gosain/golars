@@ -15,7 +15,8 @@ var scalarFuncs = map[string]bool{
 	"upper_bound": true, "dot": true, "corr": true, "cov": true,
 	"get": true, "count": true, "sum": true, "mean": true, "min": true,
 	"max": true, "frame_len": true, "bitwise_and": true,
-	"bitwise_or": true, "bitwise_xor": true,
+	"bitwise_or": true, "bitwise_xor": true, "var_ddof": true, "std_ddof": true,
+	"quantile_with": true, "entropy_with": true,
 }
 
 // elementwiseFuncs names FunctionNodes whose output row i depends only on

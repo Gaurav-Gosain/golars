@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
@@ -250,8 +251,44 @@ func evalAgg(ctx context.Context, ec EvalContext, n expr.AggNode, df *dataframe.
 	if out, ok, err := temporalAgg(n, inner, ec); ok {
 		return out, err
 	}
+	if out, ok, err := minMaxNonNumeric(n, inner, ec); ok {
+		return out, err
+	}
+	out, err := evalAggValues(ctx, ec, n, inner)
+	if err != nil {
+		return nil, err
+	}
+	switch n.Op {
+	case expr.AggSum:
+		return castAggResult(ec, "sum", inner.DType(), out)
+	case expr.AggMin:
+		return castAggResult(ec, "min", inner.DType(), out)
+	case expr.AggMax:
+		return castAggResult(ec, "max", inner.DType(), out)
+	case expr.AggMean:
+		return castAggResult(ec, "mean", inner.DType(), out)
+	}
+	return out, nil
+}
+
+// evalAggValues computes an AggNode over an evaluated input: integer
+// results in i64, float results in f64 (evalAgg casts them to the
+// polars dtype).
+func evalAggValues(ctx context.Context, ec EvalContext, n expr.AggNode, inner *series.Series) (*series.Series, error) {
 	name := expr.OutputName(n.Inner)
 	opts := kernelOpts(ec)
+	switch inner.DType().ID() {
+	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16, arrow.BOOL:
+		// The reduction kernels take 32 and 64 bit inputs.
+		if n.Op == expr.AggSum || n.Op == expr.AggMin || n.Op == expr.AggMax {
+			wide, err := compute.Cast(ctx, inner, dtype.Int64(), opts...)
+			if err != nil {
+				return nil, err
+			}
+			defer wide.Release()
+			inner = wide
+		}
+	}
 
 	switch n.Op {
 	case expr.AggSum:
@@ -496,4 +533,50 @@ func kernelOpts(ec EvalContext) []compute.Option {
 		opts = append(opts, compute.WithParallelism(ec.Parallelism))
 	}
 	return opts
+}
+
+// minMaxNonNumeric handles min and max of string and bool inputs:
+// strings compare bytewise, and for bools min is all and max is any.
+// Nulls are skipped; an all-null input gives null.
+func minMaxNonNumeric(n expr.AggNode, inner *series.Series, ec EvalContext) (*series.Series, bool, error) {
+	if n.Op != expr.AggMin && n.Op != expr.AggMax {
+		return nil, false, nil
+	}
+	dt := inner.DType()
+	if !dt.IsString() && !dt.IsBool() {
+		return nil, false, nil
+	}
+	name := expr.OutputName(n.Inner)
+	var best any
+	for _, v := range inner.ToList() {
+		if v == nil {
+			continue
+		}
+		if best == nil {
+			best = v
+			continue
+		}
+		switch x := v.(type) {
+		case string:
+			b := best.(string)
+			if (n.Op == expr.AggMin && x < b) || (n.Op == expr.AggMax && x > b) {
+				best = x
+			}
+		case bool:
+			b := best.(bool)
+			if (n.Op == expr.AggMin && !x && b) || (n.Op == expr.AggMax && x && !b) {
+				best = x
+			}
+		}
+	}
+	if best == nil {
+		out, err := series.FullNull(name, dt.Arrow(), 1, seriesAlloc(ec))
+		return out, true, err
+	}
+	if s, ok := best.(string); ok {
+		out, err := series.FromString(name, []string{s}, nil, seriesAlloc(ec))
+		return out, true, err
+	}
+	out, err := series.FromBool(name, []bool{best.(bool)}, nil, seriesAlloc(ec))
+	return out, true, err
 }

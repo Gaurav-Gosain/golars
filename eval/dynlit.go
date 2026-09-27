@@ -133,3 +133,104 @@ func concatStrings(a, b *series.Series, ec EvalContext) (*series.Series, error) 
 	}
 	return series.FromString(a.Name(), out, valid, seriesAlloc(ec))
 }
+
+// castAggResult casts the result of aggregation op over an input of
+// dtype in to the dtype polars gives it (dtype.AggResultDType). It
+// consumes out.
+func castAggResult(ec EvalContext, op string, in dtype.DType, out *series.Series) (*series.Series, error) {
+	want, ok := dtype.AggResultDType(op, in)
+	if !ok || out.DType().Equal(want) || !(out.DType().IsNumeric() || out.DType().IsBool()) {
+		return out, nil
+	}
+	defer out.Release()
+	return compute.Cast(context.Background(), out, want, kernelOpts(ec)...)
+}
+
+// aggTyped returns a function that applies castAggResult to a kernel
+// result: aggTyped(ec, "median", s)(s.MedianSeries(...)).
+func aggTyped(ec EvalContext, op string, in *series.Series) func(*series.Series, error) (*series.Series, error) {
+	dt := in.DType()
+	return func(out *series.Series, err error) (*series.Series, error) {
+		if err != nil {
+			return nil, err
+		}
+		return castAggResult(ec, op, dt, out)
+	}
+}
+
+// toUint32 casts a count result to u32, polars' dtype for lengths and
+// counts. It consumes out.
+func toUint32(out *series.Series, err error) (*series.Series, error) {
+	if err != nil || out.DType().ID() == arrow.UINT32 {
+		return out, err
+	}
+	defer out.Release()
+	return compute.Cast(context.Background(), out, dtype.Uint32())
+}
+
+// cumTyped runs a cumulative kernel on s, widening inputs the kernel
+// lacks to f64, and casts the result to the polars dtype of
+// aggregation op (cum_sum of u8 is i64, of i32 stays i32).
+func cumTyped(s *series.Series, op string, fn func(*series.Series) (*series.Series, error)) (*series.Series, error) {
+	in := s.DType()
+	out, err := fn(s)
+	if err != nil && (in.IsNumeric() || in.IsBool()) {
+		wide, cerr := compute.Cast(context.Background(), s, dtype.Float64())
+		if cerr != nil {
+			return nil, err
+		}
+		defer wide.Release()
+		out, err = fn(wide)
+	}
+	if err != nil {
+		return nil, err
+	}
+	want, ok := dtype.AggResultDType(op, in)
+	if !ok || out.DType().Equal(want) {
+		return out, nil
+	}
+	defer out.Release()
+	return compute.Cast(context.Background(), out, want)
+}
+
+// temporalMedian is polars' median of a temporal column: the median of
+// the physical values in f64, truncated back to ticks. A date median
+// is a datetime[us] (the midpoint of two days can fall mid-day).
+func temporalMedian(s *series.Series, ec EvalContext) (*series.Series, bool, error) {
+	dt := s.DType()
+	if !dt.IsTemporal() {
+		return nil, false, nil
+	}
+	phys, err := compute.Cast(context.Background(), s, dtype.Int64(), kernelOpts(ec)...)
+	if err != nil {
+		return nil, true, err
+	}
+	defer phys.Release()
+	med, err := phys.MedianSeries(seriesAlloc(ec))
+	if err != nil {
+		return nil, true, err
+	}
+	defer med.Release()
+	target := dt
+	scale := 1.0
+	if dt.IsDate() {
+		target = dtype.Datetime(dtype.Microsecond, "")
+		scale = 86_400_000_000
+	}
+	vals := med.ToList()
+	var ticks []any
+	for _, v := range vals {
+		if f, ok := v.(float64); ok {
+			ticks = append(ticks, int64(f*scale))
+		} else {
+			ticks = append(ticks, nil)
+		}
+	}
+	ints, err := series.FromValues(s.Name(), arrow.PrimitiveTypes.Int64, ticks, seriesAlloc(ec))
+	if err != nil {
+		return nil, true, err
+	}
+	defer ints.Release()
+	out, err := compute.Cast(context.Background(), ints, target, kernelOpts(ec)...)
+	return out, true, err
+}

@@ -1,6 +1,6 @@
 {
   "name": "rolling_sum_int_dtype",
-  "status": "known",
+  "status": "fixed",
   "note": "rolling_sum on i32 returns f64; polars keeps i32 (golars {o1: f64})",
   "plan": {
     "seed": 200260,

@@ -93,8 +93,8 @@ func TestExprCumFamily(t *testing.T) {
 
 	cc := selectCol(t, alloc, []int64{1, 2, 3}, expr.Col("a").CumCount().Alias("cc"))
 	defer cc.Release()
-	ccArr := cc.Chunk(0).(*array.Int64)
-	for i, w := range []int64{1, 2, 3} {
+	ccArr := cc.Chunk(0).(*array.Uint32)
+	for i, w := range []uint32{1, 2, 3} {
 		if ccArr.Value(i) != w {
 			t.Errorf("CumCount[%d] = %d, want %d", i, ccArr.Value(i), w)
 		}

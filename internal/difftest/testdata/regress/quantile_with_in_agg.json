@@ -1,6 +1,6 @@
 {
   "name": "quantile_with_in_agg",
-  "status": "known",
+  "status": "fixed",
   "note": "quantile with an interpolation in group_by.agg is not recognized as an aggregation and returns a list (golars {c4: cat, o1: list[f64]})",
   "plan": {
     "seed": 200013,

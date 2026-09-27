@@ -155,6 +155,75 @@ func countsToUint32(ctx context.Context, df *DataFrame, aggs []expr.Expr, alloc 
 }
 
 func (g *GroupBy) agg(ctx context.Context, aggs []expr.Expr, opts ...GroupByOption) (*DataFrame, error) {
+	out, err := g.aggRaw(ctx, aggs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return g.fixAggDTypes(ctx, out, aggs)
+}
+
+// fixAggDTypes casts the outputs of bare-column aggregations to the
+// dtype polars gives them (dtype.AggResultDType): the hash kernels
+// produce i64 and f64 for every integer and float input.
+func (g *GroupBy) fixAggDTypes(ctx context.Context, out *DataFrame, aggs []expr.Expr) (*DataFrame, error) {
+	specs, err := parseAggs(aggs)
+	if err != nil {
+		return out, nil
+	}
+	cur := out
+	for _, sp := range specs {
+		op := ""
+		switch sp.op {
+		case expr.AggSum:
+			op = "sum"
+		case expr.AggMin:
+			op = "min"
+		case expr.AggMax:
+			op = "max"
+		case expr.AggMean:
+			op = "mean"
+		case expr.AggFirst:
+			op = "first"
+		case expr.AggLast:
+			op = "last"
+		default:
+			continue
+		}
+		src, err := g.df.Column(sp.colName)
+		if err != nil {
+			continue
+		}
+		want, ok := dtype.AggResultDType(op, src.DType())
+		if !ok {
+			continue
+		}
+		col, err := cur.Column(sp.outputName)
+		if err != nil || col.DType().Equal(want) || !(col.DType().IsNumeric() || col.DType().IsBool()) {
+			continue
+		}
+		cast, err := compute.Cast(ctx, col, want)
+		if err != nil {
+			cur.Release()
+			return nil, err
+		}
+		next, err := cur.WithColumn(cast)
+		cur.Release()
+		if err != nil {
+			cast.Release()
+			return nil, err
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+func (g *GroupBy) aggRaw(ctx context.Context, aggs []expr.Expr, opts ...GroupByOption) (*DataFrame, error) {
+	if GenericAgg != nil && !g.maintainOrder && len(g.keys) > 0 && !kernelAggInputs(g.df, aggs) {
+		// The group kernels cover 32 and 64 bit numbers, strings and
+		// bools; other inputs (i8, u16, temporal sums, ...) go through
+		// the expression evaluator.
+		return GenericAgg(ctx, g.df, g.keys, aggs, resolveGroupBy(opts).alloc)
+	}
 	if len(g.keys) == 0 {
 		return nil, fmt.Errorf("dataframe.GroupBy: at least one key required")
 	}
@@ -665,4 +734,30 @@ func arrowValuesEqual(arr arrow.Array, a, b int) bool {
 		return true
 	}
 	return false
+}
+
+// kernelAggInputs reports whether every aggregation is a bare-column
+// aggregation over a dtype the group kernels handle. Aggregations that
+// do not parse are left to the existing fallbacks.
+func kernelAggInputs(df *DataFrame, aggs []expr.Expr) bool {
+	specs, err := parseAggs(aggs)
+	if err != nil {
+		return true
+	}
+	for _, sp := range specs {
+		c, err := df.Column(sp.colName)
+		if err != nil {
+			return true
+		}
+		switch c.DType().ID() {
+		case arrow.INT32, arrow.INT64, arrow.UINT32, arrow.UINT64,
+			arrow.FLOAT32, arrow.FLOAT64, arrow.STRING, arrow.BOOL:
+		default:
+			if sp.op != expr.AggCount && sp.op != expr.AggNullCount &&
+				sp.op != expr.AggFirst && sp.op != expr.AggLast {
+				return false
+			}
+		}
+	}
+	return true
 }

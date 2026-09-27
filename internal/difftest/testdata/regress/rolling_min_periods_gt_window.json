@@ -1,7 +1,7 @@
 {
   "name": "rolling_min_periods_gt_window",
-  "status": "known",
-  "note": "rolling with min_periods > window must raise (polars raised InvalidOperationError: `min_periods` should be <= `window_size`)",
+  "status": "fixed",
+  "note": "rolling with min_periods \u003e window must raise (polars raised InvalidOperationError: `min_periods` should be \u003c= `window_size`)",
   "plan": {
     "seed": 201905,
     "ops": [
@@ -76,6 +76,6 @@
   ],
   "want": {
     "ok": false,
-    "error": "InvalidOperationError: `min_periods` should be <= `window_size`"
+    "error": "InvalidOperationError: `min_periods` should be \u003c= `window_size`"
   }
 }

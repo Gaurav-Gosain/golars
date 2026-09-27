@@ -59,7 +59,7 @@ func TestEvalStrFunctions(t *testing.T) {
 			}
 		}},
 		{"len_bytes", expr.Col("s").Str().LenBytes(), func(t *testing.T, s *series.Series) {
-			arr := s.Chunk(0).(*array.Int64)
+			arr := s.Chunk(0).(*array.Uint32) // polars: u32
 			if arr.Value(0) != 21 || arr.Value(1) != 20 || arr.Value(2) != 21 {
 				t.Errorf("len_bytes: %v", arr)
 			}

@@ -321,7 +321,7 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		arg0.Release()
 		return out, err
 	case "cum_sum":
-		out, err := arg0.CumSum(opt)
+		out, err := cumTyped(arg0, "sum", func(s *series.Series) (*series.Series, error) { return s.CumSum(opt) })
 		releaseOnErr = nil
 		arg0.Release()
 		return out, err
@@ -336,12 +336,12 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		arg0.Release()
 		return out, err
 	case "cum_prod":
-		out, err := arg0.CumProd(opt)
+		out, err := cumTyped(arg0, "product", func(s *series.Series) (*series.Series, error) { return s.CumProd(opt) })
 		releaseOnErr = nil
 		arg0.Release()
 		return out, err
 	case "cum_count":
-		out, err := arg0.CumCount(opt)
+		out, err := toUint32(arg0.CumCount(opt))
 		releaseOnErr = nil
 		arg0.Release()
 		return out, err

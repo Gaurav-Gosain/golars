@@ -120,25 +120,28 @@ func registerScalarAggs() {
 		return series.ScalarUint32(s.Name(), c, true, seriesAlloc(ec))
 	}))
 	registerCore("quantile", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
-		return s.QuantileSeries(paramFloat(n, 0, 0.5), series.QuantileNearest, seriesAlloc(ec))
+		return aggTyped(ec, "quantile", s)(s.QuantileSeries(paramFloat(n, 0, 0.5), series.QuantileNearest, seriesAlloc(ec)))
 	}))
 	registerCore("quantile_with", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
-		return s.QuantileSeries(paramFloat(n, 0, 0.5), paramString(n, 1, series.QuantileNearest), seriesAlloc(ec))
+		return aggTyped(ec, "quantile", s)(s.QuantileSeries(paramFloat(n, 0, 0.5), paramString(n, 1, series.QuantileNearest), seriesAlloc(ec)))
 	}))
 	registerCore("median", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
-		return s.MedianSeries(seriesAlloc(ec))
+		if out, ok, err := temporalMedian(s, ec); ok {
+			return out, err
+		}
+		return aggTyped(ec, "median", s)(s.MedianSeries(seriesAlloc(ec)))
 	}))
 	registerCore("std", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
-		return s.StdSeries(1, seriesAlloc(ec))
+		return aggTyped(ec, "std", s)(s.StdSeries(1, seriesAlloc(ec)))
 	}))
 	registerCore("var", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
-		return s.VarSeries(1, seriesAlloc(ec))
+		return aggTyped(ec, "var", s)(s.VarSeries(1, seriesAlloc(ec)))
 	}))
 	registerCore("std_ddof", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
-		return s.StdSeries(paramInt(n, 0, 1), seriesAlloc(ec))
+		return aggTyped(ec, "std", s)(s.StdSeries(paramInt(n, 0, 1), seriesAlloc(ec)))
 	}))
 	registerCore("var_ddof", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
-		return s.VarSeries(paramInt(n, 0, 1), seriesAlloc(ec))
+		return aggTyped(ec, "var", s)(s.VarSeries(paramInt(n, 0, 1), seriesAlloc(ec)))
 	}))
 	entropy := func(s *series.Series, base float64, normalize bool, ec EvalContext) (*series.Series, error) {
 		if base <= 0 {
