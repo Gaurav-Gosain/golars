@@ -129,6 +129,9 @@ func (SimplifyPass) Apply(plan Node) (Node, bool, error) {
 					changed = true
 				}
 			}
+			if fused, ok := fuseWithColumns(WithColumns{Input: node.Input, Exprs: exprs}); ok {
+				return fused, true, nil
+			}
 			if changed {
 				return WithColumns{Input: node.Input, Exprs: exprs}, true, nil
 			}

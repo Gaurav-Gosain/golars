@@ -192,3 +192,31 @@ func pruneFilterOnlyColumns(f Filter, needed map[string]struct{}) (Node, bool) {
 	}
 	return Projection{Input: f, Exprs: exprs}, true
 }
+
+// fuseWithColumns merges with_columns(with_columns(x, A), B) into
+// with_columns(x, A ++ B) when no expression in B reads a column A
+// produces. B then sees the same input either way, the outputs are
+// applied in the same order (a later same-named output still wins),
+// and all expressions evaluate in one parallel batch instead of two.
+func fuseWithColumns(outer WithColumns) (Node, bool) {
+	inner, ok := outer.Input.(WithColumns)
+	if !ok {
+		return nil, false
+	}
+	produced := map[string]struct{}{}
+	for _, e := range inner.Exprs {
+		produced[expr.OutputName(e)] = struct{}{}
+	}
+	for _, e := range outer.Exprs {
+		if referencesAllColumns(e) {
+			return nil, false
+		}
+		for _, c := range expr.Columns(e) {
+			if _, hit := produced[c]; hit {
+				return nil, false
+			}
+		}
+	}
+	merged := append(append(make([]expr.Expr, 0, len(inner.Exprs)+len(outer.Exprs)), inner.Exprs...), outer.Exprs...)
+	return WithColumns{Input: inner.Input, Exprs: merged}, true
+}
