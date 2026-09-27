@@ -169,17 +169,62 @@ func executeAggregate(ctx context.Context, cfg execConfig, a Aggregate) (*datafr
 }
 
 func executeJoin(ctx context.Context, cfg execConfig, j Join) (*dataframe.DataFrame, error) {
-	left, err := executeNode(ctx, cfg, j.Left)
+	left, right, err := executeBoth(ctx, cfg, j.Left, j.Right)
 	if err != nil {
 		return nil, err
 	}
 	defer left.Release()
-	right, err := executeNode(ctx, cfg, j.Right)
-	if err != nil {
-		return nil, err
-	}
 	defer right.Release()
 	return left.Join(ctx, right, j.On, j.How, dataframe.WithJoinAllocator(cfg.alloc))
+}
+
+// executeBoth runs two independent inputs concurrently (the right one on
+// a new goroutine), as polars does for join inputs. A scan with nothing
+// to compute runs inline. On error both results are released.
+func executeBoth(ctx context.Context, cfg execConfig, a, b Node) (*dataframe.DataFrame, *dataframe.DataFrame, error) {
+	if isTrivialInput(a) || isTrivialInput(b) {
+		l, err := executeNode(ctx, cfg, a)
+		if err != nil {
+			return nil, nil, err
+		}
+		r, err := executeNode(ctx, cfg, b)
+		if err != nil {
+			l.Release()
+			return nil, nil, err
+		}
+		return l, r, nil
+	}
+	type res struct {
+		df  *dataframe.DataFrame
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		df, err := executeNode(ctx, cfg, b)
+		ch <- res{df, err}
+	}()
+	l, lerr := executeNode(ctx, cfg, a)
+	r := <-ch
+	if lerr != nil || r.err != nil {
+		if l != nil {
+			l.Release()
+		}
+		if r.df != nil {
+			r.df.Release()
+		}
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		return nil, nil, r.err
+	}
+	return l, r.df, nil
+}
+
+// isTrivialInput reports whether executing n is just handing over an
+// in-memory frame, where a goroutine costs more than it saves.
+func isTrivialInput(n Node) bool {
+	s, ok := n.(DataFrameScan)
+	return ok && s.Predicate == nil && s.Length < 0
 }
 
 func executeScan(ctx context.Context, cfg execConfig, s DataFrameScan) (*dataframe.DataFrame, error) {
