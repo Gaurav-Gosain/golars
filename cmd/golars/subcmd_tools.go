@@ -3,22 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
-	iocsv "github.com/Gaurav-Gosain/golars/io/csv"
-	"github.com/Gaurav-Gosain/golars/io/ipc"
-	iojson "github.com/Gaurav-Gosain/golars/io/json"
-	ioparquet "github.com/Gaurav-Gosain/golars/io/parquet"
-	"github.com/Gaurav-Gosain/golars/series"
+	"github.com/Gaurav-Gosain/golars/internal/fileio"
 )
 
 // newDoctorCmd reports environment information useful for bug triage.
@@ -78,17 +71,14 @@ func newPeekCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		n := 10
-		if len(args) >= 2 {
-			if v, err := strconv.Atoi(args[1]); err == nil && v > 0 {
-				n = v
-			}
+		n, err := optCount(args, 1, 10, "row count")
+		if err != nil {
+			return err
 		}
 		ctx := context.Background()
-		df, err := loadByExt(ctx, args[0])
+		df, err := fileio.Read(ctx, args[0])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer df.Release()
 		if format == "" || format == fmtTable {
@@ -108,8 +98,7 @@ func newPeekCmd() *cobra.Command {
 		}
 		head := df.Head(n)
 		defer head.Release()
-		renderFrame(head, format)
-		return nil
+		return renderFrame(head, format)
 	}
 	return cmd
 }
@@ -141,28 +130,25 @@ func newSampleCmd() *cobra.Command {
 			seed = uint64(time.Now().UnixNano())
 		}
 		ctx := context.Background()
-		df, err := loadByExt(ctx, args[0])
+		df, err := fileio.Read(ctx, args[0])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer df.Release()
 		k := min(n, df.Height())
 		out, err := df.Sample(ctx, k, false, seed)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer out.Release()
-		renderFrame(out, format)
-		return nil
+		return renderFrame(out, format)
 	}
 	return cmd
 }
 
-// newConvertCmd reads SRC, writes DST. Both formats inferred from
-// extension. If DST is "-" the result is streamed to stdout in the
-// target format.
+// newConvertCmd reads SRC and writes DST, inferring both formats from
+// the extensions. With DST "-" the data is written to stdout in the
+// source format, which is handy for piping remote-friendly formats.
 func newConvertCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "convert SRC DST",
@@ -174,57 +160,23 @@ func newConvertCmd() *cobra.Command {
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
 		src, dst := args[0], args[1]
 		ctx := context.Background()
-		df, err := loadByExt(ctx, src)
+		df, err := fileio.Read(ctx, src)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer df.Release()
 		if dst == "-" {
-			format := outputFormat(strings.TrimPrefix(strings.ToLower(filepath.Ext(src)), "."))
-			switch format {
-			case "parquet", "pq":
-				format = fmtParquet
-			case "arrow", "ipc":
-				format = fmtArrow
-			case "jsonl", "ndjson":
-				format = fmtNDJSON
-			}
-			if err := writeFrame(ctx, os.Stdout, df, format); err != nil {
-				fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-				return errSubcommandFailed
-			}
-			return nil
+			// Stream to stdout in the source's own format.
+			f, _ := fileio.FormatOf(src)
+			return fileio.WriteTo(ctx, os.Stdout, df, f)
 		}
-		if err := writeByExt(ctx, dst, df); err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+		if err := fileio.Write(ctx, dst, df); err != nil {
+			return err
 		}
-		fmt.Printf("%s wrote %s (%d × %d)\n",
-			successStyle.Render("✓"), dst, df.Height(), df.Width())
+		ok("wrote %s (%s)", dst, shape(df))
 		return nil
 	}
 	return cmd
-}
-
-// writeByExt picks a writer based on dst's extension.
-func writeByExt(ctx context.Context, dst string, df *dataframe.DataFrame) error {
-	ext := strings.ToLower(filepath.Ext(dst))
-	switch ext {
-	case ".csv":
-		return iocsv.WriteFile(ctx, dst, df)
-	case ".tsv":
-		return iocsv.WriteFile(ctx, dst, df, iocsv.WithDelimiter('\t'))
-	case ".parquet", ".pq":
-		return ioparquet.WriteFile(ctx, dst, df)
-	case ".arrow", ".ipc":
-		return ipc.WriteFile(ctx, dst, df)
-	case ".json":
-		return iojson.WriteFile(ctx, dst, df)
-	case ".ndjson", ".jsonl":
-		return iojson.WriteNDJSONFile(ctx, dst, df)
-	}
-	return fmt.Errorf("unsupported destination extension %q", ext)
 }
 
 // newCatCmd vertically concatenates multiple files and prints the
@@ -252,55 +204,18 @@ func newCatCmd() *cobra.Command {
 			}
 		}()
 		for _, f := range args {
-			df, err := loadByExt(ctx, f)
+			df, err := fileio.Read(ctx, f)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-				return errSubcommandFailed
+				return err
 			}
 			frames = append(frames, df)
 		}
 		out, err := dataframe.Concat(frames...)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer out.Release()
-		renderFrame(out, format)
-		return nil
+		return renderFrame(out, format)
 	}
 	return cmd
 }
-
-// cmdReservoirSample is a streaming uniform sampler kept in tree for
-// future --stream support on very large files. Not wired into the
-// router: the eager path in newSampleCmd handles typical in-memory
-// frames fine.
-func cmdReservoirSample(rows int, src string) (*dataframe.DataFrame, error) {
-	df, err := loadByExt(context.Background(), src)
-	if err != nil {
-		return nil, err
-	}
-	defer df.Release()
-	if rows >= df.Height() {
-		return df.Clone(), nil
-	}
-	r := rand.New(rand.NewPCG(1, 2))
-	picks := make([]int, rows)
-	for i := range rows {
-		picks[i] = i
-	}
-	for i := rows; i < df.Height(); i++ {
-		j := int(r.Uint64N(uint64(i + 1)))
-		if j < rows {
-			picks[j] = i
-		}
-	}
-	idx := make([]int64, rows)
-	for i, p := range picks {
-		idx[i] = int64(p)
-	}
-	_ = idx
-	return df.Sample(context.Background(), rows, false, 42)
-}
-
-var _ = series.Empty

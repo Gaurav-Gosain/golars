@@ -28,7 +28,7 @@ SIMD_ENV ?= GOEXPERIMENT=simd
 all: check
 
 help: ## Print this help
-	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/:/' | awk -F: '{printf "  %-14s %s\n", $$1, $$3}'
+	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*## */:/' | awk -F: '{printf "  %-14s %s\n", $$1, $$2}'
 
 build: ## Build every binary under cmd/ into ./bin
 	@mkdir -p $(BIN)

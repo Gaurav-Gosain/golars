@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -35,15 +34,13 @@ func newTranspileCmd() *cobra.Command {
 		if out != "" {
 			f, err := os.Create(out)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-				return errSubcommandFailed
+				return err
 			}
 			defer f.Close()
 			w = f
 		}
 		if err := transpile.Transpile(args[0], w, pkg); err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		return nil
 	}

@@ -50,7 +50,7 @@ func newFmtCmd() *cobra.Command {
 			}
 		}
 		if failed {
-			return errSubcommandFailed
+			return errSilent
 		}
 		return nil
 	}

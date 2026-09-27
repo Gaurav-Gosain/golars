@@ -52,3 +52,48 @@ with u = name.str.upper()
     args: (expr
       (method_call
         receiver: (identifier)))))
+
+================================================================================
+Namespaced calls, lists and keyword arguments
+================================================================================
+
+with band = cut(age, [0, 10], labels=["a", "b", "c"])
+join_asof quotes on time by symbol tolerance 2m
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (identifier)
+    (expr
+      (method_call
+        (identifier)
+        (expr
+          (identifier))
+        (expr
+          (list
+            (expr
+              (number))
+            (expr
+              (number))))
+        (kwarg
+          (identifier)
+          (expr
+            (list
+              (expr
+                (string))
+              (expr
+                (string))
+              (expr
+                (string))))))))
+  (statement
+    (command)
+    (identifier)
+    (keyword)
+    (identifier)
+    (keyword)
+    (identifier)
+    (keyword)
+    (number)
+    (identifier)))

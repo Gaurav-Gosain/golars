@@ -1,27 +1,41 @@
 // Package exprparse turns a short text expression into an expr.Expr.
 //
-// Grammar (whitespace-separated, case-sensitive for identifiers):
+// Grammar (identifiers are case-sensitive, keywords are not):
 //
-//	expr    := orExpr
-//	orExpr  := andExpr ("or" andExpr)*
-//	andExpr := notExpr ("and" notExpr)*
-//	notExpr := "not" notExpr | cmpExpr
-//	cmpExpr := addExpr ((== | != | < | <= | > | >=) addExpr)?
-//	addExpr := mulExpr ((+ | -) mulExpr)*
-//	mulExpr := unary ((* | /) unary)*
-//	unary   := "-" unary | primary
-//	primary := literal | "(" expr ")" | methodChain
-//	methodChain := ident ("." call)*
-//	call    := ident "(" argList? ")"
-//	argList := expr ("," expr)*
-//	literal := number | quoted-string | "true" | "false" | "null"
+//	expr     := orExpr
+//	orExpr   := andExpr ("or" andExpr)*
+//	andExpr  := notExpr ("and" notExpr)*
+//	notExpr  := "not" notExpr | cmpExpr
+//	cmpExpr  := addExpr ( cmpOp addExpr
+//	                    | "is_null" | "is_not_null"
+//	                    | strOp addExpr
+//	                    | ["not"] "in" list )?
+//	cmpOp    := "==" | "!=" | "<" | "<=" | ">" | ">="
+//	strOp    := "contains" | "starts_with" | "ends_with" | "like" | "not_like"
+//	addExpr  := mulExpr (("+" | "-") mulExpr)*
+//	mulExpr  := unary (("*" | "/" | "//" | "%") unary)*
+//	unary    := "-" unary | power
+//	power    := postfix ("**" unary)?
+//	postfix  := primary ("." member)*
+//	member   := ns "." ident args? | ident args?
+//	primary  := literal | list | "(" expr ")" | when
+//	          | ns "." ident args | ident args | ident
+//	when     := "when" orExpr "then" orExpr ("when" orExpr "then" orExpr)*
+//	            ("otherwise" orExpr)?
+//	args     := "(" (arg ("," arg)*)? ")"
+//	arg      := ident "=" expr | expr
+//	list     := "[" (expr ("," expr)*)? "]"
+//	literal  := number | quoted-string | "true" | "false" | "null"
+//	ns       := "str" | "dt" | "list" | "arr" | "struct" | "name" | "bin" | "cat"
 //
-// Bare identifiers resolve to column references (`expr.Col`). Chained
-// calls dispatch to method namespaces: `col.str.upper()` lowers to
-// `expr.Col("col").Str().ToUppercase()`. The supported surface
-// mirrors the `.glr` scripting language's audience; not every golars
-// operator is reachable. See the `dispatch*` helpers below for the
-// full list.
+// Bare identifiers are column references. Every function has one
+// regular spelling in two equivalent forms: a method on a value
+// (`ts.dt.year()`, `x.round(2)`) or a call whose first argument is
+// the receiver (`dt.year(ts)`, `round(x, 2)`). Calls resolve against
+// the public golars expression API through reflection, so a new
+// method on expr.Expr (or on one of its namespaces) is reachable
+// from glr without touching this package. The tables in funcs.go only
+// add aliases, polars-style default arguments and free functions.
 package exprparse
 
 import (
@@ -30,24 +44,43 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 )
 
-// Parse builds an expr.Expr from s. Trailing whitespace tolerated.
-// Errors point at the offending byte so callers can flag the cursor
-// in editor contexts.
+// Parse builds an expr.Expr from s. Errors point at the offending
+// byte where the parser knows it.
 func Parse(s string) (expr.Expr, error) {
-	p := &parser{src: s, toks: tokenize(s)}
-	e, err := p.parseExpr()
+	v, err := compileSource(s)
 	if err != nil {
 		return expr.Expr{}, err
 	}
-	if p.pos < len(p.toks) && p.toks[p.pos].kind != tokEOF {
-		return expr.Expr{}, fmt.Errorf("unexpected trailing token %q at byte %d",
-			p.toks[p.pos].text, p.toks[p.pos].start)
+	return v.e, nil
+}
+
+// GoSource parses s and returns Go source that rebuilds the same
+// expression with the golars expr (and dtype) packages. The glr to Go
+// transpiler uses it so generated programs call the real API.
+func GoSource(s string) (string, error) {
+	v, err := compileSource(s)
+	if err != nil {
+		return "", err
 	}
-	return e, nil
+	return v.src, nil
+}
+
+func compileSource(s string) (val, error) {
+	p := &parser{toks: tokenize(s)}
+	n, err := p.parseExpr()
+	if err != nil {
+		return val{}, err
+	}
+	if t := p.peek(); t.kind != tokEOF {
+		if t.kind == tokOp && t.text == "=" {
+			return val{}, fmt.Errorf("unexpected '=' at byte %d; did you mean '=='?", t.start)
+		}
+		return val{}, fmt.Errorf("unexpected trailing token %q at byte %d", t.text, t.start)
+	}
+	return compile(n)
 }
 
 // --- tokens ------------------------------------------------------
@@ -62,6 +95,8 @@ const (
 	tokOp
 	tokLParen
 	tokRParen
+	tokLBrack
+	tokRBrack
 	tokComma
 	tokDot
 )
@@ -86,6 +121,12 @@ func tokenize(s string) []token {
 		case c == ')':
 			toks = append(toks, token{tokRParen, ")", i})
 			i++
+		case c == '[':
+			toks = append(toks, token{tokLBrack, "[", i})
+			i++
+		case c == ']':
+			toks = append(toks, token{tokRBrack, "]", i})
+			i++
 		case c == ',':
 			toks = append(toks, token{tokComma, ",", i})
 			i++
@@ -100,7 +141,7 @@ func tokenize(s string) []token {
 			}
 			toks = append(toks, token{tokString, lit, i})
 			i = end
-		case isDigit(c) || (c == '.' && i+1 < len(s) && isDigit(s[i+1])) || (c == '-' && i+1 < len(s) && isDigit(s[i+1]) && (len(toks) == 0 || !lastIsOperand(toks))):
+		case isDigit(c) || (c == '.' && i+1 < len(s) && isDigit(s[i+1])):
 			end, lit := readNumber(s, i)
 			toks = append(toks, token{tokNumber, lit, i})
 			i = end
@@ -109,49 +150,26 @@ func tokenize(s string) []token {
 			toks = append(toks, token{tokIdent, lit, i})
 			i = end
 		default:
-			// Multi-char operators first: ==, !=, <=, >=
 			if i+1 < len(s) {
-				two := s[i : i+2]
-				switch two {
-				case "==", "!=", "<=", ">=":
+				switch two := s[i : i+2]; two {
+				case "==", "!=", "<=", ">=", "//", "**":
 					toks = append(toks, token{tokOp, two, i})
 					i += 2
 					continue
 				}
 			}
-			switch c {
-			case '+', '-', '*', '/', '<', '>', '=':
-				toks = append(toks, token{tokOp, string(c), i})
-				i++
-			default:
-				// Unknown byte: emit as stray op so the parser can
-				// report a useful error rather than hang.
-				toks = append(toks, token{tokOp, string(c), i})
-				i++
-			}
+			// Unknown bytes become stray operators so the parser can
+			// report a useful error rather than hang.
+			toks = append(toks, token{tokOp, string(c), i})
+			i++
 		}
 	}
-	toks = append(toks, token{tokEOF, "", len(s)})
-	return toks
+	return append(toks, token{tokEOF, "", len(s)})
 }
 
 func isDigit(c byte) bool      { return c >= '0' && c <= '9' }
 func isIdentStart(c byte) bool { return unicode.IsLetter(rune(c)) || c == '_' }
 func isIdentCont(c byte) bool  { return isIdentStart(c) || isDigit(c) }
-
-// lastIsOperand reports whether the token stream currently ends at
-// an operand (literal / identifier / close paren), which lets the
-// tokenizer tell unary minus apart from binary minus.
-func lastIsOperand(toks []token) bool {
-	if len(toks) == 0 {
-		return false
-	}
-	switch toks[len(toks)-1].kind {
-	case tokNumber, tokString, tokIdent, tokRParen:
-		return true
-	}
-	return false
-}
 
 func readIdent(s string, i int) (int, string) {
 	j := i
@@ -163,9 +181,6 @@ func readIdent(s string, i int) (int, string) {
 
 func readNumber(s string, i int) (int, string) {
 	j := i
-	if s[j] == '-' {
-		j++
-	}
 	for j < len(s) && isDigit(s[j]) {
 		j++
 	}
@@ -219,29 +234,94 @@ func readString(s string, i int) (int, string, bool) {
 	return j, "", false
 }
 
+// --- syntax tree -------------------------------------------------
+
+type nodeKind uint8
+
+const (
+	nLit    nodeKind = iota // lit holds int64, float64, string, bool or nil
+	nCol                    // name is the column
+	nList                   // args are the elements
+	nBinary                 // name is the operator; args are the operands
+	nNot                    // args[0]
+	nNeg                    // args[0]
+	nCall                   // ns.name(recv?, args..., kw...)
+	nWhen                   // args are pred/then pairs; final is the otherwise branch
+)
+
+type node struct {
+	kind  nodeKind
+	pos   int
+	lit   any
+	name  string
+	ns    string
+	recv  *node
+	args  []*node
+	kw    []kwarg
+	final *node
+	// ambig marks `ns.fn(args)` where ns could also be a column name.
+	// The compiler falls back to `col(ns).fn(args)` when the
+	// namespace reading does not compile.
+	ambig bool
+}
+
+type kwarg struct {
+	name string
+	val  *node
+}
+
+// litNode wraps a Go value (a table default) as a glr literal. A
+// []any becomes a list literal.
+func litNode(v any) *node {
+	switch x := v.(type) {
+	case int:
+		v = int64(x)
+	case []any:
+		list := &node{kind: nList}
+		for _, e := range x {
+			list.args = append(list.args, litNode(e))
+		}
+		return list
+	}
+	return &node{kind: nLit, lit: v}
+}
+
+// namespaces maps each glr namespace to its accessor on expr.Expr.
+var namespaces = map[string]string{
+	"str": "Str", "dt": "Dt", "list": "List", "arr": "Arr",
+	"struct": "Struct", "name": "Name", "bin": "Bin", "cat": "Cat",
+}
+
 // --- parser ------------------------------------------------------
 
 type parser struct {
-	src  string
 	toks []token
 	pos  int
 }
 
-func (p *parser) peek() token {
-	return p.toks[p.pos]
+func (p *parser) peek() token { return p.toks[p.pos] }
+func (p *parser) peekAt(k int) token {
+	if p.pos+k < len(p.toks) {
+		return p.toks[p.pos+k]
+	}
+	return p.toks[len(p.toks)-1]
 }
 
 func (p *parser) advance() token {
 	t := p.toks[p.pos]
-	p.pos++
+	if t.kind != tokEOF {
+		p.pos++
+	}
 	return t
 }
 
 func (p *parser) expect(kind tokKind) (token, error) {
 	t := p.peek()
 	if t.kind != kind {
-		return t, fmt.Errorf("expected %s, got %q at byte %d",
-			kindName(kind), t.text, t.start)
+		if t.kind == tokEOF {
+			return t, fmt.Errorf("expected %s, got end of input", kindName(kind))
+		}
+		return t, fmt.Errorf("expected %s, got %q at byte %d", kindName(kind), t.text, t.start)
 	}
 	p.pos++
 	return t, nil
@@ -261,6 +341,10 @@ func kindName(k tokKind) string {
 		return "'('"
 	case tokRParen:
 		return "')'"
+	case tokLBrack:
+		return "'['"
+	case tokRBrack:
+		return "']'"
 	case tokComma:
 		return "','"
 	case tokDot:
@@ -269,859 +353,413 @@ func kindName(k tokKind) string {
 	return "token"
 }
 
-func (p *parser) parseExpr() (expr.Expr, error) { return p.parseOr() }
+// isKeyword reports whether t is the identifier kw, ignoring case.
+func isKeyword(t token, kw string) bool {
+	return t.kind == tokIdent && strings.EqualFold(t.text, kw)
+}
 
-func (p *parser) parseOr() (expr.Expr, error) {
+func (p *parser) parseExpr() (*node, error) { return p.parseOr() }
+
+func (p *parser) parseOr() (*node, error) {
 	left, err := p.parseAnd()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
-	for p.peek().kind == tokIdent && p.peek().text == "or" {
-		p.advance()
+	for isKeyword(p.peek(), "or") {
+		t := p.advance()
 		right, err := p.parseAnd()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = left.Or(right)
+		left = &node{kind: nBinary, pos: t.start, name: "or", args: []*node{left, right}}
 	}
 	return left, nil
 }
 
-func (p *parser) parseAnd() (expr.Expr, error) {
+func (p *parser) parseAnd() (*node, error) {
 	left, err := p.parseNot()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
-	for p.peek().kind == tokIdent && p.peek().text == "and" {
-		p.advance()
+	for isKeyword(p.peek(), "and") {
+		t := p.advance()
 		right, err := p.parseNot()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = left.And(right)
+		left = &node{kind: nBinary, pos: t.start, name: "and", args: []*node{left, right}}
 	}
 	return left, nil
 }
 
-func (p *parser) parseNot() (expr.Expr, error) {
-	if p.peek().kind == tokIdent && p.peek().text == "not" {
+func (p *parser) parseNot() (*node, error) {
+	if t := p.peek(); isKeyword(t, "not") {
 		p.advance()
 		inner, err := p.parseNot()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		return inner.Not(), nil
+		return &node{kind: nNot, pos: t.start, args: []*node{inner}}, nil
 	}
 	return p.parseCmp()
 }
 
-func (p *parser) parseCmp() (expr.Expr, error) {
+// strInfix are the predicate keywords that desugar to str methods.
+var strInfix = []string{"contains", "starts_with", "ends_with", "like", "not_like"}
+
+func (p *parser) parseCmp() (*node, error) {
 	left, err := p.parseAdd()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
 	t := p.peek()
-	if t.kind == tokOp {
+	switch {
+	case t.kind == tokOp:
 		switch t.text {
 		case "==", "!=", "<", "<=", ">", ">=":
 			p.advance()
 			right, err := p.parseAdd()
 			if err != nil {
-				return expr.Expr{}, err
+				return nil, err
 			}
-			return applyBinary(left, right, t.text), nil
+			return &node{kind: nBinary, pos: t.start, name: t.text, args: []*node{left, right}}, nil
+		}
+	case isKeyword(t, "is_null"), isKeyword(t, "is_not_null"):
+		p.advance()
+		return &node{kind: nCall, pos: t.start, name: strings.ToLower(t.text), recv: left}, nil
+	case isKeyword(t, "in"):
+		p.advance()
+		return p.parseIn(left, t)
+	case isKeyword(t, "not") && isKeyword(p.peekAt(1), "in"):
+		p.advance()
+		p.advance()
+		in, err := p.parseIn(left, t)
+		if err != nil {
+			return nil, err
+		}
+		return &node{kind: nNot, pos: t.start, args: []*node{in}}, nil
+	case t.kind == tokIdent:
+		for _, op := range strInfix {
+			if isKeyword(t, op) {
+				p.advance()
+				right, err := p.parseAdd()
+				if err != nil {
+					return nil, err
+				}
+				return &node{kind: nCall, pos: t.start, ns: "str", name: op, recv: left, args: []*node{right}}, nil
+			}
 		}
 	}
 	return left, nil
 }
 
-func (p *parser) parseAdd() (expr.Expr, error) {
+func (p *parser) parseIn(left *node, t token) (*node, error) {
+	if p.peek().kind != tokLBrack {
+		return nil, fmt.Errorf("`in` at byte %d must be followed by a [list]", t.start)
+	}
+	list, err := p.parseList()
+	if err != nil {
+		return nil, err
+	}
+	return &node{kind: nCall, pos: t.start, name: "is_in", recv: left, args: []*node{list}}, nil
+}
+
+func (p *parser) parseAdd() (*node, error) {
 	left, err := p.parseMul()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
 	for {
 		t := p.peek()
 		if t.kind != tokOp || (t.text != "+" && t.text != "-") {
-			break
+			return left, nil
 		}
 		p.advance()
 		right, err := p.parseMul()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = applyBinary(left, right, t.text)
+		left = &node{kind: nBinary, pos: t.start, name: t.text, args: []*node{left, right}}
 	}
-	return left, nil
 }
 
-func (p *parser) parseMul() (expr.Expr, error) {
+func (p *parser) parseMul() (*node, error) {
 	left, err := p.parseUnary()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
 	for {
 		t := p.peek()
-		if t.kind != tokOp || (t.text != "*" && t.text != "/") {
-			break
+		if t.kind != tokOp {
+			return left, nil
+		}
+		switch t.text {
+		case "*", "/", "//", "%":
+		default:
+			return left, nil
 		}
 		p.advance()
 		right, err := p.parseUnary()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = applyBinary(left, right, t.text)
+		left = &node{kind: nBinary, pos: t.start, name: t.text, args: []*node{left, right}}
 	}
-	return left, nil
 }
 
-func (p *parser) parseUnary() (expr.Expr, error) {
+func (p *parser) parseUnary() (*node, error) {
 	if t := p.peek(); t.kind == tokOp && t.text == "-" {
 		p.advance()
 		inner, err := p.parseUnary()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		return inner.Neg(), nil
-	}
-	return p.parsePrimary()
-}
-
-func (p *parser) parsePrimary() (expr.Expr, error) {
-	t := p.peek()
-	switch t.kind {
-	case tokNumber:
-		p.advance()
-		if strings.ContainsAny(t.text, ".eE") {
-			f, err := strconv.ParseFloat(t.text, 64)
-			if err != nil {
-				return expr.Expr{}, fmt.Errorf("invalid number %q: %w", t.text, err)
+		// Fold negative numeric literals so `shift(-1)` passes a
+		// literal rather than a negation expression.
+		if inner.kind == nLit {
+			switch v := inner.lit.(type) {
+			case int64:
+				return &node{kind: nLit, pos: t.start, lit: -v}, nil
+			case float64:
+				return &node{kind: nLit, pos: t.start, lit: -v}, nil
 			}
-			return expr.LitFloat64(f), nil
 		}
-		n, err := strconv.ParseInt(t.text, 10, 64)
-		if err != nil {
-			return expr.Expr{}, fmt.Errorf("invalid number %q: %w", t.text, err)
-		}
-		return expr.LitInt64(n), nil
-	case tokString:
-		p.advance()
-		return expr.LitString(t.text), nil
-	case tokIdent:
-		switch t.text {
-		case "true":
-			p.advance()
-			return expr.LitBool(true), nil
-		case "false":
-			p.advance()
-			return expr.LitBool(false), nil
-		case "null":
-			p.advance()
-			return expr.LitNull(dtype.Null()), nil
-		}
-		return p.parseMethodChain()
-	case tokLParen:
-		p.advance()
-		inner, err := p.parseExpr()
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		if _, err := p.expect(tokRParen); err != nil {
-			return expr.Expr{}, err
-		}
-		return p.parsePostfix(inner)
+		return &node{kind: nNeg, pos: t.start, args: []*node{inner}}, nil
 	}
-	return expr.Expr{}, fmt.Errorf("unexpected token %q at byte %d", t.text, t.start)
+	return p.parsePower()
 }
 
-// parseMethodChain handles `ident (. ident (args?))*` where the
-// first ident is a column name and subsequent chained calls dispatch
-// to a namespace. Special-case the namespace itself so
-// `col.str.upper()` works (skip the intermediate "str" ident).
-func (p *parser) parseMethodChain() (expr.Expr, error) {
-	head, err := p.expect(tokIdent)
+func (p *parser) parsePower() (*node, error) {
+	base, err := p.parsePrimary()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
-	// Function-style call at the head: allow `sum(col)` / `abs(col)`
-	// for aggregate / scalar ops that would otherwise require a bare
-	// column start.
-	base := expr.Col(head.text)
-	if p.peek().kind == tokLParen {
-		base, err = p.parseFreeFunction(head.text)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-	}
-	return p.parsePostfix(base)
-}
-
-func (p *parser) parsePostfix(base expr.Expr) (expr.Expr, error) {
-	for p.peek().kind == tokDot {
+	if t := p.peek(); t.kind == tokOp && t.text == "**" {
 		p.advance()
-		member, err := p.expect(tokIdent)
+		exp, err := p.parseUnary()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		next, err := p.applyMember(base, member.text)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		base = next
+		return &node{kind: nBinary, pos: t.start, name: "**", args: []*node{base, exp}}, nil
 	}
 	return base, nil
 }
 
-// applyMember turns `base.member(args?)` into the right Expr call.
-// Namespaces (`str`) consume the next dot+member pair.
-func (p *parser) applyMember(base expr.Expr, member string) (expr.Expr, error) {
-	if member == "str" {
-		// Consume the next method in the str namespace.
-		if p.peek().kind != tokDot {
-			return expr.Expr{}, fmt.Errorf(".str must be followed by a method")
+func (p *parser) parsePrimary() (*node, error) {
+	t := p.peek()
+	switch t.kind {
+	case tokNumber:
+		p.advance()
+		lit, err := parseNumber(t)
+		if err != nil {
+			return nil, err
+		}
+		return p.parsePostfix(lit)
+	case tokString:
+		p.advance()
+		return p.parsePostfix(&node{kind: nLit, pos: t.start, lit: t.text})
+	case tokLBrack:
+		return p.parseList()
+	case tokLParen:
+		p.advance()
+		inner, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tokRParen); err != nil {
+			return nil, err
+		}
+		return p.parsePostfix(inner)
+	case tokIdent:
+		return p.parseIdent()
+	case tokEOF:
+		return nil, fmt.Errorf("unexpected end of input")
+	}
+	return nil, fmt.Errorf("unexpected token %q at byte %d", t.text, t.start)
+}
+
+func parseNumber(t token) (*node, error) {
+	if strings.ContainsAny(t.text, ".eE") {
+		f, err := strconv.ParseFloat(t.text, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid number %q: %w", t.text, err)
+		}
+		return &node{kind: nLit, pos: t.start, lit: f}, nil
+	}
+	n, err := strconv.ParseInt(t.text, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid number %q: %w", t.text, err)
+	}
+	return &node{kind: nLit, pos: t.start, lit: n}, nil
+}
+
+func (p *parser) parseIdent() (*node, error) {
+	t := p.advance()
+	switch strings.ToLower(t.text) {
+	case "true":
+		return p.parsePostfix(&node{kind: nLit, pos: t.start, lit: true})
+	case "false":
+		return p.parsePostfix(&node{kind: nLit, pos: t.start, lit: false})
+	case "null":
+		return p.parsePostfix(&node{kind: nLit, pos: t.start, lit: nil})
+	case "when":
+		return p.parseWhen(t)
+	}
+	// `ns.fn(args)`: a namespaced function whose first argument is
+	// the receiver. `ns.<namespace>...` is a column called ns instead
+	// (so a column named `name` still reads `name.str.upper()`).
+	if _, isNS := namespaces[t.text]; isNS && p.peek().kind == tokDot &&
+		p.peekAt(1).kind == tokIdent && p.peekAt(2).kind == tokLParen {
+		if _, memberIsNS := namespaces[p.peekAt(1).text]; !memberIsNS {
+			p.advance()
+			fn := p.advance()
+			args, kw, err := p.parseCallArgs()
+			if err != nil {
+				return nil, err
+			}
+			call := &node{kind: nCall, pos: t.start, ns: t.text, name: fn.text, args: args, kw: kw, ambig: true}
+			return p.parsePostfix(call)
+		}
+	}
+	if p.peek().kind == tokLParen {
+		args, kw, err := p.parseCallArgs()
+		if err != nil {
+			return nil, err
+		}
+		return p.parsePostfix(&node{kind: nCall, pos: t.start, name: t.text, args: args, kw: kw})
+	}
+	return p.parsePostfix(&node{kind: nCol, pos: t.start, name: t.text})
+}
+
+func (p *parser) parseWhen(first token) (*node, error) {
+	w := &node{kind: nWhen, pos: first.start}
+	for {
+		pred, err := p.parseOr()
+		if err != nil {
+			return nil, err
+		}
+		if t := p.peek(); !isKeyword(t, "then") {
+			return nil, fmt.Errorf("expected `then` after `when` condition, got %q", t.text)
 		}
 		p.advance()
-		methodTok, err := p.expect(tokIdent)
+		then, err := p.parseOr()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		args, err := p.parseCallArgs()
-		if err != nil {
-			return expr.Expr{}, err
+		w.args = append(w.args, pred, then)
+		if !isKeyword(p.peek(), "when") {
+			break
 		}
-		return dispatchStr(base, methodTok.text, args)
+		p.advance()
 	}
-	// Non-namespaced method: allow both arg-less aggregates (sum,
-	// mean, ...) and param methods (fill_null, shift, ...).
-	if p.peek().kind == tokLParen {
-		args, err := p.parseCallArgs()
+	if isKeyword(p.peek(), "otherwise") {
+		p.advance()
+		other, err := p.parseOr()
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		return dispatchMethod(base, member, args)
+		w.final = other
 	}
-	// Property-like usage without parens: alias fast path for
-	// `col.sum`, etc.
-	return dispatchMethod(base, member, nil)
+	return w, nil
 }
 
-// parseFreeFunction handles `name(...)` calls where `name` is a
-// top-level function (not attached to a column). Supports the
-// handful of polars-style free constructors that make sense here:
-// col("x"), lit(v), sum("x"), etc.
-func (p *parser) parseFreeFunction(name string) (expr.Expr, error) {
-	args, err := p.parseCallArgs()
+func (p *parser) parseList() (*node, error) {
+	open, err := p.expect(tokLBrack)
 	if err != nil {
-		return expr.Expr{}, err
-	}
-	return dispatchFreeFn(name, args)
-}
-
-// parseCallArgs parses `( e, e, ... )`. Leaves the parser positioned
-// after the close paren. Returns a nil slice for `()`.
-func (p *parser) parseCallArgs() ([]expr.Expr, error) {
-	if _, err := p.expect(tokLParen); err != nil {
 		return nil, err
 	}
+	list := &node{kind: nList, pos: open.start}
+	if p.peek().kind == tokRBrack {
+		p.advance()
+		return list, nil
+	}
+	for {
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		list.args = append(list.args, e)
+		if p.peek().kind != tokComma {
+			break
+		}
+		p.advance()
+	}
+	if _, err := p.expect(tokRBrack); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+func (p *parser) parsePostfix(base *node) (*node, error) {
+	for p.peek().kind == tokDot {
+		p.advance()
+		member, err := p.expect(tokIdent)
+		if err != nil {
+			return nil, err
+		}
+		call := &node{kind: nCall, pos: member.start, name: member.text, recv: base}
+		if _, isNS := namespaces[member.text]; isNS {
+			if p.peek().kind != tokDot {
+				return nil, fmt.Errorf(".%s must be followed by a method", member.text)
+			}
+			p.advance()
+			method, err := p.expect(tokIdent)
+			if err != nil {
+				return nil, err
+			}
+			call.ns, call.name = member.text, method.text
+		}
+		// Parentheses are optional for a call without arguments:
+		// `price.sum` reads the same as `price.sum()`.
+		if p.peek().kind == tokLParen {
+			if call.args, call.kw, err = p.parseCallArgs(); err != nil {
+				return nil, err
+			}
+		}
+		base = call
+	}
+	return base, nil
+}
+
+// parseCallArgs parses `( arg, name=arg, ... )` and leaves the parser
+// after the close paren.
+func (p *parser) parseCallArgs() ([]*node, []kwarg, error) {
+	if _, err := p.expect(tokLParen); err != nil {
+		return nil, nil, err
+	}
+	var args []*node
+	var kw []kwarg
 	if p.peek().kind == tokRParen {
 		p.advance()
-		return nil, nil
+		return nil, nil, nil
 	}
-	var args []expr.Expr
 	for {
-		a, err := p.parseExpr()
-		if err != nil {
-			return nil, err
-		}
-		args = append(args, a)
-		if p.peek().kind == tokComma {
+		if p.peek().kind == tokIdent && p.peekAt(1).kind == tokOp && p.peekAt(1).text == "=" {
+			name := p.advance()
 			p.advance()
-			continue
+			v, err := p.parseExpr()
+			if err != nil {
+				return nil, nil, err
+			}
+			kw = append(kw, kwarg{name: name.text, val: v})
+		} else {
+			if len(kw) > 0 {
+				t := p.peek()
+				return nil, nil, fmt.Errorf("positional argument after keyword argument at byte %d", t.start)
+			}
+			a, err := p.parseExpr()
+			if err != nil {
+				return nil, nil, err
+			}
+			args = append(args, a)
 		}
-		break
+		if p.peek().kind != tokComma {
+			break
+		}
+		p.advance()
 	}
 	if _, err := p.expect(tokRParen); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return args, nil
-}
-
-// --- dispatch ----------------------------------------------------
-
-func applyBinary(left, right expr.Expr, op string) expr.Expr {
-	switch op {
-	case "+":
-		return left.Add(right)
-	case "-":
-		return left.Sub(right)
-	case "*":
-		return left.Mul(right)
-	case "/":
-		return left.Div(right)
-	case "==":
-		return left.Eq(right)
-	case "!=":
-		return left.Ne(right)
-	case "<":
-		return left.Lt(right)
-	case "<=":
-		return left.Le(right)
-	case ">":
-		return left.Gt(right)
-	case ">=":
-		return left.Ge(right)
-	}
-	panic("unreachable: unknown operator " + op)
-}
-
-// dispatchStr routes a `col.str.METHOD(args...)` call. Argument
-// count mismatches return a descriptive error rather than panicking.
-func dispatchStr(base expr.Expr, method string, args []expr.Expr) (expr.Expr, error) {
-	switch method {
-	case "upper", "to_upper", "to_uppercase", "lower", "to_lower", "to_lowercase", "trim", "len_bytes", "len_chars":
-		if len(args) != 0 {
-			return expr.Expr{}, fmt.Errorf("%s takes 0 arguments, got %d", method, len(args))
-		}
-	}
-	switch method {
-	case "upper", "to_upper", "to_uppercase":
-		return base.Str().ToUpper(), nil
-	case "lower", "to_lower", "to_lowercase":
-		return base.Str().ToLower(), nil
-	case "trim":
-		return base.Str().Trim(), nil
-	case "len_bytes":
-		return base.Str().LenBytes(), nil
-	case "len_chars":
-		return base.Str().LenChars(), nil
-	case "contains":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Contains(s), nil
-	case "starts_with":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().StartsWith(s), nil
-	case "ends_with":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().EndsWith(s), nil
-	case "like":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Like(s), nil
-	case "not_like":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().NotLike(s), nil
-	case "contains_regex":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().ContainsRegex(s), nil
-	case "strip_prefix":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().StripPrefix(s), nil
-	case "strip_suffix":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().StripSuffix(s), nil
-	case "replace":
-		a, b, err := twoStrings(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Replace(a, b), nil
-	case "replace_all":
-		a, b, err := twoStrings(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().ReplaceAll(a, b), nil
-	case "slice":
-		start, length, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Slice(start, length), nil
-	case "head":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Head(n), nil
-	case "tail":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Tail(n), nil
-	case "count_matches":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().CountMatches(s), nil
-	case "find":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Find(s), nil
-	case "split_exact":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().SplitExact(s), nil
-	}
-	return expr.Expr{}, fmt.Errorf("unknown str method %q", method)
-}
-
-// dispatchMethod handles non-namespaced methods on a column or
-// derived expression: aggregates (.sum, .mean, ...), casts, shape
-// ops (.shift, .reverse, ...).
-func dispatchMethod(base expr.Expr, method string, args []expr.Expr) (expr.Expr, error) {
-	switch method {
-	case "sum", "mean", "min", "max", "count", "null_count", "first", "last", "std", "var", "median",
-		"skew", "kurtosis", "n_unique", "approx_n_unique", "is_null", "is_not_null", "abs", "neg", "not",
-		"floor", "ceil", "sqrt", "exp", "log", "log10", "log2", "sign", "reverse", "cum_sum", "cum_min", "cum_max":
-		if len(args) != 0 {
-			return expr.Expr{}, fmt.Errorf("%s takes 0 arguments, got %d", method, len(args))
-		}
-	}
-	switch method {
-	case "sum":
-		return base.Sum(), nil
-	case "mean":
-		return base.Mean(), nil
-	case "min":
-		return base.Min(), nil
-	case "max":
-		return base.Max(), nil
-	case "count":
-		return base.Count(), nil
-	case "null_count":
-		return base.NullCount(), nil
-	case "first":
-		return base.First(), nil
-	case "last":
-		return base.Last(), nil
-	case "std":
-		return base.Std(), nil
-	case "var":
-		return base.Var(), nil
-	case "median":
-		return base.Median(), nil
-	case "quantile":
-		q, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Quantile(q), nil
-	case "skew":
-		return base.Skew(), nil
-	case "kurtosis":
-		return base.Kurtosis(), nil
-	case "n_unique":
-		return base.NUnique(), nil
-	case "approx_n_unique":
-		return base.ApproxNUnique(), nil
-	case "is_null":
-		return base.IsNull(), nil
-	case "is_not_null":
-		return base.IsNotNull(), nil
-	case "abs":
-		return base.Abs(), nil
-	case "neg":
-		return base.Neg(), nil
-	case "not":
-		return base.Not(), nil
-	case "round":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Round(n), nil
-	case "floor":
-		return base.Floor(), nil
-	case "ceil":
-		return base.Ceil(), nil
-	case "sqrt":
-		return base.Sqrt(), nil
-	case "exp":
-		return base.Exp(), nil
-	case "log":
-		return base.Log(), nil
-	case "log10":
-		return base.Log10(), nil
-	case "log2":
-		return base.Log2(), nil
-	case "sign":
-		return base.Sign(), nil
-	case "reverse":
-		return base.Reverse(), nil
-	case "head":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Head(n), nil
-	case "tail":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Tail(n), nil
-	case "shift":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Shift(n), nil
-	case "diff":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Diff(n), nil
-	case "cum_sum":
-		return base.CumSum(), nil
-	case "cum_min":
-		return base.CumMin(), nil
-	case "cum_max":
-		return base.CumMax(), nil
-	case "fill_null":
-		if len(args) != 1 {
-			return expr.Expr{}, fmt.Errorf("fill_null takes 1 argument, got %d", len(args))
-		}
-		return base.FillNullExpr(args[0]), nil
-	case "alias":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Alias(s), nil
-	case "cast":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		dt, err := dtypeByName(s)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Cast(dt), nil
-	case "rolling_sum":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingSum(w, mp), nil
-	case "rolling_mean":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingMean(w, mp), nil
-	case "rolling_min":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingMin(w, mp), nil
-	case "rolling_max":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingMax(w, mp), nil
-	case "rolling_std":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingStd(w, mp), nil
-	case "rolling_var":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingVar(w, mp), nil
-	case "ewm_mean":
-		a, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.EWMMean(a), nil
-	case "ewm_std":
-		a, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.EWMStd(a), nil
-	case "ewm_var":
-		a, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.EWMVar(a), nil
-	case "forward_fill":
-		n, err := oneIntOrZero(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.ForwardFill(n), nil
-	case "backward_fill":
-		n, err := oneIntOrZero(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.BackwardFill(n), nil
-	case "over":
-		keys, err := stringList(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Over(keys...), nil
-	case "between":
-		if len(args) != 2 {
-			return expr.Expr{}, fmt.Errorf("between takes 2 arguments, got %d", len(args))
-		}
-		loV, err := literalValue(args[0])
-		if err != nil {
-			return expr.Expr{}, fmt.Errorf("between: lo %w", err)
-		}
-		hiV, err := literalValue(args[1])
-		if err != nil {
-			return expr.Expr{}, fmt.Errorf("between: hi %w", err)
-		}
-		return base.Between(loV, hiV), nil
-	}
-	return expr.Expr{}, fmt.Errorf("unknown method %q", method)
-}
-
-// dispatchFreeFn covers top-level constructors reachable without a
-// column receiver: `col(x)`, `lit(v)`, `sum("x")`, and the
-// when/then/otherwise chain.
-func dispatchFreeFn(name string, args []expr.Expr) (expr.Expr, error) {
-	switch name {
-	case "col":
-		s, err := oneString(name, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return expr.Col(s), nil
-	case "lit":
-		if len(args) != 1 {
-			return expr.Expr{}, fmt.Errorf("lit takes 1 argument, got %d", len(args))
-		}
-		v, err := literalValue(args[0])
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return expr.Lit(v), nil
-	case "sum", "mean", "min", "max", "count", "first", "last",
-		"median", "std", "var", "n_unique":
-		s, err := oneString(name, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return aggByName(expr.Col(s), name)
-	case "abs", "sqrt", "exp", "log", "log2", "log10", "sign",
-		"floor", "ceil":
-		if len(args) != 1 {
-			return expr.Expr{}, fmt.Errorf("%s takes 1 argument, got %d", name, len(args))
-		}
-		return dispatchMethod(args[0], name, nil)
-	case "coalesce":
-		if len(args) == 0 {
-			return expr.Expr{}, fmt.Errorf("coalesce requires at least one argument")
-		}
-		return expr.Coalesce(args...), nil
-	}
-	return expr.Expr{}, fmt.Errorf("unknown function %q", name)
-}
-
-func aggByName(base expr.Expr, name string) (expr.Expr, error) {
-	return dispatchMethod(base, name, nil)
-}
-
-// --- arg helpers ------------------------------------------------
-
-func oneString(op string, args []expr.Expr) (string, error) {
-	if len(args) != 1 {
-		return "", fmt.Errorf("%s takes 1 argument, got %d", op, len(args))
-	}
-	return stringArg(op, args[0])
-}
-
-func twoStrings(op string, args []expr.Expr) (string, string, error) {
-	if len(args) != 2 {
-		return "", "", fmt.Errorf("%s takes 2 arguments, got %d", op, len(args))
-	}
-	a, err := stringArg(op, args[0])
-	if err != nil {
-		return "", "", err
-	}
-	b, err := stringArg(op, args[1])
-	if err != nil {
-		return "", "", err
-	}
-	return a, b, nil
-}
-
-func oneInt(op string, args []expr.Expr) (int, error) {
-	if len(args) != 1 {
-		return 0, fmt.Errorf("%s takes 1 argument, got %d", op, len(args))
-	}
-	return intArg(op, args[0])
-}
-
-func oneIntOrZero(op string, args []expr.Expr) (int, error) {
-	if len(args) == 0 {
-		return 0, nil
-	}
-	return oneInt(op, args)
-}
-
-func twoInts(op string, args []expr.Expr) (int, int, error) {
-	if len(args) != 2 {
-		return 0, 0, fmt.Errorf("%s takes 2 arguments, got %d", op, len(args))
-	}
-	a, err := intArg(op, args[0])
-	if err != nil {
-		return 0, 0, err
-	}
-	b, err := intArg(op, args[1])
-	if err != nil {
-		return 0, 0, err
-	}
-	return a, b, nil
-}
-
-func oneFloat(op string, args []expr.Expr) (float64, error) {
-	if len(args) != 1 {
-		return 0, fmt.Errorf("%s takes 1 argument, got %d", op, len(args))
-	}
-	return floatArg(op, args[0])
-}
-
-func stringInt(op string, args []expr.Expr) (string, int, error) {
-	if len(args) != 2 {
-		return "", 0, fmt.Errorf("%s takes 2 arguments, got %d", op, len(args))
-	}
-	s, err := stringArg(op, args[0])
-	if err != nil {
-		return "", 0, err
-	}
-	i, err := intArg(op, args[1])
-	if err != nil {
-		return "", 0, err
-	}
-	return s, i, nil
-}
-
-func stringList(op string, args []expr.Expr) ([]string, error) {
-	out := make([]string, len(args))
-	for i, a := range args {
-		s, err := stringArg(op, a)
-		if err != nil {
-			return nil, err
-		}
-		out[i] = s
-	}
-	return out, nil
-}
-
-func stringArg(op string, e expr.Expr) (string, error) {
-	lit, ok := asLiteral(e)
-	if !ok {
-		return "", fmt.Errorf("%s: expected string literal", op)
-	}
-	s, ok := lit.(string)
-	if !ok {
-		return "", fmt.Errorf("%s: expected string, got %T", op, lit)
-	}
-	return s, nil
-}
-
-func intArg(op string, e expr.Expr) (int, error) {
-	lit, ok := asLiteral(e)
-	if !ok {
-		return 0, fmt.Errorf("%s: expected integer literal", op)
-	}
-	switch v := lit.(type) {
-	case int64:
-		return int(v), nil
-	case int:
-		return v, nil
-	}
-	return 0, fmt.Errorf("%s: expected integer, got %T", op, lit)
-}
-
-func floatArg(op string, e expr.Expr) (float64, error) {
-	lit, ok := asLiteral(e)
-	if !ok {
-		return 0, fmt.Errorf("%s: expected numeric literal", op)
-	}
-	switch v := lit.(type) {
-	case float64:
-		return v, nil
-	case int64:
-		return float64(v), nil
-	case int:
-		return float64(v), nil
-	}
-	return 0, fmt.Errorf("%s: expected numeric, got %T", op, lit)
-}
-
-func asLiteral(e expr.Expr) (any, bool) {
-	n, ok := e.Node().(expr.LitNode)
-	if !ok {
-		return nil, false
-	}
-	return n.Value, true
-}
-
-func literalValue(e expr.Expr) (any, error) {
-	v, ok := asLiteral(e)
-	if !ok {
-		return nil, fmt.Errorf("expected a literal")
-	}
-	return v, nil
-}
-
-func dtypeByName(name string) (dtype.DType, error) {
-	switch strings.ToLower(name) {
-	case "i64", "int64":
-		return dtype.Int64(), nil
-	case "i32", "int32":
-		return dtype.Int32(), nil
-	case "f64", "float64":
-		return dtype.Float64(), nil
-	case "f32", "float32":
-		return dtype.Float32(), nil
-	case "bool":
-		return dtype.Bool(), nil
-	case "str", "string", "utf8":
-		return dtype.String(), nil
-	}
-	return dtype.DType{}, fmt.Errorf("unknown dtype %q", name)
+	return args, kw, nil
 }

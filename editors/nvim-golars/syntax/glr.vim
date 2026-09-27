@@ -21,20 +21,32 @@ syn keyword glrBoolean      true false
 
 " Core commands: one distinct highlight group keeps the
 " pipeline-opening verb visually prominent.
-syn keyword glrCommand      load save use stash frames drop_frame
-syn keyword glrCommand      show ishow browse schema describe head tail
-syn keyword glrCommand      select drop filter sort limit groupby join rename
-syn keyword glrCommand      with unnest explode upsample reverse sample shuffle unique
-syn keyword glrCommand      explain explain_tree tree graph show_graph mermaid
-syn keyword glrCommand      collect reset source null_count null_count_all
-syn keyword glrCommand      sum_all mean_all min_all max_all std_all var_all median_all
-syn keyword glrCommand      timing info clear help exit quit
+syn keyword glrCommand      load use stash frames drop_frame save write show ishow
+syn keyword glrCommand      browse schema describe head tail select drop filter
+syn keyword glrCommand      sort limit groupby join explain explain_tree tree graph
+syn keyword glrCommand      show_graph mermaid collect reset source timing info
+syn keyword glrCommand      clear help h exit quit q reverse sample shuffle unique
+syn keyword glrCommand      null_count glimpse size cast fill_null fillnull drop_null
+syn keyword glrCommand      dropnull rename sum mean avg min max median std with_row_index
+syn keyword glrCommand      pwd ls cd sum_horizontal mean_horizontal min_horizontal
+syn keyword glrCommand      max_horizontal all_horizontal any_horizontal sum_all
+syn keyword glrCommand      mean_all min_all max_all std_all var_all median_all
+syn keyword glrCommand      count_all null_count_all with unnest explode upsample
+syn keyword glrCommand      to_dummies join_asof group_by_dynamic groupby_dynamic
+syn keyword glrCommand      scan_csv scan_parquet scan_ipc scan_arrow scan_ndjson
+syn keyword glrCommand      scan_jsonl scan_json scan_auto fill_nan forward_fill
+syn keyword glrCommand      ff backward_fill bf top_k bottom_k transpose unpivot
+syn keyword glrCommand      melt partition_by skew kurtosis approx_n_unique approx_nunique
+syn keyword glrCommand      corr cov pivot
 
 " Structural keywords (join types, ordering, logical operators,
 " null predicates).
 syn keyword glrKeyword      as on asc desc and or
 syn keyword glrKeyword      is_null is_not_null
 syn keyword glrKeyword      inner left cross
+syn keyword glrKeyword      not in when then otherwise
+syn keyword glrKeyword      contains starts_with ends_with like not_like
+syn keyword glrKeyword      every period offset by backward forward nearest tolerance
 
 " Comparison operators.
 syn match   glrOperator     "\v(\=\=|!\=|\<\=|\>\=|\<|\>)"

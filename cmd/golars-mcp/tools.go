@@ -9,10 +9,8 @@ import (
 	"strings"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/internal/fileio"
 	iocsv "github.com/Gaurav-Gosain/golars/io/csv"
-	"github.com/Gaurav-Gosain/golars/io/ipc"
-	iojson "github.com/Gaurav-Gosain/golars/io/json"
-	ioparquet "github.com/Gaurav-Gosain/golars/io/parquet"
 	"github.com/Gaurav-Gosain/golars/sql"
 )
 
@@ -120,35 +118,18 @@ func findTool(name string) *Tool {
 
 // --- tool implementations ----------------------------------------
 
-// loadByExt picks a reader based on the file extension. Mirrors
-// cmd/golars/subcmd_inspect.go but kept self-contained so the MCP
-// binary doesn't import the main-package.
+// loadByExt reads a data file, choosing the reader from the extension.
+// Only regular files are accepted so a client cannot point the server
+// at a device or FIFO and hang it.
 func loadByExt(ctx context.Context, path string) (*dataframe.DataFrame, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("data path must be a regular file")
+		return nil, fmt.Errorf("%s: not a regular file", path)
 	}
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".csv", ".tsv":
-		opts := []iocsv.Option{}
-		if ext == ".tsv" {
-			opts = append(opts, iocsv.WithDelimiter('\t'))
-		}
-		return iocsv.ReadFile(ctx, path, opts...)
-	case ".parquet", ".pq":
-		return ioparquet.ReadFile(ctx, path)
-	case ".arrow", ".ipc":
-		return ipc.ReadFile(ctx, path)
-	case ".json":
-		return iojson.ReadFile(ctx, path)
-	case ".ndjson", ".jsonl":
-		return iojson.ReadNDJSONFile(ctx, path)
-	}
-	return nil, fmt.Errorf("unsupported file extension %q", ext)
+	return fileio.Read(ctx, path)
 }
 
 func runSchema(args json.RawMessage) (any, error) {

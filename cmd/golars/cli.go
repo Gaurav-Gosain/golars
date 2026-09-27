@@ -4,17 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 )
 
-// errSubcommandFailed is a sentinel returned from RunE wrappers when the
-// underlying cmdX handler reports a non-zero exit. The handler already
-// wrote its diagnostic to stderr, so cobra + fang stay quiet and main
-// just exits 1.
-var errSubcommandFailed = errors.New("golars: subcommand failed")
+// errSilent makes the process exit 1 without printing anything more.
+// Subcommands return it after they have already reported the outcome
+// themselves (diff found differences, lint found warnings).
+var errSilent = errors.New("silent failure")
 
 // execCLI builds the cobra tree, pipes it through fang for styled help
 // and errors, and returns the process exit code.
@@ -25,10 +26,41 @@ func execCLI() int {
 	applyColorPolicy(colorsEnabled(os.Args[1:]))
 
 	root := newRootCmd()
-	if err := fang.Execute(context.Background(), root, fang.WithVersion(version)); err != nil {
+	err := fang.Execute(context.Background(), root,
+		fang.WithVersion(version),
+		fang.WithErrorHandler(printCLIError))
+	if err != nil {
 		return 1
 	}
 	return 0
+}
+
+// printCLIError writes a failed command's error as one line, in the
+// same "error ..." form the REPL uses. fang's default handler
+// title-cases the message, which mangles file paths.
+func printCLIError(w io.Writer, _ fang.Styles, err error) {
+	if errors.Is(err, errSilent) {
+		return
+	}
+	fmt.Fprintln(w, errStyle.Render("error:")+" "+errMsgStyle.Render(err.Error()))
+	if isUsageError(err) {
+		fmt.Fprintln(w, dimStyle.Render("Try --help for usage."))
+	}
+}
+
+// isUsageError recognises cobra's argument and flag parsing errors.
+func isUsageError(err error) bool {
+	msg := err.Error()
+	for _, prefix := range []string{
+		"unknown flag", "unknown shorthand flag", "flag needs an argument",
+		"invalid argument", "unknown command", "accepts ", "requires at least",
+		"requires at most", "requires exactly",
+	} {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // newRootCmd wires the subcommand tree. Each subcommand registers its
@@ -139,34 +171,4 @@ func newVersionCmd() *cobra.Command {
 			fmt.Printf("golars version %s\n", version)
 		},
 	}
-}
-
-// runREPL is factored out so `golars` with no subcommand and `golars
-// repl` share a single entry point.
-func runREPL(loadPath, scriptPath, previewPath string, previewRows int, previewFormat string, timing bool) error {
-	s := newState(timing)
-	if loadPath != "" {
-		if err := s.load(loadPath); err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
-		}
-	}
-	if scriptPath != "" {
-		if err := runScript(s, scriptPath); err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
-		}
-		return nil
-	}
-	if previewPath != "" {
-		if code := runPreview(s, previewPath, previewRows, previewFormat); code != 0 {
-			return errSubcommandFailed
-		}
-		return nil
-	}
-	if err := s.repl(); err != nil {
-		fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-		return errSubcommandFailed
-	}
-	return nil
 }

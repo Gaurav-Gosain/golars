@@ -172,21 +172,24 @@ func stripComment(s string) string {
 	return s
 }
 
-// annotateError adds a "did you mean?" suggestion when the executor
-// returns "unknown command" for a verb close to a known one.
+// annotateError adds a "did you mean" suggestion when a host executor
+// reports an unknown command for a verb close to a known one. Errors
+// built by UnknownCommand already carry the hint and pass through, as
+// do errors that merely contain the word "unknown" (an unknown dtype
+// is not an unknown command).
 func annotateError(stmt string, err error) error {
-	msg := err.Error()
-	// Rough heuristic: if the error mentions "unknown" and the first
-	// token is a dot-command, look up the closest Commands entry.
-	if !strings.Contains(msg, "unknown") {
+	if errors.Is(err, ErrUnknownCommand) {
+		return err
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
 		return err
 	}
 	verb := firstToken(stmt)
-	if verb == "" {
+	if verb == "" || FindCommand(verb) != nil {
 		return err
 	}
 	if suggest := SuggestCommand(verb); suggest != "" {
-		return fmt.Errorf("%w (did you mean `.%s`?)", err, suggest)
+		return fmt.Errorf("%w (did you mean %q?)", err, suggest)
 	}
 	return err
 }
@@ -198,4 +201,51 @@ func firstToken(stmt string) string {
 		s = s[:i]
 	}
 	return s
+}
+
+// SplitTopLevel splits s at sep, ignoring separators inside quotes,
+// parentheses and brackets. A space separator splits on any run of
+// whitespace and drops empty fields, so `groupby k total=sum(a, b)`
+// yields [k total=sum(a, b)].
+func SplitTopLevel(s string, sep byte) []string {
+	var out []string
+	depth := 0
+	quote := byte(0)
+	start := 0
+	isSep := func(c byte) bool {
+		if sep == ' ' {
+			return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+		}
+		return c == sep
+	}
+	emit := func(end int) {
+		part := s[start:end]
+		if sep != ' ' || strings.TrimSpace(part) != "" {
+			out = append(out, part)
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '(' || c == '[':
+			depth++
+		case c == ')' || c == ']':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && isSep(c):
+			emit(i)
+			start = i + 1
+		}
+	}
+	emit(len(s))
+	return out
 }

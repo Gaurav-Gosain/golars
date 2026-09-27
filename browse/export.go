@@ -4,14 +4,10 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
-	iocsv "github.com/Gaurav-Gosain/golars/io/csv"
-	"github.com/Gaurav-Gosain/golars/io/ipc"
-	iojson "github.com/Gaurav-Gosain/golars/io/json"
-	ioparquet "github.com/Gaurav-Gosain/golars/io/parquet"
+	"github.com/Gaurav-Gosain/golars/internal/fileio"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -25,9 +21,10 @@ import (
 // is needed and no columns are hidden, the source frame is written
 // directly (zero-copy).
 func (m *model) exportView(path string) error {
-	ext := strings.ToLower(filepath.Ext(path))
-	if !isKnownExt(ext) {
-		return fmt.Errorf("unsupported extension %q", ext)
+	// Check the extension first so a typo fails before a potentially
+	// expensive Take.
+	if _, known := fileio.FormatOf(path); !known {
+		return fmt.Errorf("unsupported extension %q", filepath.Ext(path))
 	}
 	ctx := context.Background()
 
@@ -38,34 +35,7 @@ func (m *model) exportView(path string) error {
 	if cleanup {
 		defer df.Release()
 	}
-
-	switch ext {
-	case ".csv":
-		return iocsv.WriteFile(ctx, path, df)
-	case ".tsv":
-		return iocsv.WriteFile(ctx, path, df, iocsv.WithDelimiter('\t'))
-	case ".parquet", ".pq":
-		return ioparquet.WriteFile(ctx, path, df)
-	case ".arrow", ".ipc":
-		return ipc.WriteFile(ctx, path, df)
-	case ".json":
-		return iojson.WriteFile(ctx, path, df)
-	case ".ndjson", ".jsonl":
-		return iojson.WriteNDJSONFile(ctx, path, df)
-	}
-	return fmt.Errorf("unsupported extension %q", ext)
-}
-
-// isKnownExt reports whether ext (with leading dot, lowercase) is
-// something exportView can write. Used to fail early before kicking
-// off a potentially expensive Take.
-func isKnownExt(ext string) bool {
-	switch ext {
-	case ".csv", ".tsv", ".parquet", ".pq", ".arrow", ".ipc",
-		".json", ".ndjson", ".jsonl":
-		return true
-	}
-	return false
+	return fileio.Write(ctx, path, df)
 }
 
 // buildViewFrame returns a DataFrame that matches the currently

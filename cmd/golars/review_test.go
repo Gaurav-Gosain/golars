@@ -80,12 +80,7 @@ func newReviewState(t *testing.T) *state {
 	}
 	s := newState(false)
 	s.df = df
-	t.Cleanup(func() {
-		if s.df != nil {
-			s.df.Release()
-		}
-		s.ReleaseAllFrames()
-	})
+	t.Cleanup(s.close)
 	return s
 }
 

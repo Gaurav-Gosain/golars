@@ -37,36 +37,45 @@ module.exports = grammar({
       $._newline,
     ),
 
-    // Closed set of known commands; everything else falls back to
-    // identifier so user-defined Executor hosts still parse cleanly.
+    // Closed set of known commands and their aliases, mirroring
+    // script.Commands in script/spec.go (a Go test fails when the two
+    // drift). Everything else falls back to identifier so
+    // user-defined Executor hosts still parse cleanly.
     command: $ => choice(
-      'load', 'save', 'use', 'stash', 'frames', 'drop_frame',
-      'with', 'unnest', 'explode', 'upsample',
-      'tree', 'graph', 'show_graph', 'mermaid', 'explain_tree',
-      'select', 'drop', 'filter', 'sort', 'limit',
-      'head', 'tail', 'show', 'schema', 'describe',
-      'groupby', 'join',
-      'explain', 'collect', 'reset', 'source',
-      'timing', 'info', 'clear', 'exit', 'quit',
-      'reverse', 'sample', 'shuffle', 'unique',
-      'null_count', 'glimpse', 'size',
-      'cast', 'fill_null', 'drop_null', 'rename',
-      'sum', 'mean', 'avg', 'min', 'max', 'median', 'std',
-      'write', 'with_row_index',
-      'pwd', 'ls', 'cd',
+      // io
+      'load', 'save', 'write',
+      'scan_csv', 'scan_parquet', 'scan_ipc', 'scan_arrow',
+      'scan_json', 'scan_ndjson', 'scan_jsonl', 'scan_auto',
+      // frames
+      'use', 'stash', 'frames', 'drop_frame',
+      // pipeline
+      'select', 'drop', 'filter', 'sort', 'limit', 'groupby', 'join',
+      'group_by_dynamic', 'groupby_dynamic', 'join_asof',
+      'with', 'collect', 'reset', 'reverse', 'unique',
+      'cast', 'fill_null', 'fillnull', 'drop_null', 'dropnull',
+      'fill_nan', 'forward_fill', 'ff', 'backward_fill', 'bf',
+      'rename', 'with_row_index',
       'sum_horizontal', 'mean_horizontal', 'min_horizontal',
       'max_horizontal', 'all_horizontal', 'any_horizontal',
+      // reshape
+      'sample', 'shuffle', 'top_k', 'bottom_k', 'transpose',
+      'unpivot', 'melt', 'pivot', 'unnest', 'explode', 'upsample',
+      'to_dummies',
+      // inspect
+      'show', 'head', 'tail', 'schema', 'describe', 'glimpse', 'size',
+      'null_count', 'null-count', 'ishow', 'browse', 'partition_by',
+      // aggregate
+      'sum', 'mean', 'avg', 'min', 'max', 'median', 'std',
+      'skew', 'kurtosis', 'approx_n_unique', 'approx_nunique',
+      'corr', 'cov',
       'sum_all', 'mean_all', 'min_all', 'max_all',
       'std_all', 'var_all', 'median_all',
       'count_all', 'null_count_all',
-      'scan_csv', 'scan_parquet', 'scan_ipc', 'scan_arrow',
-      'scan_json', 'scan_ndjson', 'scan_jsonl', 'scan_auto',
-      'fill_nan', 'forward_fill', 'backward_fill',
-      'top_k', 'bottom_k', 'transpose', 'unpivot', 'melt',
-      'partition_by',
-      'skew', 'kurtosis', 'approx_n_unique', 'corr', 'cov',
-      'pivot',
-      'help',
+      // plan
+      'explain', 'explain_tree', 'tree', 'graph', 'show_graph', 'mermaid',
+      // session
+      'source', 'help', 'h', '?', 'exit', 'quit', 'q',
+      'timing', 'info', 'clear', 'pwd', 'ls', 'cd',
       $.identifier, // host-defined command
     ),
 
@@ -81,12 +90,12 @@ module.exports = grammar({
       $.expr,
       '=',
       '.',
-      '(', ')', ',', '/', '%', '+', '*', '!', '&', '|',
+      '(', ')', ',', '/', '//', '%', '+', '*', '**', '!', '&', '|',
     ),
 
     expr: $ => choice(
       prec.left(1, seq($._expr_operand, repeat1(seq(
-        choice('+', '-', '*', '/', '%'),
+        choice('+', '-', '*', '/', '//', '%', '**'),
         $._expr_operand,
       )))),
       $._expr_operand,
@@ -99,18 +108,27 @@ module.exports = grammar({
       $.identifier,
       seq('(', $.expr, ')'),
       seq('-', $._expr_operand),
+      $.list,
     ),
+    // `[a, b]` list literal, as in `cut(x, [0, 10])`.
+    list: $ => seq('[', optional(seq($.expr, repeat(seq(',', $.expr)))), ']'),
+    // `name=value` keyword argument, as in `cut(x, [0], labels=["a", "b"])`.
+    kwarg: $ => seq(field('name', $.identifier), '=', $.expr),
+    _call_arg: $ => choice($.expr, $.kwarg),
     method_call: $ => prec.left(seq(
       field('receiver', $.identifier),
       repeat(seq('.', field('method', $.identifier))),
-      '(', optional(seq($.expr, repeat(seq(',', $.expr)))), ')',
+      '(', optional(seq($._call_arg, repeat(seq(',', $._call_arg)))), ')',
     )),
 
     // Structural keywords.
     keyword: $ => choice(
-      'as', 'on', 'asc', 'desc', 'and', 'or',
+      'as', 'on', 'asc', 'desc', 'and', 'or', 'not', 'in',
       'is_null', 'is_not_null',
+      'when', 'then', 'otherwise',
       'inner', 'left', 'cross',
+      'every', 'period', 'offset', 'by',
+      'backward', 'forward', 'nearest', 'tolerance',
     ),
 
     operator: $ => choice(

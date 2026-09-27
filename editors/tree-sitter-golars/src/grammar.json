@@ -75,6 +75,42 @@
         },
         {
           "type": "STRING",
+          "value": "write"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_csv"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_parquet"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_ipc"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_arrow"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_json"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_ndjson"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_jsonl"
+        },
+        {
+          "type": "STRING",
+          "value": "scan_auto"
+        },
+        {
+          "type": "STRING",
           "value": "use"
         },
         {
@@ -88,42 +124,6 @@
         {
           "type": "STRING",
           "value": "drop_frame"
-        },
-        {
-          "type": "STRING",
-          "value": "with"
-        },
-        {
-          "type": "STRING",
-          "value": "unnest"
-        },
-        {
-          "type": "STRING",
-          "value": "explode"
-        },
-        {
-          "type": "STRING",
-          "value": "upsample"
-        },
-        {
-          "type": "STRING",
-          "value": "tree"
-        },
-        {
-          "type": "STRING",
-          "value": "graph"
-        },
-        {
-          "type": "STRING",
-          "value": "show_graph"
-        },
-        {
-          "type": "STRING",
-          "value": "mermaid"
-        },
-        {
-          "type": "STRING",
-          "value": "explain_tree"
         },
         {
           "type": "STRING",
@@ -147,26 +147,6 @@
         },
         {
           "type": "STRING",
-          "value": "head"
-        },
-        {
-          "type": "STRING",
-          "value": "tail"
-        },
-        {
-          "type": "STRING",
-          "value": "show"
-        },
-        {
-          "type": "STRING",
-          "value": "schema"
-        },
-        {
-          "type": "STRING",
-          "value": "describe"
-        },
-        {
-          "type": "STRING",
           "value": "groupby"
         },
         {
@@ -175,7 +155,19 @@
         },
         {
           "type": "STRING",
-          "value": "explain"
+          "value": "group_by_dynamic"
+        },
+        {
+          "type": "STRING",
+          "value": "groupby_dynamic"
+        },
+        {
+          "type": "STRING",
+          "value": "join_asof"
+        },
+        {
+          "type": "STRING",
+          "value": "with"
         },
         {
           "type": "STRING",
@@ -187,55 +179,11 @@
         },
         {
           "type": "STRING",
-          "value": "source"
-        },
-        {
-          "type": "STRING",
-          "value": "timing"
-        },
-        {
-          "type": "STRING",
-          "value": "info"
-        },
-        {
-          "type": "STRING",
-          "value": "clear"
-        },
-        {
-          "type": "STRING",
-          "value": "exit"
-        },
-        {
-          "type": "STRING",
-          "value": "quit"
-        },
-        {
-          "type": "STRING",
           "value": "reverse"
         },
         {
           "type": "STRING",
-          "value": "sample"
-        },
-        {
-          "type": "STRING",
-          "value": "shuffle"
-        },
-        {
-          "type": "STRING",
           "value": "unique"
-        },
-        {
-          "type": "STRING",
-          "value": "null_count"
-        },
-        {
-          "type": "STRING",
-          "value": "glimpse"
-        },
-        {
-          "type": "STRING",
-          "value": "size"
         },
         {
           "type": "STRING",
@@ -247,11 +195,163 @@
         },
         {
           "type": "STRING",
+          "value": "fillnull"
+        },
+        {
+          "type": "STRING",
           "value": "drop_null"
         },
         {
           "type": "STRING",
+          "value": "dropnull"
+        },
+        {
+          "type": "STRING",
+          "value": "fill_nan"
+        },
+        {
+          "type": "STRING",
+          "value": "forward_fill"
+        },
+        {
+          "type": "STRING",
+          "value": "ff"
+        },
+        {
+          "type": "STRING",
+          "value": "backward_fill"
+        },
+        {
+          "type": "STRING",
+          "value": "bf"
+        },
+        {
+          "type": "STRING",
           "value": "rename"
+        },
+        {
+          "type": "STRING",
+          "value": "with_row_index"
+        },
+        {
+          "type": "STRING",
+          "value": "sum_horizontal"
+        },
+        {
+          "type": "STRING",
+          "value": "mean_horizontal"
+        },
+        {
+          "type": "STRING",
+          "value": "min_horizontal"
+        },
+        {
+          "type": "STRING",
+          "value": "max_horizontal"
+        },
+        {
+          "type": "STRING",
+          "value": "all_horizontal"
+        },
+        {
+          "type": "STRING",
+          "value": "any_horizontal"
+        },
+        {
+          "type": "STRING",
+          "value": "sample"
+        },
+        {
+          "type": "STRING",
+          "value": "shuffle"
+        },
+        {
+          "type": "STRING",
+          "value": "top_k"
+        },
+        {
+          "type": "STRING",
+          "value": "bottom_k"
+        },
+        {
+          "type": "STRING",
+          "value": "transpose"
+        },
+        {
+          "type": "STRING",
+          "value": "unpivot"
+        },
+        {
+          "type": "STRING",
+          "value": "melt"
+        },
+        {
+          "type": "STRING",
+          "value": "pivot"
+        },
+        {
+          "type": "STRING",
+          "value": "unnest"
+        },
+        {
+          "type": "STRING",
+          "value": "explode"
+        },
+        {
+          "type": "STRING",
+          "value": "upsample"
+        },
+        {
+          "type": "STRING",
+          "value": "to_dummies"
+        },
+        {
+          "type": "STRING",
+          "value": "show"
+        },
+        {
+          "type": "STRING",
+          "value": "head"
+        },
+        {
+          "type": "STRING",
+          "value": "tail"
+        },
+        {
+          "type": "STRING",
+          "value": "schema"
+        },
+        {
+          "type": "STRING",
+          "value": "describe"
+        },
+        {
+          "type": "STRING",
+          "value": "glimpse"
+        },
+        {
+          "type": "STRING",
+          "value": "size"
+        },
+        {
+          "type": "STRING",
+          "value": "null_count"
+        },
+        {
+          "type": "STRING",
+          "value": "null-count"
+        },
+        {
+          "type": "STRING",
+          "value": "ishow"
+        },
+        {
+          "type": "STRING",
+          "value": "browse"
+        },
+        {
+          "type": "STRING",
+          "value": "partition_by"
         },
         {
           "type": "STRING",
@@ -283,47 +383,27 @@
         },
         {
           "type": "STRING",
-          "value": "write"
+          "value": "skew"
         },
         {
           "type": "STRING",
-          "value": "with_row_index"
+          "value": "kurtosis"
         },
         {
           "type": "STRING",
-          "value": "pwd"
+          "value": "approx_n_unique"
         },
         {
           "type": "STRING",
-          "value": "ls"
+          "value": "approx_nunique"
         },
         {
           "type": "STRING",
-          "value": "cd"
+          "value": "corr"
         },
         {
           "type": "STRING",
-          "value": "sum_horizontal"
-        },
-        {
-          "type": "STRING",
-          "value": "mean_horizontal"
-        },
-        {
-          "type": "STRING",
-          "value": "min_horizontal"
-        },
-        {
-          "type": "STRING",
-          "value": "max_horizontal"
-        },
-        {
-          "type": "STRING",
-          "value": "all_horizontal"
-        },
-        {
-          "type": "STRING",
-          "value": "any_horizontal"
+          "value": "cov"
         },
         {
           "type": "STRING",
@@ -363,99 +443,79 @@
         },
         {
           "type": "STRING",
-          "value": "scan_csv"
+          "value": "explain"
         },
         {
           "type": "STRING",
-          "value": "scan_parquet"
+          "value": "explain_tree"
         },
         {
           "type": "STRING",
-          "value": "scan_ipc"
+          "value": "tree"
         },
         {
           "type": "STRING",
-          "value": "scan_arrow"
+          "value": "graph"
         },
         {
           "type": "STRING",
-          "value": "scan_json"
+          "value": "show_graph"
         },
         {
           "type": "STRING",
-          "value": "scan_ndjson"
+          "value": "mermaid"
         },
         {
           "type": "STRING",
-          "value": "scan_jsonl"
-        },
-        {
-          "type": "STRING",
-          "value": "scan_auto"
-        },
-        {
-          "type": "STRING",
-          "value": "fill_nan"
-        },
-        {
-          "type": "STRING",
-          "value": "forward_fill"
-        },
-        {
-          "type": "STRING",
-          "value": "backward_fill"
-        },
-        {
-          "type": "STRING",
-          "value": "top_k"
-        },
-        {
-          "type": "STRING",
-          "value": "bottom_k"
-        },
-        {
-          "type": "STRING",
-          "value": "transpose"
-        },
-        {
-          "type": "STRING",
-          "value": "unpivot"
-        },
-        {
-          "type": "STRING",
-          "value": "melt"
-        },
-        {
-          "type": "STRING",
-          "value": "partition_by"
-        },
-        {
-          "type": "STRING",
-          "value": "skew"
-        },
-        {
-          "type": "STRING",
-          "value": "kurtosis"
-        },
-        {
-          "type": "STRING",
-          "value": "approx_n_unique"
-        },
-        {
-          "type": "STRING",
-          "value": "corr"
-        },
-        {
-          "type": "STRING",
-          "value": "cov"
-        },
-        {
-          "type": "STRING",
-          "value": "pivot"
+          "value": "source"
         },
         {
           "type": "STRING",
           "value": "help"
+        },
+        {
+          "type": "STRING",
+          "value": "h"
+        },
+        {
+          "type": "STRING",
+          "value": "?"
+        },
+        {
+          "type": "STRING",
+          "value": "exit"
+        },
+        {
+          "type": "STRING",
+          "value": "quit"
+        },
+        {
+          "type": "STRING",
+          "value": "q"
+        },
+        {
+          "type": "STRING",
+          "value": "timing"
+        },
+        {
+          "type": "STRING",
+          "value": "info"
+        },
+        {
+          "type": "STRING",
+          "value": "clear"
+        },
+        {
+          "type": "STRING",
+          "value": "pwd"
+        },
+        {
+          "type": "STRING",
+          "value": "ls"
+        },
+        {
+          "type": "STRING",
+          "value": "cd"
         },
         {
           "type": "SYMBOL",
@@ -524,6 +584,10 @@
         },
         {
           "type": "STRING",
+          "value": "//"
+        },
+        {
+          "type": "STRING",
           "value": "%"
         },
         {
@@ -533,6 +597,10 @@
         {
           "type": "STRING",
           "value": "*"
+        },
+        {
+          "type": "STRING",
+          "value": "**"
         },
         {
           "type": "STRING",
@@ -587,7 +655,15 @@
                         },
                         {
                           "type": "STRING",
+                          "value": "//"
+                        },
+                        {
+                          "type": "STRING",
                           "value": "%"
+                        },
+                        {
+                          "type": "STRING",
+                          "value": "**"
                         }
                       ]
                     },
@@ -663,6 +739,90 @@
               "name": "_expr_operand"
             }
           ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "list"
+        }
+      ]
+    },
+    "list": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "["
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "expr"
+                },
+                {
+                  "type": "REPEAT",
+                  "content": {
+                    "type": "SEQ",
+                    "members": [
+                      {
+                        "type": "STRING",
+                        "value": ","
+                      },
+                      {
+                        "type": "SYMBOL",
+                        "name": "expr"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "]"
+        }
+      ]
+    },
+    "kwarg": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "="
+        },
+        {
+          "type": "SYMBOL",
+          "name": "expr"
+        }
+      ]
+    },
+    "_call_arg": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "expr"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "kwarg"
         }
       ]
     },
@@ -712,7 +872,7 @@
                 "members": [
                   {
                     "type": "SYMBOL",
-                    "name": "expr"
+                    "name": "_call_arg"
                   },
                   {
                     "type": "REPEAT",
@@ -725,7 +885,7 @@
                         },
                         {
                           "type": "SYMBOL",
-                          "name": "expr"
+                          "name": "_call_arg"
                         }
                       ]
                     }
@@ -773,11 +933,31 @@
         },
         {
           "type": "STRING",
+          "value": "not"
+        },
+        {
+          "type": "STRING",
+          "value": "in"
+        },
+        {
+          "type": "STRING",
           "value": "is_null"
         },
         {
           "type": "STRING",
           "value": "is_not_null"
+        },
+        {
+          "type": "STRING",
+          "value": "when"
+        },
+        {
+          "type": "STRING",
+          "value": "then"
+        },
+        {
+          "type": "STRING",
+          "value": "otherwise"
         },
         {
           "type": "STRING",
@@ -790,6 +970,38 @@
         {
           "type": "STRING",
           "value": "cross"
+        },
+        {
+          "type": "STRING",
+          "value": "every"
+        },
+        {
+          "type": "STRING",
+          "value": "period"
+        },
+        {
+          "type": "STRING",
+          "value": "offset"
+        },
+        {
+          "type": "STRING",
+          "value": "by"
+        },
+        {
+          "type": "STRING",
+          "value": "backward"
+        },
+        {
+          "type": "STRING",
+          "value": "forward"
+        },
+        {
+          "type": "STRING",
+          "value": "nearest"
+        },
+        {
+          "type": "STRING",
+          "value": "tolerance"
         }
       ]
     },
@@ -975,5 +1187,6 @@
   "precedences": [],
   "externals": [],
   "inline": [],
-  "supertypes": []
+  "supertypes": [],
+  "reserved": {}
 }

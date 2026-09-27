@@ -55,6 +55,33 @@ with smooth = price.ewm_mean(0.3)`,
 			},
 		},
 		{
+			name: "expressions_and_time_series",
+			script: `load data/rates.csv as rates
+load data/events.csv
+with year = dt.year(ts)
+with band = cut(amount, [10, 100], labels=["s", "m", "l"])
+filter user in ["a", "b"] and amount // 2 > 1
+select ts, user, amount, share = amount / amount.sum()
+show
+reset
+join_asof rates on ts by user forward tolerance 2h
+sort user asc ts desc
+group_by_dynamic ts every 1h by user amount:sum:total n=len()
+to_dummies user`,
+			want: []string{
+				`expr.Col("ts").Dt().Year().Alias("year")`,
+				`.Cut([]float64{10, 100}, expr.CutOptions{Labels: []string{"s", "m", "l"}})`,
+				`.IsIn("a", "b")`,
+				`.FloorDiv(expr.LitInt64(2))`,
+				`expr.Col("amount").Div(expr.Col("amount").Sum()).Alias("share")`,
+				`JoinAsof(rates, dataframe.AsofOptions{On: "ts", By: []string{"user"}, Strategy: dataframe.AsofForward, Tolerance: "2h"})`,
+				`SortBy([]string{"user", "ts"}, []compute.SortOptions{{Descending: false}, {Descending: true}})`,
+				`GroupByDynamic("ts", dataframe.DynamicGroupOptions{Every: "1h", GroupBy: []string{"user"}})`,
+				`expr.Len().Alias("n")`,
+				`ToDummies(ctx, dataframe.ToDummiesOptions{Columns: []string{"user"}})`,
+			},
+		},
+		{
 			name:   "no_show_prunes_fmt",
 			script: `load data/x.csv`,
 			want:   []string{`golars.ReadCSV`},

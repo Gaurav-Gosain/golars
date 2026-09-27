@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Gaurav-Gosain/golars/internal/fileio"
 	"github.com/Gaurav-Gosain/golars/sql"
 )
 
@@ -33,27 +32,23 @@ func newSqlCmd() *cobra.Command {
 		session := sql.NewSession()
 		defer session.Close()
 		for _, f := range args[1:] {
-			df, err := loadByExt(ctx, f)
+			df, err := fileio.Read(ctx, f)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-				return errSubcommandFailed
+				return err
 			}
 			name := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
 			if err := session.Register(name, df); err != nil {
 				df.Release()
-				fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-				return errSubcommandFailed
+				return err
 			}
 			df.Release()
 		}
 		out, err := session.Query(ctx, args[0])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer out.Release()
-		renderFrame(out, format)
-		return nil
+		return renderFrame(out, format)
 	}
 	return cmd
 }

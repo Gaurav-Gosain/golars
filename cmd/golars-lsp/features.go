@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Gaurav-Gosain/golars/script"
+	"github.com/Gaurav-Gosain/golars/script/exprparse"
 )
 
 // --------------------------------------------------------------------
@@ -91,7 +91,7 @@ func analyze(d *document) analysis {
 				},
 				Severity: diagnosticSeverityError,
 				Source:   "golars",
-				Message:  "unknown command: " + cmdName,
+				Message:  script.UnknownCommand(cmdName).Error(),
 			})
 			continue
 		}
@@ -223,6 +223,8 @@ type markup struct {
 // is the right choice for column names and staged frame names.
 const (
 	ciKindText     = 1
+	ciKindFunction = 3
+	ciKindModule   = 9
 	ciKindVariable = 6
 	ciKindKeyword  = 14
 	ciKindFile     = 17
@@ -279,7 +281,7 @@ func (s *server) completionsFor(doc *document, prefix string, cursorLine int) []
 	if endsInSpace {
 		argIdx++
 	}
-	return argCompletionsAt(spec, cmd, parts, argIdx, current, doc, cursorLine)
+	return argCompletionsAt(spec, spec.Name, parts, argIdx, current, doc, cursorLine)
 }
 
 // argCompletionsAt dispatches on (command, argIdx) so that each
@@ -288,6 +290,15 @@ func (s *server) completionsFor(doc *document, prefix string, cursorLine int) []
 // `join NAME on KEY TYPE` or `load PATH as NAME` where different
 // positions expect different vocabularies.
 func argCompletionsAt(spec *script.CommandSpec, cmd string, _ []string, argIdx int, current string, doc *document, cursorLine int) []completionItem {
+	switch cmd {
+	case "with", "filter", "select", "groupby":
+		if items, isExpr := expressionCompletions(current); isExpr {
+			if items == nil {
+				items = append(freeFunctionCompletions(exprWordTail(current)), columnCompletions(doc, cmd, current, cursorLine)...)
+			}
+			return items
+		}
+	}
 	switch cmd {
 	case "load":
 		// load PATH [as NAME]
@@ -352,7 +363,7 @@ func argCompletionsAt(spec *script.CommandSpec, cmd string, _ []string, argIdx i
 	case "groupby":
 		// groupby <keys> <col:op[:alias]>...
 		return columnCompletions(doc, cmd, current, cursorLine)
-	case "limit", "head", "tail":
+	case "limit", "head", "tail", "show", "sample", "glimpse":
 		// numeric arg: no useful suggestions
 		return nil
 	}
@@ -370,31 +381,28 @@ func argCompletionsAt(spec *script.CommandSpec, cmd string, _ []string, argIdx i
 }
 
 func commandCompletions(partial string) []completionItem {
-	// Accept `.xxx` or bare `xxx`; strip the dot to match spec names.
+	// Accept `.xxx` or bare `xxx`; the label keeps the user's dot.
 	hasDot := strings.HasPrefix(partial, ".")
-	p := strings.TrimPrefix(partial, ".")
 	out := make([]completionItem, 0, len(script.Commands))
-	for _, c := range script.Commands {
-		if p != "" && !strings.HasPrefix(c.Name, p) {
-			continue
-		}
-		label := c.Name
+	for _, name := range script.CompleteCommand(partial) {
+		c := script.FindCommand(name)
+		label := name
 		if hasDot {
-			label = "." + c.Name
+			label = "." + name
 		}
-		doc := c.Summary
-		if c.LongDoc != "" {
-			doc = c.Summary + "\n\n" + c.LongDoc
+		detail := c.Signature
+		if name != c.Name {
+			detail = "alias of " + c.Name + ": " + c.Signature
 		}
 		// Kind=Keyword (not Function) so clients don't auto-insert
 		// parens or treat the label as a callable identifier.
 		out = append(out, completionItem{
 			Label:         label,
 			Kind:          ciKindKeyword,
-			Detail:        c.Signature,
-			Documentation: &markup{Kind: "markdown", Value: doc},
-			InsertText:    c.Name,
-			SortText:      c.Category + c.Name,
+			Detail:        detail,
+			Documentation: &markup{Kind: "markdown", Value: c.Markdown()},
+			InsertText:    name,
+			SortText:      c.Category + name,
 		})
 	}
 	return out
@@ -436,6 +444,88 @@ func pathCompletions(current string, doc *document) []completionItem {
 		out = append(out, completionItem{Label: label, Kind: kind, InsertText: label})
 	}
 	return out
+}
+
+// exprWordTail returns the identifier-and-dot run that ends current,
+// the part of an expression the cursor is completing.
+func exprWordTail(current string) string {
+	i := len(current)
+	for i > 0 {
+		c := current[i-1]
+		if c == '.' || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			i--
+			continue
+		}
+		break
+	}
+	return current[i:]
+}
+
+// expressionCompletions completes inside the expression language.
+// After `dt.` or `x.dt.` it offers the namespace's functions; after
+// `x.` the expression methods plus namespaces. isExpr is false when
+// the token is not part of an expression (for example a groupby
+// `col:op` spec); a nil list with isExpr true asks for the default
+// set of columns and free functions.
+func expressionCompletions(current string) (items []completionItem, isExpr bool) {
+	if strings.Contains(current, ":") && !strings.ContainsAny(current, "(=") {
+		return nil, false
+	}
+	tail := exprWordTail(current)
+	dot := strings.LastIndex(tail, ".")
+	if dot < 0 {
+		return nil, true
+	}
+	head := tail[:dot]
+	if i := strings.LastIndex(head, "."); i >= 0 {
+		head = head[i+1:]
+	}
+	partial := tail[dot+1:]
+	fns := exprparse.Functions()
+	ns := ""
+	if _, isNS := fns[head]; isNS && head != "free" && head != "" {
+		ns = head
+	}
+	for _, name := range fns[ns] {
+		if !strings.HasPrefix(name, partial) {
+			continue
+		}
+		detail := "expression method"
+		if ns != "" {
+			detail = ns + " namespace"
+		}
+		items = append(items, completionItem{Label: name, Kind: ciKindFunction, Detail: detail})
+	}
+	if ns == "" {
+		for name := range fns {
+			if name != "" && name != "free" && strings.HasPrefix(name, partial) {
+				items = append(items, completionItem{Label: name, Kind: ciKindModule, Detail: "namespace", SortText: "0" + name})
+			}
+		}
+	}
+	return items, true
+}
+
+// freeFunctionCompletions lists the top-level functions and
+// namespaces that start with prefix.
+func freeFunctionCompletions(prefix string) []completionItem {
+	if prefix == "" {
+		return nil
+	}
+	fns := exprparse.Functions()
+	var items []completionItem
+	for _, name := range fns["free"] {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		items = append(items, completionItem{Label: name, Kind: ciKindFunction, Detail: "function", SortText: "z" + name})
+	}
+	for name := range fns {
+		if name != "" && name != "free" && strings.HasPrefix(name, prefix) {
+			items = append(items, completionItem{Label: name, Kind: ciKindModule, Detail: "namespace", SortText: "z" + name})
+		}
+	}
+	return items
 }
 
 // columnCompletions offers real column names drawn from the focused
@@ -639,8 +729,8 @@ func collectInlayHints(d *document, rng lspRange) []inlayHint {
 						Label:       label,
 						Kind:        inlayHintKindType,
 						PaddingLeft: true,
-					}
-					hint.Tooltip = &markupContent{Kind: "plaintext", Value: label}
+
+						Tooltip: &markupContent{Kind: "plaintext", Value: label}}
 					hints = append(hints, hint)
 				}
 			}
@@ -651,7 +741,7 @@ func collectInlayHints(d *document, rng lspRange) []inlayHint {
 		applyStmt(&state, dir, stmt)
 
 		parts := strings.Fields(stmt)
-		cmd := strings.TrimPrefix(parts[0], ".")
+		cmd := canonicalCommand(parts[0])
 		if !isShapeStatement(cmd) {
 			continue
 		}
@@ -660,7 +750,7 @@ func collectInlayHints(d *document, rng lspRange) []inlayHint {
 		// instead so the hint describes what the statement actually
 		// produced.
 		shape := state.focus
-		if cmd == "load" && len(parts) >= 4 && strings.EqualFold(parts[2], "as") {
+		if (cmd == "load" || strings.HasPrefix(cmd, "scan_")) && len(parts) >= 4 && strings.EqualFold(parts[2], "as") {
 			if staged, ok := state.staged[parts[3]]; ok {
 				shape = staged
 			}
@@ -682,11 +772,14 @@ func collectInlayHints(d *document, rng lspRange) []inlayHint {
 }
 
 // isShapeStatement returns true for commands that produce or
-// transform the focused frame's shape.
+// transform the focused frame's shape. cmd is a canonical name.
 func isShapeStatement(cmd string) bool {
 	switch cmd {
-	case "load", "use", "filter", "sort", "limit", "head", "tail",
-		"select", "drop", "groupby", "join":
+	case "load", "use", "filter", "sort", "limit", "select", "drop",
+		"groupby", "join", "with", "unique", "drop_null", "sample",
+		"top_k", "bottom_k", "unpivot", "rename", "with_row_index",
+		"scan_csv", "scan_parquet", "scan_ipc", "scan_json",
+		"scan_ndjson", "scan_auto":
 		return true
 	}
 	return false
@@ -821,7 +914,12 @@ func (s *server) handleHover(msg *rawMessage) {
 		s.reply(msg, nil)
 		return
 	}
-	spec := script.FindCommand(tok)
+	// Only the first token of a statement is a command; a column that
+	// happens to be called `count` or `min` should get column hover.
+	var spec *script.CommandSpec
+	if start == len(line)-len(strings.TrimLeft(line, " \t")) {
+		spec = script.FindCommand(tok)
+	}
 	if spec == nil {
 		// Not a command: maybe a column name with known schema.
 		if info := columnHoverInfo(doc, tok, int(p.Position.Line)); info != "" {
@@ -837,7 +935,7 @@ func (s *server) handleHover(msg *rawMessage) {
 		s.reply(msg, nil)
 		return
 	}
-	body := renderCommandHover(spec)
+	body := spec.Markdown()
 	s.reply(msg, hoverResult{
 		Contents: markup{Kind: "markdown", Value: body},
 		Range: &lspRange{
@@ -845,38 +943,6 @@ func (s *server) handleHover(msg *rawMessage) {
 			End:   position{Line: p.Position.Line, Character: uint32(end)},
 		},
 	})
-}
-
-// renderCommandHover formats a CommandSpec into dev-friendly hover
-// markdown: title with the command name + category pill, a fenced
-// `glr` signature block, summary paragraph, long-form docs rendered
-// verbatim (the spec author is responsible for markdown there), and
-// a fenced `glr` block with runnable examples when available.
-func renderCommandHover(spec *script.CommandSpec) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "### `%s`", spec.Name)
-	if spec.Category != "" {
-		fmt.Fprintf(&b, "  _%s_", spec.Category)
-	}
-	b.WriteString("\n\n")
-	fmt.Fprintf(&b, "```glr\n%s\n```\n\n", spec.Signature)
-	if spec.Summary != "" {
-		b.WriteString(spec.Summary)
-		b.WriteString("\n\n")
-	}
-	if spec.LongDoc != "" {
-		b.WriteString(spec.LongDoc)
-		b.WriteString("\n\n")
-	}
-	if len(spec.Examples) > 0 {
-		b.WriteString("**Examples**\n\n```glr\n")
-		for _, ex := range spec.Examples {
-			b.WriteString(ex)
-			b.WriteString("\n")
-		}
-		b.WriteString("```\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // tokenAt returns the whitespace-delimited token containing byte

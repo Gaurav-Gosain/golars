@@ -1,9 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -23,11 +24,8 @@ func newRunCmd() *cobra.Command {
 	cmd.ValidArgsFunction = glrFileCompletion
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
 		s := newState(false)
-		if err := runScript(s, args[0]); err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
-		}
-		return nil
+		defer s.close()
+		return runScript(s, args[0])
 	}
 	return cmd
 }
@@ -58,61 +56,34 @@ func newExplainCmd() *cobra.Command {
 	cmd.ValidArgsFunction = glrFileCompletion
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
 		s := newState(false)
+		defer s.close()
+		// Build the pipeline quietly: the only output is the plan.
+		// Plan statements inside the script are skipped so they do not
+		// print a partial plan first.
 		runner := script.Runner{Exec: script.ExecutorFunc(func(line string) error {
-			// Drop the trailing .explain so we capture the pre-collect
-			// plan; otherwise the script's own .explain runs first.
-			if line == ".explain" || line == "explain" {
+			if spec := script.FindCommand(strings.Fields(line)[0]); spec != nil && spec.Category == "plan" {
 				return nil
 			}
 			return s.handle(line)
 		})}
-		// Silence per-statement "ok ..." noise while the script
-		// builds the pipeline when the caller asked for a clean
-		// machine-readable output. Without this mmdc or a
-		// screenshot script would have to strip banner lines.
-		quiet := mermaid || graph
-		realStdout := os.Stdout
-		if quiet {
-			devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-			if err == nil {
-				os.Stdout = devNull
-				defer func() {
-					os.Stdout = realStdout
-					_ = devNull.Close()
-				}()
-			} else {
-				// Fallback: discard writer wrapped as a throwaway file.
-				_ = io.Discard
-			}
+		err := withStdoutSilenced(func() error { return runner.RunFile(args[0]) })
+		if err != nil && !errors.Is(err, errExit) {
+			return err
 		}
-		if err := runner.RunFile(args[0]); err != nil {
-			if quiet {
-				os.Stdout = realStdout
-			}
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
-		}
-		if quiet {
-			os.Stdout = realStdout
-		}
-		explainFn := s.cmdExplain
+		render := cmdExplain
 		switch {
 		case mermaid:
-			explainFn = s.cmdMermaid
+			render = cmdMermaid
 		case graph:
-			explainFn = s.cmdShowGraph
+			render = cmdGraph
 		case tree:
-			explainFn = s.cmdExplainTree
+			render = cmdExplainTree
 		}
-		if err := explainFn(); err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+		if err := render(s, nil); err != nil {
+			return err
 		}
 		if profile || tracePath != "" {
-			if err := runExplainProfile(s, profile, tracePath); err != nil {
-				fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-				return errSubcommandFailed
-			}
+			return runExplainProfile(s, profile, tracePath)
 		}
 		return nil
 	}
@@ -123,7 +94,7 @@ func newExplainCmd() *cobra.Command {
 // and prints / writes the result.
 func runExplainProfile(s *state, profile bool, tracePath string) error {
 	if s.lf == nil {
-		return fmt.Errorf("no pipeline to profile")
+		return fmt.Errorf("profile: the script leaves no lazy pipeline to run")
 	}
 	p := lazy.NewProfiler()
 	out, err := s.lf.Collect(s.ctx, lazy.WithProfiler(p))
@@ -139,7 +110,7 @@ func runExplainProfile(s *state, profile bool, tracePath string) error {
 		if err := os.WriteFile(tracePath, []byte(p.ChromeTrace()), 0o644); err != nil {
 			return err
 		}
-		fmt.Printf("%s wrote chrome-trace to %s\n", successStyle.Render("✓"), tracePath)
+		ok("wrote chrome trace to %s", tracePath)
 	}
 	return nil
 }

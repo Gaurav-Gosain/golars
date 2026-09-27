@@ -5,11 +5,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/script"
+	"github.com/Gaurav-Gosain/golars/script/exprparse"
 )
 
 // Column discovery. We read headers from the files a script loads
@@ -180,7 +183,7 @@ func applyStmt(st *frameState, dir, stmt string) {
 	if len(parts) == 0 {
 		return
 	}
-	cmd := strings.TrimPrefix(parts[0], ".")
+	cmd := canonicalCommand(parts[0])
 	switch cmd {
 	case "load",
 		"scan_csv", "scan_parquet", "scan_ipc", "scan_json", "scan_ndjson", "scan_auto":
@@ -231,39 +234,120 @@ func applyStmt(st *frameState, dir, stmt string) {
 		st.focus.rows = rowsUnknown
 	case "sort":
 		// Shape-preserving.
-	case "limit", "head", "tail":
+	case "limit", "sample", "top_k", "bottom_k":
+		// limit N and sample N keep at most N rows; top_k/bottom_k K
+		// keep at most K.
 		if len(parts) >= 2 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
 				st.focus.rows = clampRows(st.focus.rows, n)
 			}
-		} else if cmd != "limit" {
-			// head/tail default to 10.
-			st.focus.rows = clampRows(st.focus.rows, 10)
 		}
-	case "select":
-		st.focus.cols = commaList(stmt, parts)
-	case "with":
-		// `with NAME = EXPR` appends a single column. The new name
-		// is the first token after `with`, up to the `=`. Row count
-		// stays constant; the schema grows by one.
+	case "unique", "drop_null":
+		st.focus.rows = rowsUnknown
+	case "rename":
+		// rename OLD as NEW
+		if len(parts) == 4 {
+			cols := append([]string(nil), st.focus.cols...)
+			for i, c := range cols {
+				if c == parts[1] {
+					cols[i] = parts[3]
+				}
+			}
+			st.focus.cols = cols
+		}
+	case "with_row_index":
+		if len(parts) >= 2 {
+			st.focus.cols = append([]string{parts[1]}, st.focus.cols...)
+		}
+	case "sum_horizontal", "mean_horizontal", "min_horizontal",
+		"max_horizontal", "all_horizontal", "any_horizontal":
 		if len(parts) >= 2 {
 			st.focus.cols = append(append([]string(nil), st.focus.cols...), parts[1])
+		}
+	case "unpivot":
+		// unpivot IDS [VALS] -> IDS..., variable, value
+		if len(parts) >= 2 {
+			st.focus.cols = append(commaList(stmt, parts[:2]), "variable", "value")
+			st.focus.rows = rowsUnknown
+		}
+	case "transpose", "pivot":
+		st.focus.cols = nil
+		st.focus.rows = rowsUnknown
+	case "select":
+		st.focus.cols = selectColumns(stmt, parts)
+	case "with":
+		// `with NAME = EXPR` adds (or replaces) one column; the row
+		// count is unchanged.
+		rest := strings.TrimSpace(strings.TrimPrefix(stmt, parts[0]))
+		if name, _, found := strings.Cut(rest, "="); found {
+			if name = strings.TrimSpace(name); name != "" && !slices.Contains(st.focus.cols, name) {
+				st.focus.cols = append(append([]string(nil), st.focus.cols...), name)
+			}
 		}
 	case "drop":
 		st.focus.cols = dropFromList(st.focus.cols, commaList(stmt, parts))
 	case "groupby":
 		// groupby <keys> <agg>...
-		if len(parts) < 2 {
+		args := script.SplitTopLevel(strings.TrimSpace(strings.TrimPrefix(stmt, parts[0])), ' ')
+		if len(args) < 1 {
 			return
 		}
-		keys := commaList(stmt, parts[:2])
-		var out []string
-		out = append(out, keys...)
-		for _, spec := range parts[2:] {
+		out := commaList(stmt, []string{"", args[0]})
+		for _, spec := range args[1:] {
 			out = append(out, aggSpecAlias(spec))
 		}
 		st.focus.cols = out
 		st.focus.rows = rowsUnknown
+	case "group_by_dynamic":
+		// group_by_dynamic TIME every DUR [opt VAL]... AGG...: the by
+		// keys come first, then the window start, then the aggregates.
+		args := script.SplitTopLevel(strings.TrimSpace(strings.TrimPrefix(stmt, parts[0])), ' ')
+		if len(args) < 1 {
+			return
+		}
+		var keys, aggs []string
+		i := 1
+		for ; i+1 < len(args); i += 2 {
+			opt := strings.ToLower(args[i])
+			if !slices.Contains([]string{"every", "period", "offset", "by", "closed", "label", "start_by"}, opt) {
+				break
+			}
+			if opt == "by" {
+				keys = commaList(stmt, []string{"", args[i+1]})
+			}
+		}
+		for _, spec := range args[i:] {
+			aggs = append(aggs, aggSpecAlias(spec))
+		}
+		st.focus.cols = append(append(keys, args[0]), aggs...)
+		st.focus.rows = rowsUnknown
+	case "join_asof":
+		// join_asof NAME on KEY [by COLS] ...: every left row stays; the
+		// right key and by columns are dropped, collisions get _right.
+		if len(parts) < 4 || !strings.EqualFold(parts[2], "on") {
+			return
+		}
+		drop := []string{parts[3]}
+		for i := 4; i+1 < len(parts); i++ {
+			if strings.EqualFold(parts[i], "by") {
+				drop = append(drop, commaList(stmt, []string{"", parts[i+1]})...)
+			}
+		}
+		right := joinTargetShape(st, dir, parts[1])
+		cols := append([]string(nil), st.focus.cols...)
+		for _, c := range right.cols {
+			switch {
+			case slices.Contains(drop, c):
+			case slices.Contains(st.focus.cols, c):
+				cols = append(cols, c+"_right")
+			default:
+				cols = append(cols, c)
+			}
+		}
+		st.focus.cols = cols
+	case "to_dummies":
+		// The indicator columns depend on the data.
+		st.focus.cols = nil
 	case "join":
 		if len(parts) < 4 || !strings.EqualFold(parts[2], "on") {
 			return
@@ -290,12 +374,6 @@ func applyStmt(st *frameState, dir, stmt string) {
 		default: // inner
 			st.focus.rows = rowsUnknown
 		}
-	case "collect", "reset", "show", "schema", "describe", "frames",
-		"info", "timing", "clear", "help", "explain", "explain_tree",
-		"tree", "graph", "show_graph", "mermaid", "save", "exit",
-		"quit", "source":
-		// No shape change: these either print or persist the current
-		// frame, or are session-level metadata commands.
 	case "unnest":
 		// Replaces the named column with its struct fields. We don't
 		// know the field count without type info, so widen to unknown.
@@ -306,7 +384,20 @@ func applyStmt(st *frameState, dir, stmt string) {
 	case "upsample":
 		// Row count becomes an unknown upper bound; schema unchanged.
 		st.focus.rows = rowsUnknown
+	default:
+		// Everything else either prints, persists, or keeps the shape
+		// (head, tail, show, sort, reverse, shuffle, cast, fills, ...).
 	}
+}
+
+// canonicalCommand maps a typed command (with or without the leading
+// dot, possibly an alias) to its canonical spec name.
+func canonicalCommand(tok string) string {
+	tok = strings.TrimPrefix(tok, ".")
+	if spec := script.FindCommand(tok); spec != nil {
+		return spec.Name
+	}
+	return tok
 }
 
 // clampRows returns the smaller positive bound between prev and n;
@@ -345,6 +436,34 @@ func commaList(_ string, parts []string) []string {
 	return out
 }
 
+// selectColumns returns the output names of a select statement: the
+// plain column list, or for expression items the `name =` label or
+// the expression's output name.
+func selectColumns(stmt string, parts []string) []string {
+	rest := strings.TrimSpace(strings.TrimPrefix(stmt, parts[0]))
+	if !strings.ContainsAny(rest, "(=\"'") {
+		return commaList(stmt, parts)
+	}
+	var out []string
+	for _, item := range script.SplitTopLevel(rest, ',') {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if name, _, found := strings.Cut(item, "="); found && !strings.ContainsAny(name, "(\"'!<>") &&
+			!strings.HasPrefix(item[len(name):], "==") {
+			out = append(out, strings.TrimSpace(name))
+			continue
+		}
+		if e, err := exprparse.Parse(item); err == nil {
+			out = append(out, expr.OutputName(e))
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 // dropFromList removes each name in drop from cols, preserving
 // order. Case-sensitive to match golars' column-name semantics.
 func dropFromList(cols, drop []string) []string {
@@ -369,6 +488,9 @@ func dropFromList(cols, drop []string) []string {
 // spec "col:op[:alias]". Falls back to "col" when no alias is
 // given (matches cmd/golars' dispatcher).
 func aggSpecAlias(spec string) string {
+	if name, _, found := strings.Cut(spec, "="); found && !strings.Contains(name, "(") {
+		return strings.TrimSpace(name)
+	}
 	pp := strings.Split(spec, ":")
 	switch len(pp) {
 	case 0:

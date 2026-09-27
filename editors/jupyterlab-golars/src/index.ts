@@ -19,29 +19,49 @@ import {
 } from '@codemirror/language';
 
 const COMMANDS = new Set([
-  // I/O + frame registry
-  'load', 'save', 'write', 'use', 'stash', 'frames', 'drop_frame', 'reset',
-  // inspection
-  'show', 'ishow', 'browse', 'schema', 'describe', 'head', 'tail',
-  'glimpse', 'size', 'null_count', 'null_count_all', 'info',
+  // Mirrors script.Commands in script/spec.go (names and aliases); a Go
+  // test in script/drift_test.go fails when this list drifts.
+  // io
+  'load', 'save', 'write',
+  'scan_csv', 'scan_parquet', 'scan_ipc', 'scan_arrow',
+  'scan_json', 'scan_ndjson', 'scan_jsonl', 'scan_auto',
+  // frames
+  'use', 'stash', 'frames', 'drop_frame',
   // pipeline
-  'select', 'drop', 'filter', 'sort', 'limit', 'with', 'groupby', 'rename',
-  'join', 'collect', 'cast', 'fill_null', 'drop_null', 'reverse',
-  'sample', 'shuffle', 'unique', 'unnest', 'explode', 'upsample',
-  // plan introspection
+  'select', 'drop', 'filter', 'sort', 'limit', 'groupby', 'join',
+  'with', 'collect', 'reset', 'reverse', 'unique',
+  'cast', 'fill_null', 'fillnull', 'drop_null', 'dropnull',
+  'fill_nan', 'forward_fill', 'ff', 'backward_fill', 'bf',
+  'rename', 'with_row_index',
+  'sum_horizontal', 'mean_horizontal', 'min_horizontal',
+  'max_horizontal', 'all_horizontal', 'any_horizontal',
+  // reshape
+  'sample', 'shuffle', 'top_k', 'bottom_k', 'transpose',
+  'unpivot', 'melt', 'pivot', 'unnest', 'explode', 'upsample',
+  'to_dummies', 'join_asof', 'group_by_dynamic', 'groupby_dynamic',
+  // inspect
+  'show', 'head', 'tail', 'schema', 'describe', 'glimpse', 'size',
+  'null_count', 'ishow', 'browse', 'partition_by',
+  // aggregate
+  'sum', 'mean', 'avg', 'min', 'max', 'median', 'std',
+  'skew', 'kurtosis', 'approx_n_unique', 'approx_nunique',
+  'corr', 'cov',
+  'sum_all', 'mean_all', 'min_all', 'max_all',
+  'std_all', 'var_all', 'median_all', 'count_all', 'null_count_all',
+  // plan
   'explain', 'explain_tree', 'tree', 'graph', 'show_graph', 'mermaid',
-  // horizontal aggs
-  'sum', 'mean', 'min', 'max', 'sum_all', 'mean_all', 'min_all', 'max_all',
-  'std_all', 'var_all', 'median_all',
-  // meta
-  'source', 'timing', 'clear', 'help', 'exit', 'quit'
+  // session
+  'source', 'help', 'h', 'exit', 'quit', 'q',
+  'timing', 'info', 'clear', 'pwd', 'ls', 'cd'
 ]);
 
 const KEYWORDS = new Set([
   'as', 'on', 'asc', 'desc', 'and', 'or',
   'is_null', 'is_not_null',
   'inner', 'left', 'cross',
-  'contains', 'starts_with', 'ends_with', 'like', 'not_like'
+  'contains', 'starts_with', 'ends_with', 'like', 'not_like',
+  'not', 'in', 'when', 'then', 'otherwise',
+  'every', 'period', 'offset', 'by', 'backward', 'forward', 'nearest', 'tolerance'
 ]);
 
 const ATOMS = new Set(['true', 'false', 'null']);

@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -16,13 +19,6 @@ import (
 	"github.com/Gaurav-Gosain/golars/jupyter/render"
 	"github.com/Gaurav-Gosain/golars/script"
 )
-
-// ansiCSI matches CSI sequences (colour, cursor moves) so the
-// trailing-table strip can decide indent on the visible glyphs, not
-// the ANSI envelope. Lipgloss prepends \x1b[<sgr>m to styled cells;
-// without this the "starts with 2 spaces" check fails for coloured
-// table rows and the strip bails too early.
-var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 // kernel-host is a hidden subcommand that turns golars into an NDJSON
 // request/response server. The custom Jupyter kernel (cmd/golars-kernel)
@@ -35,6 +31,17 @@ var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 //	request:  {"id":"abc","code":"load x.csv\nhead 5"}
 //	response: {"id":"abc","text":"...stdout...","stderr":"","html":"...","error":null,"shape":[h,w]}
 //
+// A request with "structured":true gets tables as data instead of ASCII
+// text. The reply then also carries "outputs", the cell's stdout text and
+// tables in the order they were produced, and "table", the auto-displayed
+// frame. Tables are dataframe.TableMIME JSON objects, next to their HTML:
+//
+//	{"type":"stdout","text":"..."}
+//	{"type":"table","table":{"columns":[...],"dtypes":[...],"rows":[[...]],"shape":[h,w]},"html":"..."}
+//
+// All of these are optional fields, so clients and hosts of either age
+// keep working with each other.
+//
 // Errors during execution land in `error` and the run continues. A
 // fatal protocol error closes the stream.
 //
@@ -45,64 +52,72 @@ var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 type kernelRequest struct {
 	ID   string `json:"id"`
 	Code string `json:"code"`
+	// Structured asks for tables as data (see the protocol above).
+	Structured bool `json:"structured,omitempty"`
 }
 
-// lastLineIsDisplayCommand returns true when the cell's final
-// non-empty non-comment statement is one that prints a table.
-// Used to decide whether to strip the dispatcher's ASCII table out
-// of stdout, since the auto-display HTML covers the same data.
+// hostOutput is one entry of a structured reply's outputs.
+type hostOutput struct {
+	Type  string          `json:"type"` // "stdout" or "table"
+	Text  string          `json:"text,omitempty"`
+	Table json.RawMessage `json:"table,omitempty"`
+	HTML  string          `json:"html,omitempty"`
+}
+
+// tableMarker stands in stdout for a table captured by tableHook, so the
+// reply can put text and tables back in order. The record separators keep
+// it from colliding with anything a command prints.
+const tableMarker = "\x1egolars-table:%d\x1e\n"
+
+var tableMarkerRe = regexp.MustCompile("\x1egolars-table:([0-9]+)\x1e\n")
+
+// hookedTableFormat bounds tables printed by commands (head 50 shows 50
+// rows) while keeping a runaway `head 1000000` from flooding the reply.
+var hookedTableFormat = dataframe.FormatOptions{MaxRows: 500, MaxCols: 8, MaxCellRune: 64}
+
+// splitOutputs turns captured stdout with table markers into ordered
+// outputs.
+func splitOutputs(text string, tables []hostOutput) []hostOutput {
+	var out []hostOutput
+	addText := func(s string) {
+		if s != "" {
+			out = append(out, hostOutput{Type: "stdout", Text: s})
+		}
+	}
+	last := 0
+	for _, m := range tableMarkerRe.FindAllStringSubmatchIndex(text, -1) {
+		addText(text[last:m[0]])
+		last = m[1]
+		i, err := strconv.Atoi(text[m[2]:m[3]])
+		if err == nil && i < len(tables) {
+			out = append(out, tables[i])
+		}
+	}
+	addText(text[last:])
+	return out
+}
+
+// lastLineIsDisplayCommand reports whether the cell's last statement
+// prints a table itself (show, head, tail, describe). The kernel then
+// skips the HTML auto-display so the rows are not shown twice.
 func lastLineIsDisplayCommand(code string) bool {
-	for _, raw := range reverse(strings.Split(code, "\n")) {
-		l := script.Normalize(raw)
-		if l == "" || strings.HasPrefix(l, "#") {
+	lines := strings.Split(code, "\n")
+	for _, line := range slices.Backward(lines) {
+		fields := strings.Fields(script.Normalize(line))
+		if len(fields) == 0 {
 			continue
 		}
-		l = strings.TrimPrefix(l, ".")
-		first := strings.ToLower(strings.Fields(l)[0])
-		switch first {
-		case "show", "head", "tail", "collect", "describe":
+		spec := script.FindCommand(fields[0])
+		if spec == nil {
+			return false
+		}
+		switch spec.Name {
+		case "show", "head", "tail", "describe":
 			return true
 		}
 		return false
 	}
 	return false
-}
-
-func reverse(s []string) []string {
-	out := make([]string, len(s))
-	for i, v := range s {
-		out[len(s)-1-i] = v
-	}
-	return out
-}
-
-// stripTrailingTable removes the trailing block of indented lines
-// from text. The dispatcher's printTable output is indented with two
-// leading spaces and ends with "  N rows shown"; commentary lines
-// (`✓ ...`) start at column 0. Walking from the end and dropping
-// indented + blank lines until we hit a column-0 line strips exactly
-// the table block. ANSI codes are stripped before the indent check
-// so a coloured `  name` row (`\x1b[...m  name\x1b[m`) still counts
-// as indented.
-func stripTrailingTable(text string) string {
-	lines := strings.Split(text, "\n")
-	end := len(lines)
-	for end > 0 {
-		l := ansiCSI.ReplaceAllString(lines[end-1], "")
-		if l == "" || strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") {
-			end--
-			continue
-		}
-		break
-	}
-	if end == len(lines) {
-		return text
-	}
-	out := strings.Join(lines[:end], "\n")
-	if !strings.HasSuffix(out, "\n") {
-		out += "\n"
-	}
-	return out
 }
 
 type kernelResponse struct {
@@ -112,6 +127,12 @@ type kernelResponse struct {
 	HTML   string  `json:"html"`
 	Error  string  `json:"error,omitempty"`
 	Shape  *[2]int `json:"shape,omitempty"`
+	// Table is the auto-displayed frame as dataframe.TableMIME JSON
+	// (structured requests only).
+	Table json.RawMessage `json:"table,omitempty"`
+	// Outputs is the ordered stdout text and tables of a structured
+	// request.
+	Outputs []hostOutput `json:"outputs,omitempty"`
 }
 
 func newKernelHostCmd() *cobra.Command {
@@ -129,6 +150,7 @@ func newKernelHostCmd() *cobra.Command {
 
 func runKernelHost(realOut io.Writer, in io.Reader) error {
 	s := newState(false)
+	defer s.close()
 	enc := json.NewEncoder(realOut)
 	enc.SetEscapeHTML(false)
 
@@ -201,6 +223,15 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 	// state from a previous cell.
 	startDF := s.df
 	startLF := s.lf
+	var tables []hostOutput
+	if req.Structured {
+		tableHook = func(df *dataframe.DataFrame) {
+			b := df.MimeBundleWith(hookedTableFormat)
+			fmt.Fprintf(os.Stdout, tableMarker, len(tables))
+			tables = append(tables, hostOutput{Type: "table", Table: json.RawMessage(b[dataframe.TableMIME]), HTML: b["text/html"]})
+		}
+		defer func() { tableHook = nil }()
+	}
 	runner := script.Runner{Exec: script.ExecutorFunc(s.handle)}
 	execErr := runner.Run(strings.NewReader(req.Code), "<cell>")
 	focusChanged := s.df != startDF || s.lf != startLF
@@ -215,6 +246,14 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 
 	resp.Text = stdoutBuf.String()
 	resp.Stderr = stderrBuf.String()
+	if req.Structured {
+		resp.Outputs = splitOutputs(resp.Text, tables)
+		resp.Text = tableMarkerRe.ReplaceAllString(resp.Text, "")
+	}
+	// `exit` makes no sense inside a notebook; treat it as a no-op.
+	if errors.Is(execErr, errExit) {
+		execErr = nil
+	}
 	if execErr != nil {
 		resp.Error = execErr.Error()
 	}
@@ -239,21 +278,15 @@ func executeCell(s *state, req kernelRequest) kernelResponse {
 		}
 		if display != nil {
 			resp.HTML = render.HTML(display)
+			if req.Structured {
+				resp.Table = json.RawMessage(display.MimeBundle()[dataframe.TableMIME])
+			}
 			h, w := display.Shape()
-			shape := [2]int{h, w}
-			resp.Shape = &shape
+			resp.Shape = &[2]int{h, w}
 		}
 		if collected != nil {
 			collected.Release()
 		}
-	}
-
-	// When the cell ends with a display command (show/head/tail/...),
-	// the dispatcher already printed an ASCII table to stdout. The
-	// HTML auto-display would otherwise render the same data twice.
-	// Strip the trailing table block so the user sees one display.
-	if resp.HTML != "" && lastLineIsDisplayCommand(req.Code) {
-		resp.Text = stripTrailingTable(resp.Text)
 	}
 	return resp
 }

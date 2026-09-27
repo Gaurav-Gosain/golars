@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/internal/fileio"
 )
 
 // newDiffCmd prints a row-level diff between two data files. Without
@@ -26,22 +27,18 @@ func newDiffCmd() *cobra.Command {
 	cmd.ValidArgsFunction = dataFileCompletion
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
 		ctx := context.Background()
-		a, err := loadByExt(ctx, args[0])
+		a, err := fileio.Read(ctx, args[0])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer a.Release()
-		b, err := loadByExt(ctx, args[1])
+		b, err := fileio.Read(ctx, args[1])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
 		defer b.Release()
 		if !schemaEqual(a, b) {
-			fmt.Printf("%s schemas differ:\n  A: %s\n  B: %s\n",
-				errStyle.Render("FAIL"), a.Schema(), b.Schema())
-			return errSubcommandFailed
+			return fmt.Errorf("schemas differ:\n  A: %s\n  B: %s", a.Schema(), b.Schema())
 		}
 		var changed int
 		if keyCol != "" {
@@ -50,14 +47,12 @@ func newDiffCmd() *cobra.Command {
 			changed = diffPositional(a, b)
 		}
 		if err != nil {
-			fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-			return errSubcommandFailed
+			return err
 		}
-		// `diff` signals "rows differ" via exit code, same as diff(1)
-		// or git diff --exit-code. Bypass fang's error styling: the
-		// diff output on stdout already told the user what changed.
+		// Like diff(1), differences exit 1. The report above already
+		// said what changed, so no error message follows.
 		if changed > 0 {
-			os.Exit(1)
+			return errSilent
 		}
 		return nil
 	}

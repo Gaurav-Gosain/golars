@@ -152,10 +152,8 @@ func (k *kernel) handleComplete(msg message) {
 	prefix = strings.TrimPrefix(prefix, ".")
 
 	matches := []string{}
-	for _, c := range script.Commands {
-		if strings.HasPrefix(c.Name, prefix) {
-			matches = append(matches, dot+c.Name)
-		}
+	for _, name := range script.CompleteCommand(prefix) {
+		matches = append(matches, dot+name)
 	}
 
 	_ = k.send(k.shell, reply(msg, "complete_reply", map[string]any{
@@ -209,9 +207,13 @@ func (k *kernel) handleInspect(msg message) {
 	}
 	if spec := script.FindCommand(word); spec != nil {
 		content["found"] = true
+		plain := spec.Signature + "\n\n" + spec.Summary
+		if spec.LongDoc != "" {
+			plain += "\n\n" + spec.LongDoc
+		}
 		content["data"] = map[string]any{
-			"text/markdown": fmt.Sprintf("**`%s`** - %s\n\n%s", spec.Signature, spec.Summary, spec.LongDoc),
-			"text/plain":    fmt.Sprintf("%s\n\n%s\n\n%s", spec.Signature, spec.Summary, spec.LongDoc),
+			"text/markdown": spec.Markdown(),
+			"text/plain":    plain,
 		}
 	}
 	_ = k.send(k.shell, reply(msg, "inspect_reply", content))

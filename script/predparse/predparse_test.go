@@ -1,7 +1,6 @@
 package predparse
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -27,6 +26,8 @@ func TestParseSimple(t *testing.T) {
 		{`comment not_like "%URGENT%" and qty > 0`,
 			`(col("comment").str.not_like(%URGENT%) and (col("qty") > 0))`},
 		{"matches_vowel", `col("matches_vowel")`},
+		{"a > 5 AND b < 10", `((col("a") > 5) and (col("b") < 10))`},
+		{`  foo >= 1.5  and  bar == "hi there"  `, `((col("foo") >= 1.5) and (col("bar") == "hi there"))`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
@@ -54,21 +55,5 @@ func TestParseErrors(t *testing.T) {
 		if _, err := Parse(input); err == nil {
 			t.Errorf("expected error for %q", input)
 		}
-	}
-}
-
-func TestTokenizeEdgeCases(t *testing.T) {
-	t.Parallel()
-	toks, err := tokenize(`  foo >= 1.5  and  bar == "hi there"  `)
-	if err != nil {
-		t.Fatalf("tokenize: %v", err)
-	}
-	got := make([]string, len(toks))
-	for i, tk := range toks {
-		got[i] = tk.lex
-	}
-	want := []string{"foo", ">=", "1.5", "and", "bar", "==", "hi there"}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Errorf("tokens = %v, want %v", got, want)
 	}
 }

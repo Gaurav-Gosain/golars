@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +81,31 @@ func TestStashAndUseBranching(t *testing.T) {
 	}
 	if st.focus.rows != 2 {
 		t.Fatalf("use top: expected rows=2 from snapshot, got %d", st.focus.rows)
+	}
+}
+
+// The shape tracker follows expression selects, named aggregations,
+// windowed group-bys and asof joins.
+func TestShapeOfNewCommands(t *testing.T) {
+	st := &frameState{staged: map[string]frameShape{}}
+	apply := func(line string) { applyStmt(st, "", line) }
+	st.staged["rates"] = frameShape{cols: []string{"ts", "user", "rate", "amount"}, rows: 3}
+	st.focus = frameShape{cols: []string{"ts", "user", "amount"}, rows: 8}
+
+	apply("join_asof rates on ts by user tolerance 2h")
+	if got := strings.Join(st.focus.cols, ","); got != "ts,user,amount,rate,amount_right" || st.focus.rows != 8 {
+		t.Fatalf("join_asof: cols %s rows %d", got, st.focus.rows)
+	}
+	apply(`select ts, user, value = amount * rate, dt.year(ts)`)
+	if got := strings.Join(st.focus.cols, ","); got != "ts,user,value,ts" {
+		t.Fatalf("select: cols %s", got)
+	}
+	apply("group_by_dynamic ts every 1h by user value:sum:total n=len()")
+	if got := strings.Join(st.focus.cols, ","); got != "user,ts,total,n" {
+		t.Fatalf("group_by_dynamic: cols %s", got)
+	}
+	apply("groupby user total:max share=(total.sum() / 2)")
+	if got := strings.Join(st.focus.cols, ","); got != "user,total,share" {
+		t.Fatalf("groupby: cols %s", got)
 	}
 }
