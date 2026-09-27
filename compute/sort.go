@@ -269,6 +269,16 @@ func SortIndicesMulti(ctx context.Context, cols []*series.Series, opts []SortOpt
 		}
 	}
 
+	// Integer keys whose value ranges fit in one word with the row
+	// index: one direct radix sort of packed words.
+	if len(cols) > 1 && n > 1 {
+		if idx, ok, err := packedMultiKeySort(cols, opts, n, cfg); err != nil {
+			return nil, err
+		} else if ok {
+			return idx, nil
+		}
+	}
+
 	// Fast path: all int64 keys, all ascending, no nulls. Use arg-radix for
 	// each key in reverse order (stable: later sort preserves earlier tie
 	// order), which produces the lexicographic ordering.
