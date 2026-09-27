@@ -2,19 +2,11 @@
 
 // ARM64 NEON int64 -> float64 cast.
 //
-// SCVTF.2D does 2 lanes of int64->float64 in one instruction. We
-// unroll 4x so each iteration consumes 8 int64s (64 bytes) with 4
-// independent SCVTF chains; the extra ILP keeps the load/store
-// scheduler fed and improves bandwidth on M-series cores. Trailing
-// 1-7 elements run scalar via FMOVD + SCVTFD.
-//
-// SCVTF (vector) encoding for Vd.2D, Vn.2D:
-//     0x4E61D800 | (Rn << 5) | Rd
-// Values used in the 4-way block:
-//     scvtf v4.2d, v0.2d -> 0x4E61D804
-//     scvtf v5.2d, v1.2d -> 0x4E61D825
-//     scvtf v6.2d, v2.2d -> 0x4E61D846
-//     scvtf v7.2d, v3.2d -> 0x4E61D867
+// SCVTF.2D converts two lanes per instruction. Each iteration converts
+// 16 values with eight independent SCVTFs and post-increment loads and
+// stores, so the loop carries one counter. A 2-lane loop and a scalar
+// SCVTF finish the tail. SCVTF rounds to nearest even, the same as a
+// Go float64(int64) conversion.
 
 #include "textflag.h"
 
@@ -23,31 +15,37 @@ TEXT ·simdCastInt64ToFloat64NT(SB), NOSPLIT, $0-48
 	MOVD	out_base+0(FP), R0
 	MOVD	out_len+8(FP), R1
 	MOVD	src_base+24(FP), R2
-
-	AND	$-8, R1, R4		// loop limit (n &^ 7)
-	MOVD	ZR, R5
-	CBZ	R4, cast64_tail
-cast64_loop8:
-	VLD1	(R2), [V0.D2, V1.D2, V2.D2, V3.D2]	// 8 int64s
-	WORD	$0x4E61D804		// scvtf v4.2d, v0.2d
-	WORD	$0x4E61D825		// scvtf v5.2d, v1.2d
-	WORD	$0x4E61D846		// scvtf v6.2d, v2.2d
-	WORD	$0x4E61D867		// scvtf v7.2d, v3.2d
-	VST1	[V4.D2, V5.D2, V6.D2, V7.D2], (R0)	// 8 float64s
-	ADD	$64, R0, R0
-	ADD	$64, R2, R2
-	ADD	$8, R5, R5
-	CMP	R4, R5
-	BLT	cast64_loop8
-cast64_tail:
-	CMP	R1, R5
-	BGE	cast64_done
+	LSR	$4, R1, R3
+	CBZ	R3, cast64_pairs
+cast64_loop16:
+	VLD1.P	64(R2), [V16.D2, V17.D2, V18.D2, V19.D2]
+	VLD1.P	64(R2), [V20.D2, V21.D2, V22.D2, V23.D2]
+	VSCVTF	V16.D2, V16.D2
+	VSCVTF	V17.D2, V17.D2
+	VSCVTF	V18.D2, V18.D2
+	VSCVTF	V19.D2, V19.D2
+	VSCVTF	V20.D2, V20.D2
+	VSCVTF	V21.D2, V21.D2
+	VSCVTF	V22.D2, V22.D2
+	VSCVTF	V23.D2, V23.D2
+	VST1.P	[V16.D2, V17.D2, V18.D2, V19.D2], 64(R0)
+	VST1.P	[V20.D2, V21.D2, V22.D2, V23.D2], 64(R0)
+	SUBS	$1, R3, R3
+	BNE	cast64_loop16
+cast64_pairs:
+	AND	$15, R1, R1
+	LSR	$1, R1, R3
+	CBZ	R3, cast64_last
+cast64_loop2:
+	VLD1.P	16(R2), [V16.D2]
+	VSCVTF	V16.D2, V16.D2
+	VST1.P	[V16.D2], 16(R0)
+	SUBS	$1, R3, R3
+	BNE	cast64_loop2
+cast64_last:
+	TBZ	$0, R1, cast64_done
 	MOVD	(R2), R6
 	SCVTFD	R6, F0
 	FMOVD	F0, (R0)
-	ADD	$8, R0, R0
-	ADD	$8, R2, R2
-	ADD	$1, R5, R5
-	B	cast64_tail
 cast64_done:
 	RET

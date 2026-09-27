@@ -50,13 +50,12 @@ func SumInt64(ctx context.Context, s *series.Series, opts ...Option) (int64, err
 
 	par := inferParallelism(cfg, s.Len())
 	n := arr.Len()
-	// SIMD fast path for no-null int64. Gated at n<256K: above that the
-	// scalar path runs parallel partial sums across cores, which beats the
-	// serial-SIMD path because Sum becomes memory-bandwidth-bound and
-	// parallel sums saturate multiple memory controllers.
+	// SIMD fast path for no-null int64. Below sumSerialCutoff one core
+	// runs the SIMD kernel; above it the sum is memory-bandwidth-bound
+	// and parallel partial sums saturate more of the memory system.
 	if simdAvailable && s.DType().ID() == arrow.INT64 && arr.NullN() == 0 && hasSIMDInt64() {
 		vals := int64Values(arr)
-		if n < 256*1024 {
+		if n < sumSerialCutoff {
 			return simdSumInt64(vals), nil
 		}
 		// Parallel SIMD: each worker SIMD-reduces a partition.
@@ -91,8 +90,7 @@ func SumFloat64(ctx context.Context, s *series.Series, opts ...Option) (float64,
 	n := arr.Len()
 	if simdAvailable && s.DType().ID() == arrow.FLOAT64 && arr.NullN() == 0 && hasSIMDInt64() {
 		vals := float64Values(arr)
-		if n < 256*1024 {
-			// Single-threaded SIMD reduction wins up to 256K.
+		if n < sumSerialCutoff {
 			return simdSumFloat64(vals), nil
 		}
 		// Parallel SIMD: each worker runs simdSumFloat64 on its partition.
@@ -271,22 +269,61 @@ func partialSumsWithNulls[T int32 | int64 | uint32 | uint64 | float32 | float64]
 
 	parts := make([]T, par)
 	chunk := (n + par - 1) / par
+	bits := arr.NullBitmapBytes()
+	off := arr.Data().Offset()
 	err := pool.ParallelFor(ctx, par, par, func(ctx context.Context, start, end int) error {
 		for w := start; w < end; w++ {
 			s := w * chunk
-			e := s + chunk
-			e = min(e, n)
-			var local T
-			for i := s; i < e; i++ {
-				if arr.IsValid(i) {
-					local += vals[i]
-				}
+			e := min(s+chunk, n)
+			if s < e {
+				parts[w] = maskedSum(vals, bits, off, s, e)
 			}
-			parts[w] = local
 		}
 		return nil
 	})
 	return parts, err
+}
+
+// maskedSum adds vals[i] for every i in [s, e) whose validity bit
+// (bit i+off of bits) is set, in index order. It reads the bitmap a
+// byte at a time so all-valid and all-null bytes skip the per-row
+// test, instead of calling arrow's IsValid through an interface for
+// every row.
+func maskedSum[T int32 | int64 | uint32 | uint64 | float32 | float64](vals []T, bits []byte, off, s, e int) T {
+	var total T
+	i := s
+	for ; i < e && (i+off)&7 != 0; i++ {
+		if bits[(i+off)>>3]&(1<<((i+off)&7)) != 0 {
+			total += vals[i]
+		}
+	}
+	for ; i+8 <= e; i += 8 {
+		v := vals[i : i+8 : i+8]
+		switch b := bits[(i+off)>>3]; b {
+		case 0xFF:
+			total += v[0]
+			total += v[1]
+			total += v[2]
+			total += v[3]
+			total += v[4]
+			total += v[5]
+			total += v[6]
+			total += v[7]
+		case 0:
+		default:
+			for j := range 8 {
+				if b&(1<<j) != 0 {
+					total += v[j]
+				}
+			}
+		}
+	}
+	for ; i < e; i++ {
+		if bits[(i+off)>>3]&(1<<((i+off)&7)) != 0 {
+			total += vals[i]
+		}
+	}
+	return total
 }
 
 // MeanFloat64 returns the arithmetic mean of non-null values. Returns
@@ -369,7 +406,10 @@ func minMaxFloat(ctx context.Context, s *series.Series, opts []Option, isMax boo
 		// SIMD path: no-null inputs take the AVX2/AVX-512 MINPD/MAXPD
 		// reduction per worker. Worker-local NaN scan runs in a prepass
 		// so the hot path is pure SIMD.
-		if simdAvailable && hasSIMDInt64() && arr.NullN() == 0 && n >= minParallelRows {
+		if simdAvailable && hasSIMDInt64() && arr.NullN() == 0 {
+			if n < minMaxSerialCutoff {
+				par = 1
+			}
 			return reduceFloat64SIMD(ctx, float64Values(arr), par, n, isMax)
 		}
 		return reduceFloatChunks(ctx, arr, float64Values(arr), par, n, isMax)
@@ -384,7 +424,7 @@ func reduceIntChunks[T int32 | int64](
 	ctx context.Context, arr arrow.Array, vals []T, par, n int, isMax bool,
 ) (T, bool, error) {
 	par = max(min(cappedReductionWorkers(par), n), 1)
-	if n < minParallelRows {
+	if n < minMaxSerialCutoff {
 		par = 1
 	}
 
@@ -395,6 +435,7 @@ func reduceIntChunks[T int32 | int64](
 	parts := make([]result, par)
 	chunk := (n + par - 1) / par
 	noNulls := arr.NullN() == 0
+	i64, isInt64 := any(vals).([]int64)
 
 	err := pool.ParallelFor(ctx, par, par, func(ctx context.Context, start, end int) error {
 		for w := start; w < end; w++ {
@@ -405,6 +446,12 @@ func reduceIntChunks[T int32 | int64](
 				continue
 			}
 			var r result
+			if noNulls && isInt64 {
+				r.val = T(minMaxInt64Kernel(i64[s:e], isMax))
+				r.ok = true
+				parts[w] = r
+				continue
+			}
 			if noNulls {
 				r.val = vals[s]
 				r.ok = true

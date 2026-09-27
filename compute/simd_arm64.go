@@ -2,10 +2,13 @@
 
 package compute
 
+import "unsafe"
+
 // simd_arm64.go is the entry point for ARM64 builds (Apple Silicon,
 // AWS Graviton, Ampere, Raspberry Pi 5, ...). NEON is baseline on
 // AArch64 so we don't gate on CPU features or GOEXPERIMENT; every
-// kernel ships hand-rolled Plan 9 asm in simd_arm64.s.
+// kernel ships hand-written Plan 9 asm in simd_arm64.s and
+// reduce_arm64.s.
 //
 // Build-tag layout:
 //
@@ -16,11 +19,10 @@ package compute
 // -tags noasm falls every target through to simd_fallback.go; useful
 // when bisecting a codegen bug.
 //
-// Each Go-level simdXxx function here is a thin dispatcher: for tiny
-// inputs where vector setup would dominate, it runs a scalar loop;
-// for larger inputs it calls into the NEON assembly kernel and (for
-// kernels that return a processed-count) lets the caller pick up any
-// ragged tail.
+// Each Go-level simdXxx function here is a thin dispatcher: tiny
+// inputs run a scalar loop, larger ones call the NEON kernel, and the
+// dispatcher (or its caller, for kernels that return a count) finishes
+// the ragged tail.
 
 const simdAvailable = true
 
@@ -28,44 +30,42 @@ const simdAvailable = true
 // NEON. NEON is mandatory on AArch64 so this is always true.
 func hasSIMDInt64() bool { return true }
 
-// --- Assembly stubs (implementations in simd_arm64.s) -------------
+// --- Assembly stubs ----------------------------------------------
 
-// Reductions.
+// Reductions (reduce_arm64.s).
 func simdSumInt64NEON(a []int64) int64
 func simdSumFloat64NEON(a []float64) float64
 func simdMinFloat64NEON(vals []float64) (best float64, hasNaN bool)
 func simdMaxFloat64NEON(vals []float64) (best float64, hasNaN bool)
+func simdMinInt64NEON(vals []int64) int64
+func simdMaxInt64NEON(vals []int64) int64
 
-// Vector binary ops (slice + slice + out). Process full-multiple-of-4
-// chunks via 2-lane × 2-way unroll; caller handles ragged tail.
-func simdAddInt64NEON(a, b, out []int64) int
-func simdAddFloat64NEON(a, b, out []float64) int
+// Elementwise arithmetic (simd_arm64.s). Each returns the number of
+// leading elements it wrote. The op codes are the arithOp values.
+func neonBinInt64(a, b, out []int64, op int) int
+func neonBinFloat64(a, b, out []float64, op int) int
+func neonLitInt64(src []int64, lit int64, out []int64, op int) int
+func neonLitFloat64(src []float64, lit float64, out []float64, op int) int
 
-// Vector + scalar literal (returns count of elements processed).
-func simdAddLitInt64NEON(src []int64, lit int64, out []int64) int
-func simdSubLitInt64NEON(src []int64, lit int64, out []int64) int
-func simdAddLitFloat64NEON(src []float64, lit float64, out []float64) int
-func simdSubLitFloat64NEON(src []float64, lit float64, out []float64) int
-func simdMulLitFloat64NEON(src []float64, lit float64, out []float64) int
-func simdDivLitFloat64NEON(src []float64, lit float64, out []float64) int
+// Compares into a packed bitmap, 16 rows (two bytes) per step.
+func neonCmpInt64(a, b []int64, bits []byte, kind, invert int) int
+func neonCmpFloat64(a, b []float64, bits []byte, kind, invert int) int
+func neonCmpInt64Lit(a []int64, lit int64, bits []byte, kind, invert int) int
+func neonCmpFloat64Lit(a []float64, lit float64, bits []byte, kind, invert int) int
 
-// Comparisons produce a packed bitmap (1 bit per element). Process
-// chunks of 8 -> 1 byte. op encodes {Eq=0, Ne=1, Lt=2, Le=3, Gt=4, Ge=5}.
-func simdCompareInt64NEON(av, bv []int64, bits []byte, op compareOp) int
-func simdCompareInt64LitNEON(av []int64, lit int64, bits []byte, op compareOp) int
-func simdCompareFloat64NEON(av, bv []float64, bits []byte, op compareOp) int
-func simdCompareFloat64LitNEON(av []float64, lit float64, bits []byte, op compareOp) int
+// Bitmap-driven select of raw 64-bit lanes, 8 rows per step.
+func neonBlend64(condBits []byte, aVals, bVals, out []uint64) int
 
-// Blends: pick from aVals where the bit is 1, bVals where 0.
-func simdBlendInt64NEON(condBits []byte, aVals, bVals, out []int64)
-func simdBlendFloat64NEON(condBits []byte, aVals, bVals, out []float64)
+// Compare kinds understood by the neonCmp kernels.
+const (
+	neonCmpGt   = 0 // x > y
+	neonCmpGe   = 1 // x >= y
+	neonCmpEq   = 2 // x == y
+	neonCmpLtRv = 3 // literal kernels only: lit > x
+	neonCmpLeRv = 4 // literal kernels only: lit >= x
+)
 
-// --- Go dispatchers ----------------------------------------------
-//
-// Each dispatcher handles the scalar crossover point, the ragged
-// tail (for kernels that return a count), and passes through to
-// the asm. Break-even thresholds are conservative; the NEON setup
-// cost is dominated by horizontal-fold epilogues for reductions.
+// --- Reductions ---------------------------------------------------
 
 func simdSumInt64(a []int64) int64 {
 	if len(a) < 16 {
@@ -125,135 +125,162 @@ func simdMaxFloat64(vals []float64) (float64, bool) {
 	return simdMaxFloat64NEON(vals)
 }
 
-// simdCompareInt64 / simdCompareFloat64 return the count of elements
-// that reached the SIMD path (a multiple of 8). Caller's scalar loop
-// handles the tail.
+// --- Compares -----------------------------------------------------
+//
+// The dispatchers return how many leading rows they wrote (a multiple
+// of 16); callers finish the tail byte by byte. Lt and Le swap the
+// operands, Ne inverts Eq. For integer literals, Lt and Le invert Ge
+// and Gt, which is exact for totally ordered values.
+
 func simdCompareInt64(av, bv []int64, bits []byte, op compareOp) int {
 	if len(av) < 16 {
 		return 0
 	}
-	return simdCompareInt64NEON(av, bv, bits, op)
+	switch op {
+	case opEq:
+		return neonCmpInt64(av, bv, bits, neonCmpEq, 0)
+	case opNe:
+		return neonCmpInt64(av, bv, bits, neonCmpEq, -1)
+	case opLt:
+		return neonCmpInt64(bv, av, bits, neonCmpGt, 0)
+	case opLe:
+		return neonCmpInt64(bv, av, bits, neonCmpGe, 0)
+	case opGt:
+		return neonCmpInt64(av, bv, bits, neonCmpGt, 0)
+	case opGe:
+		return neonCmpInt64(av, bv, bits, neonCmpGe, 0)
+	}
+	return 0
 }
 
+// simdCompareFloat64 uses IEEE compares: a NaN operand makes every op
+// false except Ne. Lt and Le swap operands rather than invert, which
+// keeps NaN rows false.
 func simdCompareFloat64(av, bv []float64, bits []byte, op compareOp) int {
 	if len(av) < 16 {
 		return 0
 	}
-	return simdCompareFloat64NEON(av, bv, bits, op)
+	switch op {
+	case opEq:
+		return neonCmpFloat64(av, bv, bits, neonCmpEq, 0)
+	case opNe:
+		return neonCmpFloat64(av, bv, bits, neonCmpEq, -1)
+	case opLt:
+		return neonCmpFloat64(bv, av, bits, neonCmpGt, 0)
+	case opLe:
+		return neonCmpFloat64(bv, av, bits, neonCmpGe, 0)
+	case opGt:
+		return neonCmpFloat64(av, bv, bits, neonCmpGt, 0)
+	case opGe:
+		return neonCmpFloat64(av, bv, bits, neonCmpGe, 0)
+	}
+	return 0
 }
 
 func simdCompareInt64Lit(av []int64, lit int64, bits []byte, op compareOp) int {
 	if len(av) < 16 {
 		return 0
 	}
-	return simdCompareInt64LitNEON(av, lit, bits, op)
+	switch op {
+	case opEq:
+		return neonCmpInt64Lit(av, lit, bits, neonCmpEq, 0)
+	case opNe:
+		return neonCmpInt64Lit(av, lit, bits, neonCmpEq, -1)
+	case opLt:
+		return neonCmpInt64Lit(av, lit, bits, neonCmpGe, -1)
+	case opLe:
+		return neonCmpInt64Lit(av, lit, bits, neonCmpGt, -1)
+	case opGt:
+		return neonCmpInt64Lit(av, lit, bits, neonCmpGt, 0)
+	case opGe:
+		return neonCmpInt64Lit(av, lit, bits, neonCmpGe, 0)
+	}
+	return 0
 }
 
 func simdCompareFloat64Lit(av []float64, lit float64, bits []byte, op compareOp) int {
 	if len(av) < 16 {
 		return 0
 	}
-	return simdCompareFloat64LitNEON(av, lit, bits, op)
+	switch op {
+	case opEq:
+		return neonCmpFloat64Lit(av, lit, bits, neonCmpEq, 0)
+	case opNe:
+		return neonCmpFloat64Lit(av, lit, bits, neonCmpEq, -1)
+	case opLt:
+		return neonCmpFloat64Lit(av, lit, bits, neonCmpLtRv, 0)
+	case opLe:
+		return neonCmpFloat64Lit(av, lit, bits, neonCmpLeRv, 0)
+	case opGt:
+		return neonCmpFloat64Lit(av, lit, bits, neonCmpGt, 0)
+	case opGe:
+		return neonCmpFloat64Lit(av, lit, bits, neonCmpGe, 0)
+	}
+	return 0
 }
 
+// --- Arithmetic with a literal -------------------------------------
+
 func simdAddLitInt64(src []int64, lit int64, out []int64) int {
-	if len(src) < 8 {
-		return 0
-	}
-	return simdAddLitInt64NEON(src, lit, out)
+	return neonLitInt64(src, lit, out, int(opAdd))
 }
 
 func simdSubLitInt64(src []int64, lit int64, out []int64) int {
-	if len(src) < 8 {
-		return 0
-	}
-	return simdSubLitInt64NEON(src, lit, out)
+	return neonLitInt64(src, lit, out, int(opSub))
 }
 
 func simdAddLitFloat64(src []float64, lit float64, out []float64) int {
-	if len(src) < 8 {
-		return 0
-	}
-	return simdAddLitFloat64NEON(src, lit, out)
+	return neonLitFloat64(src, lit, out, int(opAdd))
 }
 
 func simdSubLitFloat64(src []float64, lit float64, out []float64) int {
-	if len(src) < 8 {
-		return 0
-	}
-	return simdSubLitFloat64NEON(src, lit, out)
+	return neonLitFloat64(src, lit, out, int(opSub))
 }
 
 func simdMulLitFloat64(src []float64, lit float64, out []float64) int {
-	if len(src) < 8 {
-		return 0
-	}
-	return simdMulLitFloat64NEON(src, lit, out)
+	return neonLitFloat64(src, lit, out, int(opMul))
 }
 
 func simdDivLitFloat64(src []float64, lit float64, out []float64) int {
-	if len(src) < 8 {
-		return 0
-	}
-	return simdDivLitFloat64NEON(src, lit, out)
+	return neonLitFloat64(src, lit, out, int(opDiv))
 }
 
-// simdBlendInt64 / simdBlendFloat64 cover the full length because the
-// caller doesn't participate in a tail loop: the NEON kernel handles
-// any partial trailing chunk scalar-style.
+// --- Blends -------------------------------------------------------
+
+// simdBlendInt64 / simdBlendFloat64 cover the full length.
 func simdBlendInt64(condBits []byte, aVals, bVals, out []int64) {
-	if len(out) < 8 {
-		for i := range len(out) {
-			bit := int64(condBits[i>>3]>>uint(i&7)) & 1
-			mask := -bit
-			out[i] = bVals[i] ^ ((aVals[i] ^ bVals[i]) & mask)
-		}
-		return
+	i := neonBlend64(condBits, asUint64s(aVals), asUint64s(bVals), asUint64s(out))
+	for ; i < len(out); i++ {
+		bit := int64(condBits[i>>3]>>uint(i&7)) & 1
+		mask := -bit
+		out[i] = bVals[i] ^ ((aVals[i] ^ bVals[i]) & mask)
 	}
-	simdBlendInt64NEON(condBits, aVals, bVals, out)
 }
 
 func simdBlendFloat64(condBits []byte, aVals, bVals, out []float64) {
-	if len(out) < 8 {
-		for i := range len(out) {
-			if condBits[i>>3]&(1<<(i&7)) != 0 {
-				out[i] = aVals[i]
-			} else {
-				out[i] = bVals[i]
-			}
+	i := neonBlend64(condBits, asUint64s(aVals), asUint64s(bVals), asUint64s(out))
+	for ; i < len(out); i++ {
+		if condBits[i>>3]&(1<<(i&7)) != 0 {
+			out[i] = aVals[i]
+		} else {
+			out[i] = bVals[i]
 		}
-		return
-	}
-	simdBlendFloat64NEON(condBits, aVals, bVals, out)
-}
-
-// simdAddInt64 and simdAddFloat64 are declared in the amd64 file but
-// not actually called from any kernel outside tests. Keep a minimal
-// scalar dispatcher here for symmetry.
-func simdAddInt64(a, b, out []int64) {
-	n := len(out)
-	if n >= 16 {
-		i := simdAddInt64NEON(a, b, out)
-		for ; i < n; i++ {
-			out[i] = a[i] + b[i]
-		}
-		return
-	}
-	for i := range n {
-		out[i] = a[i] + b[i]
 	}
 }
 
-func simdAddFloat64(a, b, out []float64) {
-	n := len(out)
-	if n >= 16 {
-		i := simdAddFloat64NEON(a, b, out)
-		for ; i < n; i++ {
-			out[i] = a[i] + b[i]
-		}
-		return
+// asUint64s reinterprets a slice of 64-bit values as []uint64 for the
+// type-agnostic blend kernel.
+func asUint64s[T int64 | float64](s []T) []uint64 {
+	if len(s) == 0 {
+		return nil
 	}
-	for i := range n {
-		out[i] = a[i] + b[i]
-	}
+	return unsafe.Slice((*uint64)(unsafe.Pointer(&s[0])), len(s))
 }
+
+// --- Vector with vector --------------------------------------------
+
+// simdAddInt64 and simdAddFloat64 mirror the amd64 dispatchers; the
+// kernels in arith.go go through vecBinInt64 / vecBinFloat64.
+func simdAddInt64(a, b, out []int64) { vecBinInt64(out, a, b, opAdd) }
+
+func simdAddFloat64(a, b, out []float64) { vecBinFloat64(out, a, b, opAdd) }
