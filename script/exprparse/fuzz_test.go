@@ -51,7 +51,7 @@ var exprSeeds = []string{
 // FuzzParse checks that no input panics the parser or the compiler,
 // that errors point inside the input, and that compile errors are
 // never internal.
-func FuzzParse(f *testing.F) {
+func FuzzParseErrorSpans(f *testing.F) {
 	for _, s := range exprSeeds {
 		f.Add(s)
 	}
