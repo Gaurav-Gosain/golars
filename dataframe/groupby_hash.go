@@ -10,6 +10,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/internal/intmap"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -429,23 +430,22 @@ func assignGroupsString(arr *array.String, name string, mem memory.Allocator) ([
 	}
 	int32Scratch.put(kc.codes)
 
-	uniqueKeys := make([]string, len(kc.firstRows))
-	var valid []bool
-	for g, r := range kc.firstRows {
-		if arr.IsNull(int(r)) {
-			if valid == nil {
-				valid = make([]bool, len(uniqueKeys))
-				for j := range valid {
-					valid[j] = true
-				}
-			}
-			valid[g] = false
-			continue
-		}
-		uniqueKeys[g] = arr.Value(int(r))
+	// Gather the key column straight from the first rows (nulls carry
+	// over from the source) instead of building a []string first.
+	arr.Retain()
+	src, err := series.New(name, arr)
+	if err != nil {
+		arr.Release()
+		intScratch.put(groupIDs)
+		return nil, 0, nil, err
 	}
-	keyOut, err := series.FromString(name, uniqueKeys, valid, series.WithAllocator(mem))
-	return groupIDs, len(uniqueKeys), keyOut, err
+	defer src.Release()
+	var opts []compute.Option
+	if mem != nil {
+		opts = append(opts, compute.WithAllocator(mem))
+	}
+	keyOut, err := compute.TakeInt32(context.Background(), src, kc.firstRows, opts...)
+	return groupIDs, len(kc.firstRows), keyOut, err
 }
 
 func assignGroupsBool(arr *array.Boolean, name string, mem memory.Allocator) ([]int, int, *series.Series, error) {
