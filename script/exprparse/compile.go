@@ -360,11 +360,23 @@ func invoke(fn reflect.Value, display, goCall string, args []*node, kw []kwarg, 
 
 	callArgs := in
 	callSrcs := srcs
-	if variadic {
+	var out []reflect.Value
+	switch {
+	case variadic && len(varVals) == 0:
+		// reflect.Call would pass an empty, non-nil slice. Pass nil so
+		// the callee sees the same value as a Go call with no variadic
+		// arguments (str.strip_chars() strips whitespace, while an
+		// explicit empty set strips nothing).
+		callArgs = append(in[:nIn-1:nIn-1], reflect.Zero(t.In(nIn-1)))
+		callSrcs = srcs[:nIn-1]
+		out = fn.CallSlice(callArgs)
+	case variadic:
 		callArgs = append(in[:nIn-1:nIn-1], varVals...)
 		callSrcs = append(srcs[:nIn-1:nIn-1], varSrcs...)
+		out = fn.Call(callArgs)
+	default:
+		out = fn.Call(callArgs)
 	}
-	out := fn.Call(callArgs)
 	if len(out) != 1 || out[0].Type() != exprType {
 		return val{}, fmt.Errorf("internal: %s does not return an expression", display)
 	}
