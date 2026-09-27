@@ -103,7 +103,9 @@ pre-existing SA6002 sync.Pool findings.
   polars-style default arguments, aliases, or a signature that needs a
   custom builder, and to `freeFuncs` for a new top-level function.
 - **Add a scripting command**: add a `CommandSpec` in
-  `script/spec.go` (aliases go in its `Aliases` field), register a
+  `script/spec.go` (aliases go in its `Aliases` field, the argument
+  pattern in `Grammar`, which drives the statement parser, lint, fmt
+  and editor completion in `script/syntax`), register a
   handler in the `handlers` table in `cmd/golars/dispatch.go` and
   implement it in the matching `cmd/golars/cmds_<category>.go`. The
   REPL help and completion, the LSP and the Jupyter kernel read the

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Gaurav-Gosain/golars/script"
 )
 
 func exampleScripts(t testing.TB) map[string]string {
@@ -54,6 +56,20 @@ func TestExamplesParseClean(t *testing.T) {
 		for _, st := range f.Stmts {
 			for _, d := range st.Diags {
 				t.Error(Render(fmt.Sprintf("docs snippet %d", i), f.Lines, d))
+			}
+		}
+	}
+}
+
+// Every example in script.Commands parses against its own grammar.
+func TestSpecExamplesParse(t *testing.T) {
+	for _, spec := range script.Commands {
+		for _, ex := range spec.Examples {
+			f := Parse(ex)
+			for _, st := range f.Stmts {
+				for _, d := range st.Diags {
+					t.Errorf("%s example %q: %s", spec.Name, ex, d.Msg)
+				}
 			}
 		}
 	}
