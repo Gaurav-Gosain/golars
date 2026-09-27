@@ -32,6 +32,9 @@ Useful flags:
   run is reproducible).
 - `-workers`: parallel workers, each with its own long-lived polars
   process (default 6). About 500 to 1000 cases per second.
+- `-ops join`: keep only cases whose plan uses one of these ops (comma
+  separated), for example to exercise joins alone. Seeds that do not
+  qualify are skipped, so `-n` still counts kept cases.
 - `-show kinds`: print shrunk examples only for these verdict kinds,
   for example `golars_panic,value,schema,height,missing_error`.
 - `-max-shrink`: shrink this many cases per signature (value, schema
@@ -69,7 +72,7 @@ against the oracle.
 | value, schema, height | results differ |
 | missing_error | polars raised, golars returned a result |
 | golars_error | polars succeeded, golars returned an error (mostly unsupported dtype and feature gaps) |
-| unsupported | golars cannot express the plan (glr has no spelling, or the join type is missing) |
+| unsupported | golars cannot express the plan (glr has no spelling for an expression) |
 | polars_panic | polars itself panicked; ignored |
 | harness | the harness failed to build or write the case |
 
@@ -82,7 +85,9 @@ against the oracle.
   tolerance of 1e-9 (f64) or 1e-5 (f32) with a small absolute floor,
   because summation order differs between the engines.
 - Row order: exact where polars guarantees it. After a group_by
-  without `maintain_order` or a hash join, rows compare as a multiset.
+  without `maintain_order` or a join without a `maintain_order` that
+  fixes the order (`left_right`, `right_left`), rows compare as a
+  multiset.
   After sorting an unordered frame, the sort keys must match in order
   and whole rows as a multiset; a slice of that compares only the
   keys; a slice of an unordered frame compares only the height. The
@@ -97,8 +102,6 @@ against the oracle.
   `str.count_matches` and `str.find` are literal; polars defaults to
   regex. The harness maps polars `literal=True` to the glr form and
   counts regex forms without a glr spelling as unsupported.
-- golars supports only inner, left, cross and asof joins (no full,
-  semi or anti).
 
 ## Known open bug classes
 

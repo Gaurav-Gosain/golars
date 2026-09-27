@@ -73,11 +73,18 @@ func DeriveOrder(ops []Op) Order {
 				o = Order{Mode: OrderUnordered}
 			}
 		case "sort":
-			if o.Mode != OrderExact {
+			switch o.Mode {
+			case OrderCountOnly, OrderKeysOnly:
+				// The rows were an arbitrary subset; sorting them
+				// does not make their values comparable.
+				o = Order{Mode: OrderCountOnly}
+			case OrderUnordered, OrderSorted:
 				o = Order{Mode: OrderSorted, Keys: slices.Clone(op.Keys)}
 			}
 		case "join":
-			o = Order{Mode: OrderUnordered}
+			if o.Mode != OrderCountOnly && !(o.Mode == OrderExact && JoinKeepsOrder(op)) {
+				o = Order{Mode: OrderUnordered}
+			}
 		case "slice", "head", "tail":
 			switch o.Mode {
 			case OrderSorted:
@@ -86,7 +93,7 @@ func DeriveOrder(ops []Op) Order {
 				o.Mode = OrderCountOnly
 			}
 		case "unpivot":
-			if o.Mode != OrderExact {
+			if o.Mode != OrderExact && o.Mode != OrderCountOnly {
 				o = Order{Mode: OrderUnordered}
 			}
 		}

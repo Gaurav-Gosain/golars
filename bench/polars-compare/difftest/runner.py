@@ -148,8 +148,24 @@ def apply_op(lf: pl.LazyFrame, op, right):
     if name == "join":
         how = op["how"]
         if how == "cross":
-            return lf.join(right, how="cross")
-        return lf.join(right, on=keys, how=how)
+            return lf.join(right, how="cross", suffix=op.get("suffix") or "_right")
+        kw = {"how": how}
+        if op.get("right_on"):
+            kw["left_on"] = keys
+            kw["right_on"] = op["right_on"]
+        else:
+            kw["on"] = keys
+        if op.get("coalesce"):
+            kw["coalesce"] = op["coalesce"] == "true"
+        if op.get("nulls_equal"):
+            kw["nulls_equal"] = True
+        if op.get("validate"):
+            kw["validate"] = op["validate"]
+        if op.get("join_order"):
+            kw["maintain_order"] = op["join_order"]
+        if op.get("suffix"):
+            kw["suffix"] = op["suffix"]
+        return lf.join(right, **kw)
     if name == "join_asof":
         return lf.join_asof(
             right,

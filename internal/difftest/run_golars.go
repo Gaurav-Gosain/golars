@@ -121,16 +121,7 @@ func applyOp(lf lazy.LazyFrame, op Op, right *dataframe.DataFrame) (lazy.LazyFra
 		if right == nil {
 			return lf, errors.New("difftest: join without right frame")
 		}
-		rl := lazy.FromDataFrame(right.Clone())
-		switch op.How {
-		case "inner":
-			return lf.Join(rl, op.Keys, dataframe.InnerJoin), nil
-		case "left":
-			return lf.Join(rl, op.Keys, dataframe.LeftJoin), nil
-		case "cross":
-			return lf.Join(rl, nil, dataframe.CrossJoin), nil
-		}
-		return lf, fmt.Errorf("%w: join how=%s", ErrUnsupported, op.How)
+		return golarsJoin(lf, lazy.FromDataFrame(right.Clone()), op)
 	case "join_asof":
 		rl := lazy.FromDataFrame(right.Clone())
 		o := dataframe.AsofOptions{On: op.Keys[0], By: op.By}

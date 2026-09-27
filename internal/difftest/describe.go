@@ -36,7 +36,7 @@ func (op Op) Describe() string {
 	case "sort":
 		return fmt.Sprintf(".sort(%q, descending=%v, nulls_last=%v)", op.Keys, op.Desc, op.NullsLast)
 	case "join":
-		return fmt.Sprintf(".join(right, on=%q, how=%q)", op.Keys, op.How)
+		return describeJoin(op)
 	case "join_asof":
 		return fmt.Sprintf(".join_asof(right, on=%q, by=%q, strategy=%q)", op.Keys, op.By, op.Strategy)
 	case "unique":

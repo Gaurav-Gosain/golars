@@ -63,6 +63,14 @@ type Op struct {
 	Values    string   `json:"values,omitempty"`
 	Agg       string   `json:"agg,omitempty"`
 	OnValues  []any    `json:"on_values,omitempty"`
+	// Join options. RightOn is empty when both sides use Keys. Coalesce
+	// is "", "true" or "false" (unset means the polars default).
+	RightOn    []string `json:"right_on,omitempty"`
+	Suffix     string   `json:"suffix,omitempty"`
+	Coalesce   string   `json:"coalesce,omitempty"`
+	NullsEqual bool     `json:"nulls_equal,omitempty"`
+	Validate   string   `json:"validate,omitempty"`
+	JoinOrder  string   `json:"join_order,omitempty"`
 	// ResetsOrder marks a select whose result is one row or a single
 	// deterministic length-changing expression.
 	ResetsOrder bool `json:"resets_order,omitempty"`

@@ -167,6 +167,11 @@ func simpler(t Type, v any) (any, bool) {
 	return nil, false
 }
 
+// PlanUsesOp reports whether any op of p is one of ops.
+func PlanUsesOp(p *Plan, ops []string) bool {
+	return slices.ContainsFunc(p.Ops, func(op Op) bool { return slices.Contains(ops, op.Op) })
+}
+
 func planUsesJoin(p *Plan) bool {
 	return slices.ContainsFunc(p.Ops, func(op Op) bool { return op.Op == "join" || op.Op == "join_asof" })
 }

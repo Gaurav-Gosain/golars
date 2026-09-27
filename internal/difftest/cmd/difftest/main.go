@@ -32,6 +32,7 @@ func main() {
 		promote  = flag.String("promote", "", "re-check the regression files in this directory and mark passing ones fixed")
 		emitName = flag.String("emit-name", "", "file name (without .json) for the regression file written in replay mode")
 		litTrees = flag.Float64("literal-trees", difftest.LiteralTrees, "probability of keeping column-free subexpressions")
+		opsOnly  = flag.String("ops", "", "comma separated plan ops (for example join); keep only cases whose plan uses one of them")
 	)
 	flag.Parse()
 	difftest.LiteralTrees = *litTrees
@@ -109,9 +110,12 @@ func main() {
 		}
 		return
 	}
-	seeds := make([]uint64, *n)
-	for i := range seeds {
-		seeds[i] = *seed + uint64(i)
+	seeds := make([]uint64, 0, *n)
+	for s := *seed; len(seeds) < *n; s++ {
+		if *opsOnly != "" && !difftest.PlanUsesOp(difftest.NewCase(s).Plan, strings.Split(*opsOnly, ",")) {
+			continue
+		}
+		seeds = append(seeds, s)
 	}
 	if *only != "" {
 		var s uint64
