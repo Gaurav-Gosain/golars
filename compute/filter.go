@@ -295,7 +295,7 @@ const takeParallelCutoff = 64 * 1024
 // parallelGather runs gatherInto over chunks of indices in parallel for
 // large outputs. A panic in a worker (out-of-range index) is re-raised
 // on the calling goroutine so Take's recover still sees it.
-func parallelGather[T any](out, src []T, indices []int) {
+func parallelGather[T gatherElem](out, src []T, indices []int) {
 	n := len(indices)
 	if n < takeParallelCutoff {
 		gatherInto(out, src, indices)
