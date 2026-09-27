@@ -326,6 +326,12 @@ func (PredicatePushdownPass) Apply(plan Node) (Node, bool, error) {
 		case SliceNode:
 			// Filter before Slice changes semantics: don't push.
 			return n, false, nil
+		case Filter:
+			out, did := mergeFilters(filter, inner)
+			return out, did, nil
+		case Join:
+			out, did := pushFilterIntoJoin(filter, inner)
+			return out, did, nil
 		}
 		return n, false, nil
 	})
@@ -468,6 +474,20 @@ func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, 
 			return node, false
 		}
 		return Rename{Input: newChild, Old: node.Old, New: node.New}, true
+	case Join:
+		if needed == nil {
+			break
+		}
+		leftNeed, rightNeed, ok := joinChildNeeds(node, needed)
+		if !ok {
+			break
+		}
+		newLeft, lc := p.push(node.Left, leftNeed)
+		newRight, rc := p.push(node.Right, rightNeed)
+		if !lc && !rc {
+			return node, false
+		}
+		return node.WithChildren([]Node{newLeft, newRight}), true
 	case Drop:
 		// Dropped columns are not needed anyway.
 		newChild, changed := p.push(node.Input, needed)

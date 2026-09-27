@@ -34,6 +34,7 @@ func main() {
 		outPath     = flag.String("out", "bench/pds-h/output/timings.csv", "csv path (appended)")
 		printOutput = flag.Bool("print", false, "print the result frame after each query (slow on large SFs)")
 		cpuProfile  = flag.String("cpuprofile", "", "write a CPU profile covering all runs to this file")
+		explain     = flag.Bool("explain", false, "print the logical and optimized plan of each query and exit")
 		dumpDir     = flag.String("dump", "", "write each query result to DIR/q<N>.parquet (for answer checks)")
 	)
 	flag.Parse()
@@ -70,6 +71,20 @@ func main() {
 	defer csv.Close()
 
 	ctx := context.Background()
+	if *explain {
+		for _, id := range ids {
+			fn, err := queries.Get(id)
+			if err != nil {
+				fatalf("q%d: %v", id, err)
+			}
+			lf, err := fn(*dataDir)
+			if err != nil {
+				fatalf("q%d: %v", id, err)
+			}
+			fmt.Printf("-- q%d\n%s\n", id, lf.ExplainString())
+		}
+		return
+	}
 	for _, id := range ids {
 		fn, err := queries.Get(id)
 		if err != nil {
@@ -100,7 +115,7 @@ func runOne(ctx context.Context, id, rep int, fn queries.QueryFn, dataDir, sf st
 	defer df.Release()
 
 	fmt.Printf("q%-2d  rep=%d  %s  %d×%d\n", id, rep,
-		elapsed.Truncate(time.Microsecond), df.Height(), df.Width())
+		fmt.Sprintf("%.6fs", elapsed.Seconds()), df.Height(), df.Width())
 	if printOut {
 		fmt.Println(df.Summary())
 	}

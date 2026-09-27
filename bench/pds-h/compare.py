@@ -233,7 +233,7 @@ def polars_peak_rss(q: int, data: Path) -> int:
         "import sys; sys.path.insert(0, %r); import compare, pathlib; "
         "compare.QUERIES[%d](pathlib.Path(%r)).collect()" % (str(Path(__file__).parent), q, str(data))
     )
-    proc = subprocess.Popen([sys.executable, "-c", code])
+    proc = subprocess.Popen([sys.executable, "-B", "-c", code])
     _, status, ru = os.wait4(proc.pid, 0)
     if os.waitstatus_to_exitcode(status) != 0:
         raise RuntimeError(f"polars q{q} failed")
