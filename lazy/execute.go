@@ -311,6 +311,11 @@ func executeProjection(ctx context.Context, cfg execConfig, p Projection) (*data
 	if out, ok, err := tryMorselAggregate(ctx, cfg, p.Input, nil, p.Exprs); ok {
 		return out, err
 	}
+	if f, ok := p.Input.(Filter); ok && cfg.profiler == nil && cfg.tracer == nil {
+		if names, ok := bareColumns(p.Exprs); ok {
+			return executeFilterSelect(ctx, cfg, f, names)
+		}
+	}
 	input, err := executeNode(ctx, cfg, p.Input)
 	if err != nil {
 		return nil, err
@@ -457,6 +462,14 @@ func executeWithColumns(ctx context.Context, cfg execConfig, w WithColumns) (*da
 }
 
 func executeFilter(ctx context.Context, cfg execConfig, f Filter) (*dataframe.DataFrame, error) {
+	return executeFilterSelect(ctx, cfg, f, nil)
+}
+
+// executeFilterSelect filters f's input and keeps only the columns in
+// keep (all when nil). Columns only the predicate reads are then never
+// filtered: the optimizer puts a projection of bare columns right above
+// a filter whose predicate columns are not needed further up.
+func executeFilterSelect(ctx context.Context, cfg execConfig, f Filter, keep []string) (*dataframe.DataFrame, error) {
 	input, err := executeNode(ctx, cfg, f.Input)
 	if err != nil {
 		return nil, err
@@ -473,7 +486,29 @@ func executeFilter(ctx context.Context, cfg execConfig, f Filter) (*dataframe.Da
 		return nil, fmt.Errorf("%w: filter predicate must be bool, got %s",
 			compute.ErrMaskNotBool, mask.DType())
 	}
+	if keep != nil {
+		sub, err := input.Select(keep...)
+		if err != nil {
+			return nil, err
+		}
+		defer sub.Release()
+		return sub.Filter(ctx, mask, dataframe.WithFilterAllocator(cfg.alloc))
+	}
 	return input.Filter(ctx, mask, dataframe.WithFilterAllocator(cfg.alloc))
+}
+
+// bareColumns returns the column names when every expression is a bare
+// column reference with no alias (a pure column selection).
+func bareColumns(exprs []expr.Expr) ([]string, bool) {
+	names := make([]string, len(exprs))
+	for i, e := range exprs {
+		c, ok := e.Node().(expr.ColNode)
+		if !ok || c.Name == "*" {
+			return nil, false
+		}
+		names[i] = c.Name
+	}
+	return names, len(names) > 0
 }
 
 func executeSort(ctx context.Context, cfg execConfig, s Sort) (*dataframe.DataFrame, error) {
