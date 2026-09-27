@@ -67,18 +67,12 @@ func evalCoalesce(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		return nil, fmt.Errorf("eval: coalesce requires at least one argument")
 	}
 	// Evaluate all args upfront; they share the frame's height.
-	parts := make([]*series.Series, len(n.Args))
-	for i, a := range n.Args {
-		s, err := evalNode(ctx, ec, a, df)
-		if err != nil {
-			for _, prev := range parts[:i] {
-				if prev != nil {
-					prev.Release()
-				}
-			}
-			return nil, err
-		}
-		parts[i] = s
+	// Broadcast unit-length arguments (literals, aggregates) and use
+	// one chunk each: the row loops below index every part by row
+	// through its first chunk (found by internal/difftest).
+	parts, err := evalSingleChunkBroadcast(ctx, ec, n.Args, df)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		for _, p := range parts {
@@ -175,18 +169,12 @@ func evalConcatStr(ctx context.Context, ec EvalContext, n expr.FunctionNode, df 
 			sep = s
 		}
 	}
-	parts := make([]*series.Series, len(n.Args))
-	for i, a := range n.Args {
-		s, err := evalNode(ctx, ec, a, df)
-		if err != nil {
-			for _, prev := range parts[:i] {
-				if prev != nil {
-					prev.Release()
-				}
-			}
-			return nil, err
-		}
-		parts[i] = s
+	// Broadcast unit-length arguments (literals, aggregates) and use
+	// one chunk each: the row loops below index every part by row
+	// through its first chunk (found by internal/difftest).
+	parts, err := evalSingleChunkBroadcast(ctx, ec, n.Args, df)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		for _, p := range parts {
@@ -237,4 +225,20 @@ func cellString(c any, i int) string {
 		return "false"
 	}
 	return ""
+}
+
+// evalSingleChunkBroadcast is evalBroadcast with every result
+// consolidated into a single chunk.
+func evalSingleChunkBroadcast(ctx context.Context, ec EvalContext, args []expr.Expr, df *dataframe.DataFrame) ([]*series.Series, error) {
+	parts, err := evalBroadcast(ctx, ec, args, df)
+	if err != nil {
+		return nil, err
+	}
+	for i, p := range parts {
+		if p.NumChunks() != 1 {
+			parts[i] = p.Rechunk()
+			p.Release()
+		}
+	}
+	return parts, nil
 }
