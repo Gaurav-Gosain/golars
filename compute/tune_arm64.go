@@ -9,8 +9,8 @@ import "math"
 // kernels, so serial runs stay ahead of goroutine fan-out for longer
 // than on x86, and the fan-out cost itself dominates at mid sizes.
 const (
-	sumSerialCutoff         = 256 * 1024
-	minMaxSerialCutoff      = 256 * 1024
+	sumSerialCutoff         = 512 * 1024
+	minMaxSerialCutoff      = 512 * 1024
 	elementwiseSerialCutoff = 128 * 1024
 	// No non-temporal store kernels on arm64.
 	ntStoreCutoff = math.MaxInt
