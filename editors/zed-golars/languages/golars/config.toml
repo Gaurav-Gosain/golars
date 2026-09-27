@@ -11,6 +11,7 @@ brackets = [
     { start = "[", end = "]", close = true, newline = true },
     { start = "(", end = ")", close = true, newline = true },
     { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
+    { start = "'", end = "'", close = true, newline = false, not_in = ["string", "comment"] },
 ]
 
-word_characters = ["/", "-", "."]
+word_characters = ["/", "-"]

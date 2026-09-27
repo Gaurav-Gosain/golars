@@ -106,7 +106,8 @@ require("nvim-treesitter.parsers").get_parser_configs().golars = {
 }
 ```
 
-Then `:TSInstall golars` once and restart. The LSP plugin works
+Then `:TSInstall golars` once and restart. The highlight and indent
+queries in `queries/golars/` match this grammar. The LSP plugin works
 without tree-sitter, but syntax highlighting + incremental selection
 are much nicer with it.
 

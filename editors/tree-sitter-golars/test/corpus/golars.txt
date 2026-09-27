@@ -11,54 +11,485 @@ show
 
 (source_file
   (statement
-    command: (command)
-    args: (identifier))
+    (command)
+    (path))
   (statement
-    command: (command)
-    args: (identifier)
-    args: (operator)
-    args: (number)
-    args: (keyword)
-    args: (identifier)
-    args: (identifier)
-    args: (string))
-  (statement
-    command: (command)
-    args: (identifier)
-    args: (expr
-      (expr
+    (command)
+    (binary_expression
+      (binary_expression
         (identifier)
-        (identifier))
-      (number)))
+        (number))
+      (binary_expression
+        (identifier)
+        (string))))
   (statement
-    command: (command)))
+    (command)
+    (assignment
+      (identifier)
+      (binary_expression
+        (parenthesized_expression
+          (binary_expression
+            (identifier)
+            (identifier)))
+        (number))))
+  (statement
+    (command)))
 
 ================================================================================
-REPL dot form and method call
+REPL dot form, host command and comments
 ================================================================================
 
+# a comment
 .HELP
-with u = name.str.upper()
+.load data/people.csv as people   # staged
+# ^?
 
 --------------------------------------------------------------------------------
 
 (source_file
+  (comment)
   (statement
-    command: (command
+    (command
       (identifier)))
   (statement
-    command: (command)
-    args: (identifier)
-    args: (expr
-      (method_call
-        receiver: (identifier)))))
+    (command)
+    (path)
+    (identifier)
+    (identifier))
+  (comment)
+  (comment))
 
 ================================================================================
-Namespaced calls, lists and keyword arguments
+Last statement without a trailing newline
 ================================================================================
 
-with band = cut(age, [0, 10], labels=["a", "b", "c"])
-join_asof quotes on time by symbol tolerance 2m
+load a.csv
+show
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (path))
+  (statement
+    (command)))
+
+================================================================================
+Function calls and namespaced calls
+================================================================================
+
+with r = round(x, 2)
+with y = dt.year(ts)
+with n = str.len_chars(name)
+with c = coalesce(a, b, 0)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (identifier)
+        (argument_list
+          (identifier)
+          (number)))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (argument_list
+          (identifier)))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (argument_list
+          (identifier)))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (identifier)
+        (argument_list
+          (identifier)
+          (identifier)
+          (number))))))
+
+================================================================================
+Method chains and calls without parentheses
+================================================================================
+
+with y = ts.dt.year()
+with u = name.str.upper()
+with t = str.split(tags, ";").list.first()
+with s = price.sum
+with q = x.shift(-1).fill_null(0.0)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (member_expression
+            (identifier)
+            (identifier))
+          (identifier))
+        (argument_list))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (member_expression
+            (identifier)
+            (identifier))
+          (identifier))
+        (argument_list))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (member_expression
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (argument_list
+                (identifier)
+                (string)))
+            (identifier))
+          (identifier))
+        (argument_list))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (member_expression
+        (identifier)
+        (identifier))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (call_expression
+            (member_expression
+              (identifier)
+              (identifier))
+            (argument_list
+              (unary_expression
+                (number))))
+          (identifier))
+        (argument_list
+          (number))))))
+
+================================================================================
+Operator precedence
+================================================================================
+
+with a = x + y * z
+with b = -x ** 2
+with c = x // 50 * 50 % 7
+with d = 2 ** 3 ** 2
+filter a > 1 or b < 2 and not c
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (binary_expression
+        (identifier)
+        (binary_expression
+          (identifier)
+          (identifier)))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (unary_expression
+        (binary_expression
+          (identifier)
+          (number)))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (binary_expression
+        (binary_expression
+          (binary_expression
+            (identifier)
+            (number))
+          (number))
+        (number))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (binary_expression
+        (number)
+        (binary_expression
+          (number)
+          (number)))))
+  (statement
+    (command)
+    (binary_expression
+      (binary_expression
+        (identifier)
+        (number))
+      (binary_expression
+        (binary_expression
+          (identifier)
+          (number))
+        (unary_expression
+          (identifier))))))
+
+================================================================================
+Lists and keyword arguments
+================================================================================
+
+with band = cut(age, [0, 10], labels=["a", "b", "c"], left_closed=true)
+with d = str.to_date(s, "%d/%m/%Y", strict=false)
+with e = replace(x, [1, 2], [10, 20])
+with f = cut(x, [])
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (identifier)
+        (argument_list
+          (identifier)
+          (list
+            (number)
+            (number))
+          (keyword_argument
+            (identifier)
+            (list
+              (string)
+              (string)
+              (string)))
+          (keyword_argument
+            (identifier)
+            (boolean))))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (argument_list
+          (identifier)
+          (string)
+          (keyword_argument
+            (identifier)
+            (boolean))))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (identifier)
+        (argument_list
+          (identifier)
+          (list
+            (number)
+            (number))
+          (list
+            (number)
+            (number))))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (call_expression
+        (identifier)
+        (argument_list
+          (identifier)
+          (list))))))
+
+================================================================================
+When then otherwise
+================================================================================
+
+with parity = when amount % 2 == 0 then "even" otherwise "odd"
+with tier = when a > 100 then "high" when a > 10 then "mid" otherwise "low"
+with maybe = when flag then 1
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (when_expression
+        (when_clause
+          (binary_expression
+            (binary_expression
+              (identifier)
+              (number))
+            (number))
+          (string))
+        (otherwise_clause
+          (string)))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (when_expression
+        (when_clause
+          (binary_expression
+            (identifier)
+            (number))
+          (string))
+        (when_clause
+          (binary_expression
+            (identifier)
+            (number))
+          (string))
+        (otherwise_clause
+          (string)))))
+  (statement
+    (command)
+    (assignment
+      (identifier)
+      (when_expression
+        (when_clause
+          (identifier)
+          (number))))))
+
+================================================================================
+Membership and null checks
+================================================================================
+
+filter dept in ["eng", "ops"] and not (age < 21)
+filter user not in ['ada', 'bo']
+filter note is_null or other is_not_null
+filter name contains "z" or name starts_with 'A'
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (binary_expression
+      (membership_expression
+        (identifier)
+        (list
+          (string)
+          (string)))
+      (unary_expression
+        (parenthesized_expression
+          (binary_expression
+            (identifier)
+            (number))))))
+  (statement
+    (command)
+    (membership_expression
+      (identifier)
+      (list
+        (string)
+        (string))))
+  (statement
+    (command)
+    (binary_expression
+      (null_check_expression
+        (identifier))
+      (null_check_expression
+        (identifier))))
+  (statement
+    (command)
+    (binary_expression
+      (binary_expression
+        (identifier)
+        (string))
+      (binary_expression
+        (identifier)
+        (string)))))
+
+================================================================================
+Single quotes, escapes and hashes in strings
+================================================================================
+
+filter name == 'it\'s # not a comment'
+filter path == "a\"b#c"
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (binary_expression
+      (identifier)
+      (string)))
+  (statement
+    (command)
+    (binary_expression
+      (identifier)
+      (string))))
+
+================================================================================
+Line continuation
+================================================================================
+
+filter salary > 100000 \
+  and dept == "eng" \
+  and tenure_years >= 2
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (binary_expression
+      (binary_expression
+        (binary_expression
+          (identifier)
+          (number))
+        (line_continuation)
+        (binary_expression
+          (identifier)
+          (string)))
+      (line_continuation)
+      (binary_expression
+        (identifier)
+        (number)))))
+
+================================================================================
+Select items and groupby aggregations
+================================================================================
+
+select name, year = dt.year(hired), salary / 12
+groupby dept amount:sum:total amount:count n=len() (m = amount.mean())
+group_by_dynamic ts every 1h period 2h by user amount:sum:total
 
 --------------------------------------------------------------------------------
 
@@ -66,34 +497,102 @@ join_asof quotes on time by symbol tolerance 2m
   (statement
     (command)
     (identifier)
-    (expr
-      (method_call
-        (identifier)
-        (expr
-          (identifier))
-        (expr
-          (list
-            (expr
-              (number))
-            (expr
-              (number))))
-        (kwarg
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
           (identifier)
-          (expr
-            (list
-              (expr
-                (string))
-              (expr
-                (string))
-              (expr
-                (string))))))))
+          (identifier))
+        (argument_list
+          (identifier))))
+    (binary_expression
+      (identifier)
+      (number)))
   (statement
     (command)
     (identifier)
-    (keyword)
+    (agg_spec)
+    (agg_spec)
+    (assignment
+      (identifier)
+      (call_expression
+        (identifier)
+        (argument_list)))
+    (assignment
+      (identifier)
+      (call_expression
+        (member_expression
+          (identifier)
+          (identifier))
+        (argument_list))))
+  (statement
+    (command)
     (identifier)
-    (keyword)
     (identifier)
-    (keyword)
-    (number)
-    (identifier)))
+    (duration)
+    (identifier)
+    (duration)
+    (identifier)
+    (identifier)
+    (agg_spec)))
+
+================================================================================
+Statement keywords, paths and durations
+================================================================================
+
+join_asof quotes on time by symbol tolerance 2m
+join people on name left
+sort total desc
+save /tmp/out.parquet
+source other.glr
+cd ../data
+cast ts datetime[ms]
+upsample ts 1d
+null-count
+?
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (command)
+    (identifier)
+    (identifier)
+    (identifier)
+    (identifier)
+    (identifier)
+    (identifier)
+    (duration))
+  (statement
+    (command)
+    (identifier)
+    (identifier)
+    (identifier)
+    (identifier))
+  (statement
+    (command)
+    (identifier)
+    (identifier))
+  (statement
+    (command)
+    (path))
+  (statement
+    (command)
+    (path))
+  (statement
+    (command)
+    (path))
+  (statement
+    (command)
+    (identifier)
+    (identifier)
+    (list
+      (identifier)))
+  (statement
+    (command)
+    (identifier)
+    (duration))
+  (statement
+    (command))
+  (statement
+    (command)))

@@ -1,40 +1,56 @@
 // Tree-sitter grammar for the golars .glr scripting language.
 //
-// Generate with: npx tree-sitter generate
-// Parse test:    npx tree-sitter parse path/to/file.glr
+// Generate with: tree-sitter generate --abi 14
+// Parse test:    tree-sitter parse path/to/file.glr
 //
-// The language is intentionally tiny: line-oriented, one command
-// per line, # for comments. This grammar handles line-continuation
-// with a trailing backslash, double-quoted string literals with \
-// escapes, and the closed set of known command names so editors can
-// highlight them distinctly.
+// A script is line-oriented: one statement per line, `#` comments,
+// and a trailing backslash to continue a statement on the next line.
+// A statement is a command followed by arguments. Arguments are
+// expressions from the glr expression language (see
+// script/exprparse), `name = expr` assignments, `col:op[:alias]`
+// aggregation specs, file paths, durations such as `30m`, and commas.
+//
+// Statement keywords (`as`, `on`, `by`, `desc`, `every`, ...) are
+// plain identifiers in the tree so that columns with those names
+// still parse; the highlight queries pick them out by text.
+// Namespaces (`str`, `dt`, `list`, ...) are identifiers too, for the
+// same reason: `name.str.upper()` reads the column `name`.
+
+const PREC = {
+  or: 1,
+  and: 2,
+  not: 3,
+  compare: 4,
+  add: 5,
+  mul: 6,
+  unary: 7,
+  power: 8,
+  postfix: 9,
+};
+
+const commaSep1 = rule => seq(rule, repeat(seq(',', rule)), optional(','));
+const commaSep = rule => optional(commaSep1(rule));
 
 module.exports = grammar({
   name: 'golars',
 
-  extras: $ => [/[ \t]/, $.line_continuation],
+  extras: $ => [/[ \t]/, $.line_continuation, $.comment],
 
-  externals: $ => [],
-
-  conflicts: $ => [
-    [$._arg, $._expr_operand],
-    [$._arg, $._expr_operand, $.method_call],
-    [$._expr_operand, $.method_call],
-  ],
+  word: $ => $.identifier,
 
   rules: {
-    source_file: $ => repeat(choice(
-      $.comment,
-      $.statement,
-      $._newline,
-    )),
+    // Every statement but the last needs a newline; the last one may
+    // end at the end of the file.
+    source_file: $ => seq(
+      repeat(seq(optional($.statement), $._newline)),
+      optional($.statement),
+    ),
 
-    // One command and its args, terminated by a newline.
+    // One command and its args.
     statement: $ => seq(
       optional('.'),
       field('command', $.command),
-      field('args', repeat($._arg)),
-      $._newline,
+      repeat(field('args', $._arg)),
     ),
 
     // Closed set of known commands and their aliases, mirroring
@@ -80,81 +96,161 @@ module.exports = grammar({
     ),
 
     _arg: $ => choice(
-      $.keyword,
-      $.operator,
-      $.string,
-      $.number,
-      $.boolean,
+      $._expression,
+      $.assignment,
       $.agg_spec,
-      $.identifier,
-      $.expr,
-      '=',
-      '.',
-      '(', ')', ',', '/', '//', '%', '+', '*', '**', '!', '&', '|',
+      $.path,
+      $.duration,
+      ',',
     ),
 
-    expr: $ => choice(
-      prec.left(1, seq($._expr_operand, repeat1(seq(
-        choice('+', '-', '*', '/', '//', '%', '**'),
-        $._expr_operand,
-      )))),
-      $._expr_operand,
+    // `name = expr` in with, select and groupby. The parenthesized
+    // form `(name = expr)` lets a groupby item contain spaces.
+    assignment: $ => choice(
+      seq(field('name', $.identifier), '=', field('value', $._expression)),
+      seq('(', field('name', $.identifier), '=', field('value', $._expression), ')'),
     ),
-    _expr_operand: $ => choice(
-      prec(1, $.method_call),
+
+    // ---------------------------------------------------------------
+    // Expression language
+    // ---------------------------------------------------------------
+
+    _expression: $ => choice(
+      $.binary_expression,
+      $.unary_expression,
+      $.membership_expression,
+      $.null_check_expression,
+      $.when_expression,
+      $._primary,
+    ),
+
+    _primary: $ => choice(
+      $.identifier,
       $.number,
       $.string,
       $.boolean,
-      $.identifier,
-      seq('(', $.expr, ')'),
-      seq('-', $._expr_operand),
+      $.null,
       $.list,
+      $.parenthesized_expression,
+      $.call_expression,
+      $.member_expression,
     ),
-    // `[a, b]` list literal, as in `cut(x, [0, 10])`.
-    list: $ => seq('[', optional(seq($.expr, repeat(seq(',', $.expr)))), ']'),
-    // `name=value` keyword argument, as in `cut(x, [0], labels=["a", "b"])`.
-    kwarg: $ => seq(field('name', $.identifier), '=', $.expr),
-    _call_arg: $ => choice($.expr, $.kwarg),
-    method_call: $ => prec.left(seq(
-      field('receiver', $.identifier),
-      repeat(seq('.', field('method', $.identifier))),
-      '(', optional(seq($._call_arg, repeat(seq(',', $._call_arg)))), ')',
+
+    binary_expression: $ => {
+      const table = [
+        [PREC.or, 'or'],
+        [PREC.and, 'and'],
+        [PREC.compare, choice('==', '!=', '<', '<=', '>', '>=')],
+        [PREC.compare, choice('contains', 'starts_with', 'ends_with', 'like', 'not_like')],
+        [PREC.add, choice('+', '-')],
+        [PREC.mul, choice('*', '/', '//', '%')],
+      ];
+      return choice(
+        ...table.map(([p, op]) => prec.left(p, seq(
+          field('left', $._expression),
+          field('operator', op),
+          field('right', $._expression),
+        ))),
+        prec.right(PREC.power, seq(
+          field('left', $._expression),
+          field('operator', '**'),
+          field('right', $._expression),
+        )),
+      );
+    },
+
+    unary_expression: $ => choice(
+      prec(PREC.not, seq(field('operator', 'not'), field('operand', $._expression))),
+      prec(PREC.unary, seq(field('operator', '-'), field('operand', $._expression))),
+    ),
+
+    // `x in [1, 2]` and `x not in [...]`.
+    membership_expression: $ => prec.left(PREC.compare, seq(
+      field('left', $._expression),
+      optional(field('negated', 'not')),
+      'in',
+      field('right', $._expression),
     )),
 
-    // Structural keywords.
-    keyword: $ => choice(
-      'as', 'on', 'asc', 'desc', 'and', 'or', 'not', 'in',
-      'is_null', 'is_not_null',
-      'when', 'then', 'otherwise',
-      'inner', 'left', 'cross',
-      'every', 'period', 'offset', 'by',
-      'backward', 'forward', 'nearest', 'tolerance',
-    ),
+    // `x is_null` and `x is_not_null`.
+    null_check_expression: $ => prec.left(PREC.compare, seq(
+      field('operand', $._expression),
+      field('operator', choice('is_null', 'is_not_null')),
+    )),
 
-    operator: $ => choice(
-      '==', '!=', '<=', '>=', '<', '>',
-    ),
+    // when c then a [when c2 then b]... [otherwise d]
+    when_expression: $ => prec.right(seq(
+      repeat1($.when_clause),
+      optional($.otherwise_clause),
+    )),
+    when_clause: $ => prec.right(seq(
+      'when', field('condition', $._expression),
+      'then', field('value', $._expression),
+    )),
+    otherwise_clause: $ => prec.right(seq('otherwise', field('value', $._expression))),
+
+    // `f(x)`, `dt.year(ts)`, `x.round(2)`.
+    call_expression: $ => prec(PREC.postfix, seq(
+      field('function', choice($.identifier, $.member_expression)),
+      field('arguments', $.argument_list),
+    )),
+
+    // `x.sum`, `ts.dt`, `str.len_chars`: a method (or namespace)
+    // reached with a dot. Without an argument list it is a call with
+    // no arguments.
+    member_expression: $ => prec(PREC.postfix, seq(
+      field('object', $._primary),
+      token.immediate('.'),
+      field('property', $.identifier),
+    )),
+
+    argument_list: $ => seq('(', commaSep(choice($._expression, $.keyword_argument)), ')'),
+
+    // `name=value`, as in `cut(x, [0, 10], labels=["a", "b", "c"])`.
+    keyword_argument: $ => seq(field('name', $.identifier), '=', field('value', $._expression)),
+
+    list: $ => seq('[', commaSep($._expression), ']'),
+
+    parenthesized_expression: $ => seq('(', $._expression, ')'),
+
+    // ---------------------------------------------------------------
+    // Tokens
+    // ---------------------------------------------------------------
 
     // `col:op[:alias]` aggregation spec.
-    agg_spec: $ => token(
+    agg_spec: $ => token(prec(1,
       seq(/[A-Za-z_][A-Za-z0-9_]*/, ':', /[A-Za-z_][A-Za-z0-9_]*/, optional(seq(':', /[A-Za-z_][A-Za-z0-9_]*/))),
-    ),
+    )),
 
-    string: $ => seq(
-      '"',
-      repeat(choice(
-        /[^"\\\n]/,
-        seq('\\', /./),
-      )),
-      '"',
-    ),
+    // File paths: anything with a slash, `~`, `.` / `..` prefixes, or
+    // a bare file name with a data or script extension.
+    // Division needs spaces around `/` (`a / b`): unspaced `a/b` and
+    // `a /b` read as paths.
+    path: $ => token(prec(1, choice(
+      /[A-Za-z0-9_.~\-]+\/[A-Za-z0-9_.\/~\-]*/,
+      /\/[A-Za-z_.~][A-Za-z0-9_.\/~\-]*/,
+      /~/,
+      /\.\./,
+      /[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+)*\.(csv|tsv|parquet|pq|arrow|ipc|json|ndjson|jsonl|glr)/,
+    ))),
 
-    number: $ => /-?\d+(\.\d+)?/,
+    // Durations: `30m`, `1h`, `1mo`, `1d12h`, `3i`.
+    duration: $ => token(prec(1, /\d+[a-z]+(\d+[a-z]+)*/)),
+
+    string: $ => token(choice(
+      seq('"', repeat(choice(/[^"\\\n]/, /\\./)), '"'),
+      seq("'", repeat(choice(/[^'\\\n]/, /\\./)), "'"),
+    )),
+
+    number: $ => token(choice(
+      /\d+(\.\d*)?([eE][+-]?\d+)?/,
+      /\.\d+([eE][+-]?\d+)?/,
+    )),
+
     boolean: $ => choice('true', 'false'),
+    null: $ => 'null',
 
-    // Identifiers include '.' and '/' and '-' so paths and column
-    // names parse without ugly string quoting.
-    identifier: $ => /[A-Za-z_][A-Za-z0-9_./-]*/,
+    identifier: $ => /[A-Za-z_][A-Za-z0-9_]*/,
 
     comment: $ => token(seq('#', /[^\n]*/)),
 

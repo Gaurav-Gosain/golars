@@ -65,14 +65,34 @@ welcome.
 
 ```sh
 cd editors/tree-sitter-golars
-npm install
-npx tree-sitter generate
-npx tree-sitter test                  # runs tests in corpus/ (not included yet)
-npx tree-sitter parse ../../examples/script/multisource.glr
+tree-sitter generate --abi 14        # keep the committed ABI
+tree-sitter test                     # corpus in test/corpus/
+tree-sitter parse ../../examples/script/expressions.glr
 ```
+
+## Tree shape
+
+A `statement` is an optional `.`, a `command` and its `args`. An
+argument is an expression, an `assignment` (`name = expr`), an
+`agg_spec` (`col:op[:alias]`), a `path`, a `duration` (`30m`) or a
+comma. Expressions are `binary_expression` (with `left`, `operator`,
+`right` fields and the precedence of `script/exprparse`),
+`unary_expression`, `membership_expression` (`x [not] in [...]`),
+`null_check_expression`, `when_expression` (`when_clause`s and an
+optional `otherwise_clause`), `call_expression` (`function`,
+`arguments`), `member_expression` (`object`, `property`),
+`argument_list`, `keyword_argument`, `list`, `parenthesized_expression`
+and the literals `string`, `number`, `boolean`, `null`.
+
+Statement keywords (`as`, `on`, `by`, `desc`, ...) and namespaces
+(`str`, `dt`, ...) stay plain identifiers so columns with those names
+still parse; the highlight queries pick them out by text.
+
+Division needs spaces around `/`: unspaced `a/b` reads as a path.
 
 ## Status
 
-Grammar is complete enough to highlight every sample in
-`examples/script/`. Extending for new commands is a one-line change
-to the `command` rule in `grammar.js`.
+Every script in `examples/script/` and every glr block in
+`docs/scripting.md` parses without errors. A new command is a one-line
+change to the `command` rule in `grammar.js`; a Go drift test in
+`script/drift_test.go` fails until it is added.
