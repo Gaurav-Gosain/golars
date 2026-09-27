@@ -131,7 +131,7 @@ func forEachPartition(nPart int, fn func(p int)) {
 
 func hashStrings(s *array.String, workers int) []uint64 {
 	n := s.Len()
-	out := make([]uint64, n)
+	out := uint64Scratch.get(n)
 	parallelRanges(n, workers, func(_, lo, hi int) {
 		for i := lo; i < hi; i++ {
 			out[i] = strhash.String(s.Value(i))
@@ -196,7 +196,7 @@ func partitionRows(s *array.String, h []uint64, partBits int, workers int) ([]st
 		}
 	}
 	bounds[nPart] = cum
-	rows := make([]strRow, cum)
+	rows := strRowScratch.get(cum)
 	parallelRanges(n, workers, func(w, lo, hi int) {
 		off := offs[w]
 		for i := lo; i < hi; i++ {
@@ -245,15 +245,21 @@ func hashJoinString(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
 	nPart := 1 << partBits
 
 	rRows, rBounds := partitionRows(rs, rh, partBits, rWorkers)
+	uint64Scratch.put(rh)
 
-	next := make([]int32, rightLen) // right row index + 1; 0 ends a chain
+	// Every scratch buffer below comes from a pool and goes back before
+	// return; at 1M rows a side they add up to about 100 MB that would
+	// otherwise be allocated and zeroed on every join.
+	next := int32Scratch.get(rightLen) // right row index + 1; 0 ends a chain
+	clear(next)
 	tables := make([]strTableJoin, nPart)
 	hasDup := make([]bool, nPart)
 	forEachPartition(nPart, func(p int) {
 		part := rRows[rBounds[p]:rBounds[p+1]]
 		// Load factor at most 2/3 with linear probing.
 		size := uint64(1) << bits.Len(uint(max(len(part)+len(part)/2, 8)-1))
-		t := strTableJoin{slots: make([]strSlot, size), mask: size - 1}
+		t := strTableJoin{slots: strSlotScratch.get(int(size)), mask: size - 1}
+		clear(t.slots)
 		// Insert in descending row order so each chain ends up ascending.
 		for k := len(part) - 1; k >= 0; k-- {
 			r := &part[k]
@@ -280,8 +286,10 @@ func hashJoinString(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
 
 	// Probe: match[i] is the chain head (right row + 1) for left row i,
 	// 0 for no match or a null key.
-	match := make([]int32, leftLen)
+	match := int32Scratch.get(leftLen)
+	clear(match)
 	lRows, lBounds := partitionRows(ls, lh, partBits, lWorkers)
+	uint64Scratch.put(lh)
 	probe := func(t *strTableJoin, part []strRow) {
 		for k := range part {
 			r := &part[k]
@@ -308,8 +316,21 @@ func hashJoinString(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
 		})
 	}
 
-	return emitStrJoin(match, next, anyDup, how, lWorkers)
+	strRowScratch.put(rRows)
+	strRowScratch.put(lRows)
+	for _, t := range tables {
+		strSlotScratch.put(t.slots)
+	}
+	lOut, rOut, err := emitStrJoin(match, next, anyDup, how, lWorkers)
+	int32Scratch.put(match)
+	int32Scratch.put(next)
+	return lOut, rOut, err
 }
+
+var (
+	strRowScratch  scratchPool[strRow]
+	strSlotScratch scratchPool[strSlot]
+)
 
 // emitStrJoin turns per-left-row chain heads into the paired index
 // arrays. Each worker owns a contiguous left range: a counting pass
@@ -319,8 +340,8 @@ func emitStrJoin(match, next []int32, anyDup bool, how JoinType, workers int) ([
 	isLeft := how == LeftJoin
 	if !anyDup && isLeft {
 		// Exactly one output row per left row.
-		lOut := make([]int, n)
-		rOut := make([]int, n)
+		lOut := intScratch.get(n)
+		rOut := intScratch.get(n)
 		parallelRanges(n, workers, func(_, lo, hi int) {
 			for i := lo; i < hi; i++ {
 				lOut[i] = i
@@ -359,8 +380,8 @@ func emitStrJoin(match, next []int32, anyDup bool, how JoinType, workers int) ([
 		counts[w+1] += counts[w]
 	}
 	total := counts[workers]
-	lOut := make([]int, total)
-	rOut := make([]int, total)
+	lOut := intScratch.get(total)
+	rOut := intScratch.get(total)
 	parallelRanges(n, workers, func(w, lo, hi int) {
 		pos := counts[w]
 		for i := lo; i < hi; i++ {

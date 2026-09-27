@@ -116,7 +116,12 @@ func (df *DataFrame) Join(ctx context.Context, right *DataFrame, on []string, ho
 		return nil, err
 	}
 
-	return buildJoinOutput(ctx, df, right, leftIdx, rightIdx, on, cfg)
+	out, err := buildJoinOutput(ctx, df, right, leftIdx, rightIdx, on, cfg)
+	// The index arrays are only read by the gathers above; recycle them
+	// for the next join.
+	intScratch.put(leftIdx)
+	intScratch.put(rightIdx)
+	return out, err
 }
 
 // hashJoinIndices runs the hash join on the single-key Series and returns
@@ -328,8 +333,8 @@ func directTableJoinInt(la arrow.Array, lv, rv []int64, minK int64, span int, ho
 	// pre-allocate the full lOut/rOut once and have each worker write
 	// straight into its slot, saving the concat memmove.
 	if !hasDuplicates && !leftNulls && how == LeftJoin {
-		lOut := make([]int, leftLen)
-		rOut := make([]int, leftLen)
+		lOut := intScratch.get(leftLen)
+		rOut := intScratch.get(leftLen)
 		// Serial below 64K: goroutine spawn overhead exceeds the parallel
 		// win on this cache-resident workload.
 		if leftLen < 64*1024 {
@@ -431,8 +436,8 @@ func directTableJoinInt(la arrow.Array, lv, rv []int64, minK int64, span int, ho
 		offsets[t+1] = offsets[t] + workerCounts[t]
 	}
 	total := offsets[k]
-	lOut := make([]int, total)
-	rOut := make([]int, total)
+	lOut := intScratch.get(total)
+	rOut := intScratch.get(total)
 
 	for t := range k {
 		wg.Add(1)
@@ -751,8 +756,8 @@ func partitionedHashJoinInt(la arrow.Array, lv, rv []int64, how JoinType) ([]int
 	for t := range k {
 		total += len(lOuts[t])
 	}
-	lOut := make([]int, total)
-	rOut := make([]int, total)
+	lOut := intScratch.get(total)
+	rOut := intScratch.get(total)
 	offset := 0
 	for t := range k {
 		copy(lOut[offset:], lOuts[t])
