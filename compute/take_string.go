@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/bits"
 	"sync"
+	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -28,7 +29,11 @@ const takeStringParallelCutoff = 64 * 1024
 // Large gathers split both passes over row chunks; each chunk writes a
 // disjoint byte range found by a prefix sum over chunk totals.
 func takeString(name string, src arrow.Array, indices []int, mem memory.Allocator) (*series.Series, error) {
-	sa := src.(*array.String)
+	return takeStringIdx(name, src.(*array.String), indices, mem)
+}
+
+// takeStringIdx is takeString for any integer index type.
+func takeStringIdx[I int | int32](name string, sa *array.String, indices []I, mem memory.Allocator) (*series.Series, error) {
 	n := len(indices)
 	offs := sa.ValueOffsets()
 	var data []byte
@@ -46,6 +51,11 @@ func takeString(name string, src arrow.Array, indices []int, mem memory.Allocato
 	// validity bytes and never races on a shared byte.
 	chunk := ((n+k-1)/k + 7) &^ 7
 	totals := make([]int, k+1)
+	// Indices are checked here rather than left to a bounds panic:
+	// workers run on their own goroutines, where a panic would not
+	// reach Take's recover.
+	nsrc := uint(sa.Len())
+	var bad atomic.Bool
 	parallelChunks(k, func(p int) {
 		s, e := p*chunk, min((p+1)*chunk, n)
 		if s >= e {
@@ -53,13 +63,20 @@ func takeString(name string, src arrow.Array, indices []int, mem memory.Allocato
 		}
 		t := 0
 		for _, i := range indices[s:e] {
-			if hasNulls && sa.IsNull(i) {
+			if uint(i) >= nsrc {
+				bad.Store(true)
+				return
+			}
+			if hasNulls && sa.IsNull(int(i)) {
 				continue
 			}
 			t += int(offs[i+1] - offs[i])
 		}
 		totals[p+1] = t
 	})
+	if bad.Load() {
+		return nil, fmt.Errorf("compute.Take: index out of range for Series of length %d", nsrc)
+	}
 	for p := range k {
 		totals[p+1] += totals[p]
 	}
@@ -67,7 +84,7 @@ func takeString(name string, src arrow.Array, indices []int, mem memory.Allocato
 	if total > int(^uint32(0)>>1) {
 		// Beyond int32 offsets: keep the generic builder path, which
 		// reports the overflow.
-		return takeStringBuilder(name, sa, indices, mem)
+		return takeStringBuilder(name, sa, widenIndices(indices), mem)
 	}
 
 	offBuf := memory.NewResizableBuffer(mem)
@@ -100,7 +117,7 @@ func takeString(name string, src arrow.Array, indices []int, mem memory.Allocato
 			i := indices[j]
 			outOffs[j] = int32(pos)
 			if hasNulls {
-				if sa.IsNull(i) {
+				if sa.IsNull(int(i)) {
 					nulls++
 					continue
 				}
@@ -223,6 +240,18 @@ func parallelChunks(k int, fn func(p int)) {
 	}
 	fn(0)
 	wg.Wait()
+}
+
+// widenIndices converts indices to []int.
+func widenIndices[I int | int32](indices []I) []int {
+	if v, ok := any(indices).([]int); ok {
+		return v
+	}
+	out := make([]int, len(indices))
+	for j, i := range indices {
+		out[j] = int(i)
+	}
+	return out
 }
 
 // takeStringBuilder is the plain gather through FromString, kept for
