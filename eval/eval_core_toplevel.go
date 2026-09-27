@@ -11,6 +11,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -214,6 +215,10 @@ func evalHorizontal(ctx context.Context, ec EvalContext, n expr.FunctionNode, df
 			return s, err
 		}
 		defer s.Release()
+		if arrow.IsInteger(target.ID()) {
+			// Integer sums wrap on overflow, as in polars.
+			return compute.NarrowWrapping(s, target, kernelOpts(ec)...)
+		}
 		return castSeriesTo(ctx, ec, s, target)
 	}
 	return nil, fmt.Errorf("eval: unknown horizontal op %s", n.Name)

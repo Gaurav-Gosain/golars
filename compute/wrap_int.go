@@ -64,3 +64,11 @@ func wrapInt64Generic(src *array.Int64, b array.Builder, name string) (*series.S
 	}
 	return s, err
 }
+
+// NarrowWrapping narrows an i64 Series to the integer dtype to with
+// two's complement wrapping, the way polars integer arithmetic
+// overflows. Nulls are kept.
+func NarrowWrapping(s *series.Series, to arrow.DataType, opts ...Option) (*series.Series, error) {
+	cfg := resolve(opts)
+	return wrapInt64To(s, to, cfg.outName(s.Name()), cfg.alloc)
+}

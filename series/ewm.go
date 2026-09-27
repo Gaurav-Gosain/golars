@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
@@ -15,9 +16,10 @@ import (
 //	y[t] = sum_{i=0..t} w_i * x_i   /   sum_{i=0..t} w_i
 //	w_i  = (1 - alpha)^(t - i)
 //
-// Null values do not contribute; their output slot is null.
+// Null values do not contribute and their output slot is null, but
+// they still count as a step in the decay (ignore_nulls=False).
 // Supported dtypes: Int64, Int32, Float64, Float32. Integer inputs
-// are promoted to float64.
+// are promoted to float64; f32 input gives f32.
 func (s *Series) EWMMean(alpha float64) (*Series, error) {
 	return ewmScalar(s, "ewm_mean", alpha, ewmMeanKernel)
 }
@@ -49,6 +51,19 @@ func ewmScalar(s *Series, op string, alpha float64, fn ewmKernel) (*Series, erro
 	fn(alpha, vals, valid, out, outValid)
 
 	mem := memory.DefaultAllocator
+	if s.DType().ID() == arrow.FLOAT32 {
+		// polars keeps f32 for f32 input.
+		b := array.NewFloat32Builder(mem)
+		defer b.Release()
+		for i, v := range out {
+			if outValid[i] {
+				b.Append(float32(v))
+			} else {
+				b.AppendNull()
+			}
+		}
+		return New(s.Name(), b.NewArray())
+	}
 	b := array.NewFloat64Builder(mem)
 	defer b.Release()
 	b.AppendValues(out, outValid)
@@ -101,21 +116,31 @@ func ewmFloat64s(s *Series, op string) ([]float64, []bool, error) {
 	return out, valid, nil
 }
 
-// ewmMeanKernel runs the adjusted weighted-mean recursion with
-// null-skipping. Running numerator and denominator decay by (1-alpha)
-// per step, and a new observation contributes weight 1.
+// ewmMeanKernel is polars' ewm_mean(adjust=True, ignore_nulls=False):
+// an incremental weighted mean whose old weight decays by (1-alpha) at
+// every row after the first value, nulls included. The incremental
+// form matches polars on infinities too ([-inf, 1] gives NaN).
 func ewmMeanKernel(alpha float64, vals []float64, valid []bool, out []float64, outValid []bool) {
-	decay := 1 - alpha
-	var sNum, sDen float64
+	var mean, weight float64
+	seen := false
 	for i := range vals {
-		if !valid[i] {
-			outValid[i] = false
+		if !seen {
+			if !valid[i] {
+				continue
+			}
+			seen = true
+			mean, weight = vals[i], 1
+			out[i], outValid[i] = mean, true
 			continue
 		}
-		sNum = sNum*decay + vals[i]
-		sDen = sDen*decay + 1
-		out[i] = sNum / sDen
-		outValid[i] = true
+		weight *= 1 - alpha
+		if !valid[i] {
+			continue
+		}
+		newWeight := weight + 1
+		mean += (vals[i] - mean) * (1 / newWeight)
+		weight++
+		out[i], outValid[i] = mean, true
 	}
 }
 
