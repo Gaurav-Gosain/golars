@@ -24,11 +24,12 @@ func Scan(path string, opts ...Option) lazy.LazyFrame {
 		}
 		return ReadFile(ctx, path, append(append([]Option(nil), opts...), WithColumns(cols...))...)
 	}
-	open := func(_ context.Context, cols []string) (lazy.BatchSource, error) {
+	open := func(_ context.Context, bo lazy.BatchOptions) (lazy.BatchSource, error) {
+		cols := bo.Columns
 		if cols == nil {
 			cols = resolve(opts).columns
 		}
-		r, err := OpenRowGroups(path, cols, opts...)
+		r, err := OpenRowGroups(path, cols, append(append([]Option(nil), opts...), withDictionary(bo.Dictionary))...)
 		if err != nil {
 			return nil, err
 		}

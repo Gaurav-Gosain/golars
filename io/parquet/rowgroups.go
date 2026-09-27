@@ -40,6 +40,16 @@ func OpenRowGroups(path string, columns []string, opts ...Option) (*RowGroupRead
 	// Columns of one row group decode in parallel; row groups themselves
 	// are spread over workers by the caller.
 	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: batchSizeFor(pf), PreAllocBinaryData: true}
+	if len(cfg.dictionary) > 0 {
+		sc := pf.MetaData().Schema
+		for _, name := range cfg.dictionary {
+			// Only flat top-level string columns; anything else reads as
+			// usual.
+			if idx := sc.ColumnIndexByName(name); idx >= 0 {
+				props.SetReadDict(idx, true)
+			}
+		}
+	}
 	fr, err := pqarrow.NewFileReader(pf, props, cfg.alloc)
 	if err != nil {
 		f.Close()

@@ -94,7 +94,7 @@ func withLeaf(n Node, leaf Node) Node {
 func runMorsels(ctx context.Context, cfg execConfig, fragment Node, src SourceFunc,
 	reduce func(context.Context, *dataframe.DataFrame) (*dataframe.DataFrame, error),
 ) ([]*dataframe.DataFrame, error) {
-	bs, err := src.OpenBatches(ctx, src.Projection)
+	bs, err := src.OpenBatches(ctx, BatchOptions{Columns: src.Projection, Dictionary: dictColumns(fragment, src)})
 	if err != nil {
 		return nil, err
 	}
