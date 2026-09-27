@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/go-zeromq/zmq4"
-
-	"github.com/Gaurav-Gosain/golars/script"
 )
 
 // handleKernelInfo replies with language metadata so JupyterLab can
@@ -125,43 +123,30 @@ func (k *kernel) errorReply(msg message, count int64, name, evalue string) {
 	}))
 }
 
-// handleComplete: command-name + frame-name completion. We don't have
-// a shared schema oracle (the kernel-host owns that state), so the
-// suggestions are limited to commands and structural keywords. Worth
-// a follow-up: let kernel-host expose a `complete` request.
+// handleComplete answers complete_request with the same completions
+// golars-lsp offers: the kernel-host analyses the cell against the
+// live session, so columns and frames are the ones loaded so far.
 func (k *kernel) handleComplete(msg message) {
-	text, _ := msg.Content["code"].(string)
-	code := []rune(text)
+	code, _ := msg.Content["code"].(string)
 	posF, _ := msg.Content["cursor_pos"].(float64)
-	pos := max(0, min(int(posF), len(code)))
-
-	// Walk back to the start of the current word.
-	start := pos
-	for start > 0 {
-		c := code[start-1]
-		if !isIdentRune(c) && c != '.' {
-			break
+	cursor := runeToByte(code, int(posF))
+	r := k.ide("complete", code, cursor)
+	types := make([]map[string]any, len(r.Types))
+	for i, t := range r.Types {
+		types[i] = map[string]any{
+			"text": t.Text, "type": t.Type, "signature": t.Signature,
+			"start": byteToRune(code, t.Start), "end": byteToRune(code, t.End),
 		}
-		start--
 	}
-	prefix := string(code[start:pos])
-	dot := ""
-	if strings.HasPrefix(prefix, ".") {
-		dot = "."
+	if r.Matches == nil {
+		r.Matches = []string{}
 	}
-	prefix = strings.TrimPrefix(prefix, ".")
-
-	matches := []string{}
-	for _, name := range script.CompleteCommand(prefix) {
-		matches = append(matches, dot+name)
-	}
-
 	_ = k.send(k.shell, reply(msg, "complete_reply", map[string]any{
 		"status":       "ok",
-		"matches":      matches,
-		"cursor_start": start,
-		"cursor_end":   pos,
-		"metadata":     map[string]any{},
+		"matches":      r.Matches,
+		"cursor_start": byteToRune(code, r.Start),
+		"cursor_end":   byteToRune(code, r.End),
+		"metadata":     map[string]any{"_jupyter_types_experimental": types},
 	}))
 }
 
@@ -182,44 +167,21 @@ func (k *kernel) handleIsComplete(msg message) {
 	}))
 }
 
-// handleInspect: docs lookup keyed off the word at cursor_pos. Returns
-// the CommandSpec long doc as text/markdown when available.
+// handleInspect answers inspect_request (shift+tab) with the hover
+// text golars-lsp shows: command docs, function signatures and Go doc
+// comments, and column dtypes from the live session.
 func (k *kernel) handleInspect(msg message) {
-	text, _ := msg.Content["code"].(string)
-	code := []rune(text)
+	code, _ := msg.Content["code"].(string)
 	posF, _ := msg.Content["cursor_pos"].(float64)
-	pos := max(0, min(int(posF), len(code)))
-	// Word under cursor: scan both directions across identifier chars.
-	left, right := pos, pos
-	for left > 0 && (isIdentRune(code[left-1]) || code[left-1] == '.') {
-		left--
-	}
-	for right < len(code) && (isIdentRune(code[right]) || code[right] == '.') {
-		right++
-	}
-	word := strings.TrimPrefix(string(code[left:right]), ".")
-
+	r := k.ide("inspect", code, runeToByte(code, int(posF)))
 	content := map[string]any{
 		"status":   "ok",
-		"found":    false,
+		"found":    r.Markdown != "",
 		"data":     map[string]any{},
 		"metadata": map[string]any{},
 	}
-	if spec := script.FindCommand(word); spec != nil {
-		content["found"] = true
-		plain := spec.Signature + "\n\n" + spec.Summary
-		if spec.LongDoc != "" {
-			plain += "\n\n" + spec.LongDoc
-		}
-		content["data"] = map[string]any{
-			"text/markdown": spec.Markdown(),
-			"text/plain":    plain,
-		}
+	if r.Markdown != "" {
+		content["data"] = map[string]any{"text/markdown": r.Markdown, "text/plain": r.Markdown}
 	}
 	_ = k.send(k.shell, reply(msg, "inspect_reply", content))
-}
-
-func isIdentRune(c rune) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-		(c >= '0' && c <= '9') || c == '_'
 }

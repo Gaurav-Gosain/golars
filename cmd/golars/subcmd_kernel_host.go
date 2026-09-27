@@ -54,6 +54,11 @@ type kernelRequest struct {
 	Code string `json:"code"`
 	// Structured asks for tables as data (see the protocol above).
 	Structured bool `json:"structured,omitempty"`
+	// Op selects a non-executing request: "complete" or "inspect"
+	// Code at byte offset Cursor. The reply carries IDE instead of
+	// outputs. "" runs the cell.
+	Op     string `json:"op,omitempty"`
+	Cursor int    `json:"cursor,omitempty"`
 }
 
 // hostOutput is one entry of a structured reply's outputs.
@@ -133,6 +138,8 @@ type kernelResponse struct {
 	// Outputs is the ordered stdout text and tables of a structured
 	// request.
 	Outputs []hostOutput `json:"outputs,omitempty"`
+	// IDE answers complete and inspect requests.
+	IDE *ideReply `json:"ide,omitempty"`
 }
 
 func newKernelHostCmd() *cobra.Command {
@@ -175,7 +182,19 @@ func runKernelHost(realOut io.Writer, in io.Reader) error {
 			_ = enc.Encode(kernelResponse{Error: fmt.Sprintf("invalid request: %v", err)})
 			continue
 		}
-		resp := executeCell(s, req)
+		var resp kernelResponse
+		switch req.Op {
+		case "complete":
+			ide := s.ideComplete(req.Code, req.Cursor)
+			resp = kernelResponse{ID: req.ID, IDE: &ide}
+		case "inspect":
+			ide := s.ideInspect(req.Code, req.Cursor)
+			resp = kernelResponse{ID: req.ID, IDE: &ide}
+		case "":
+			resp = executeCell(s, req)
+		default:
+			resp = kernelResponse{ID: req.ID, Error: "unknown op " + req.Op}
+		}
 		if err := enc.Encode(resp); err != nil {
 			return err
 		}

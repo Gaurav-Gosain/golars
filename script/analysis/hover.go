@@ -76,7 +76,8 @@ func (r *Result) Hover(line, col int) string {
 			return ""
 		}
 		md := st.Spec.Markdown()
-		if step != nil && step.Changes {
+		if cat := st.Spec.Category; step != nil && step.Changes && step.HasFocus &&
+			(cat == "pipeline" || cat == "reshape" || cat == "io" || cat == "frames") {
 			md += "\n\n---\n\nAfter this statement: " + frameSummary(step.After)
 		}
 		return md

@@ -29,7 +29,7 @@ func TestNotebookCursorPositions(t *testing.T) {
 		{"sh", 2, 0, 2, "show"},
 		{"sh", -1, 0, 0, "show"},
 		{"sh", 100, 0, 2, "show"},
-		{".sh", 3, 0, 3, ".show"},
+		{".sh", 3, 1, 3, "show"},
 	} {
 		t.Run(tc.code, func(t *testing.T) {
 			sock := &recordingSocket{}
