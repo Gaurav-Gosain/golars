@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 
+	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/script/analysis"
 )
 
@@ -79,4 +81,30 @@ func (s *state) ideInspect(code string, cursor int) ideReply {
 		}
 	}
 	return ideReply{Markdown: md}
+}
+
+// focusTable returns the first rows of the focused frame with every
+// column as the structured table JSON. Shape is the shape of the rows
+// returned; a height equal to the limit means there may be more.
+func focusTable(s *state, req kernelRequest) kernelResponse {
+	resp := kernelResponse{ID: req.ID}
+	if !s.hasFocus() {
+		resp.Error = errNoFrame.Error()
+		return resp
+	}
+	n := req.MaxRows
+	if n <= 0 {
+		n = 50
+	}
+	df, err := s.currentLazy().Limit(n).Collect(s.ctx)
+	if err != nil {
+		resp.Error = err.Error()
+		return resp
+	}
+	defer df.Release()
+	b := df.MimeBundleWith(dataframe.FormatOptions{MaxRows: n, MaxCols: 10000, MaxCellRune: 256})
+	resp.Table = json.RawMessage(b[dataframe.TableMIME])
+	h, w := df.Shape()
+	resp.Shape = &[2]int{h, w}
+	return resp
 }

@@ -105,6 +105,7 @@ func init() {
 			Run: runNullCounts,
 		},
 	}
+	tools = append(tools, glrTools()...)
 }
 
 func findTool(name string) *Tool {

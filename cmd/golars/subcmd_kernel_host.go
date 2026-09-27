@@ -57,8 +57,12 @@ type kernelRequest struct {
 	// Op selects a non-executing request: "complete" or "inspect"
 	// Code at byte offset Cursor. The reply carries IDE instead of
 	// outputs. "" runs the cell.
+	// "table" returns the first MaxRows rows of the focused frame
+	// with every column, for programmatic callers (golars-mcp).
 	Op     string `json:"op,omitempty"`
 	Cursor int    `json:"cursor,omitempty"`
+	// MaxRows bounds the rows of an op=table reply (default 50).
+	MaxRows int `json:"max_rows,omitempty"`
 }
 
 // hostOutput is one entry of a structured reply's outputs.
@@ -190,6 +194,8 @@ func runKernelHost(realOut io.Writer, in io.Reader) error {
 		case "inspect":
 			ide := s.ideInspect(req.Code, req.Cursor)
 			resp = kernelResponse{ID: req.ID, IDE: &ide}
+		case "table":
+			resp = focusTable(s, req)
 		case "":
 			resp = executeCell(s, req)
 		default:
