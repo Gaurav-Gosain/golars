@@ -2,6 +2,8 @@ package dataframe_test
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
@@ -10,6 +12,46 @@ import (
 	"github.com/Gaurav-Gosain/golars/internal/testutil"
 	"github.com/Gaurav-Gosain/golars/series"
 )
+
+// Float keys in a multi-key group-by: -0.0 groups with 0.0, NaN with
+// NaN, null apart (polars 1.39 gives the same groups).
+func TestGroupByMultiKeyFloat(t *testing.T) {
+	mem := testutil.NewCheckedAllocator(t)
+	o := series.WithAllocator(mem)
+	nan := math.NaN()
+	k, _ := series.FromInt64("k", []int64{1, 1, 1, 1, 1, 1, 2}, nil, o)
+	f, _ := series.FromFloat64("f", []float64{0, math.Copysign(0, -1), nan, nan, 0, -1.5, -1.5},
+		[]bool{true, true, true, true, false, true, true}, o)
+	v, _ := series.FromInt64("v", []int64{1, 2, 3, 4, 5, 6, 7}, nil, o)
+	df, _ := dataframe.New(k, f, v)
+	defer df.Release()
+	ctx := context.Background()
+	out, err := df.GroupBy("k", "f").Agg(ctx, []expr.Expr{expr.Col("v").Sum().Alias("s")}, dataframe.WithGroupByAllocator(mem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Release()
+	sorted, err := out.SortBy(ctx, []string{"k", "f"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sorted.Release()
+	want := []string{"1 <nil> 5", "1 -1.5 6", "1 0 3", "1 NaN 7", "2 -1.5 7"}
+	if sorted.Height() != len(want) {
+		t.Fatalf("groups = %d, want %d\n%s", sorted.Height(), len(want), sorted)
+	}
+	for i, w := range want {
+		kv, _ := sorted.ColumnAt(0).Get(i)
+		fv, _ := sorted.ColumnAt(1).Get(i)
+		sv, _ := sorted.ColumnAt(2).Get(i)
+		if got := fmt.Sprint(kv, " ", fv, " ", sv); got != w {
+			t.Fatalf("row %d = %q, want %q\n%s", i, got, w, sorted)
+		}
+	}
+	if fv, _ := sorted.ColumnAt(1).Get(2); math.Signbit(fv.(float64)) {
+		t.Fatal("0.0 group key came out as -0.0")
+	}
+}
 
 // Multi-key group-bys with a temporal key used to put every row in its
 // own group: the hash path did not accept dates and the sort path's key
