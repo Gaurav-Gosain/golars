@@ -26,7 +26,22 @@ const (
 	LeftJoin
 	// CrossJoin is the Cartesian product; key columns are ignored.
 	CrossJoin
+	// RightJoin emits every right row; left columns are null when no
+	// match.
+	RightJoin
+	// FullJoin emits every row of both sides (polars "full", also known
+	// as an outer join).
+	FullJoin
+	// SemiJoin keeps the left rows that have a match, with only the
+	// left columns.
+	SemiJoin
+	// AntiJoin keeps the left rows that have no match, with only the
+	// left columns.
+	AntiJoin
 )
+
+// OuterJoin is another name for FullJoin.
+const OuterJoin = FullJoin
 
 func (j JoinType) String() string {
 	switch j {
@@ -36,6 +51,14 @@ func (j JoinType) String() string {
 		return "left"
 	case CrossJoin:
 		return "cross"
+	case RightJoin:
+		return "right"
+	case FullJoin:
+		return "full"
+	case SemiJoin:
+		return "semi"
+	case AntiJoin:
+		return "anti"
 	}
 	return "?"
 }
@@ -46,12 +69,20 @@ type JoinOption func(*joinConfig)
 type joinConfig struct {
 	alloc  memory.Allocator
 	suffix string
+	// leftOn and rightOn replace the on argument when set.
+	leftOn, rightOn []string
+	// coalesce is -1 (polars default), 0 or 1.
+	coalesce   int8
+	nullsEqual bool
+	validate   JoinValidation
+	order      JoinOrder
 }
 
 func resolveJoin(opts []JoinOption) joinConfig {
 	c := joinConfig{
-		alloc:  memory.DefaultAllocator,
-		suffix: "_right",
+		alloc:    memory.DefaultAllocator,
+		suffix:   "_right",
+		coalesce: -1,
 	}
 	for _, o := range opts {
 		o(&c)
@@ -77,51 +108,21 @@ var (
 	ErrJoinUnsupportedKey   = fmt.Errorf("dataframe.Join: unsupported key dtype")
 )
 
-// Join combines left and right on the given key columns. on must name columns
-// that exist in both frames with the same dtype. The result has every left
-// column followed by every right column except those named in on. Right-side
-// column names that collide with a left-side name receive a suffix.
+// Join combines left and right on the given key columns, following
+// polars' DataFrame.join. on names key columns present in both frames;
+// WithJoinKeys joins differently named columns instead. how selects
+// inner, left, right, full, semi, anti or cross semantics, and the
+// other options mirror polars' suffix, coalesce, nulls_equal, validate
+// and maintain_order arguments.
 //
-// Implementation: hash-based single-key join for Phase 2. Multi-key is not
-// supported yet and produces an error.
+// Output columns follow polars: the left columns, then the right
+// columns, with right names that collide with a left name suffixed.
+// Coalesced joins drop the right key columns (a right join drops the
+// left ones instead); a coalesced full join merges each key pair into
+// the left key column.
 func (df *DataFrame) Join(ctx context.Context, right *DataFrame, on []string, how JoinType, opts ...JoinOption) (*DataFrame, error) {
 	cfg := resolveJoin(opts)
-
-	if how == CrossJoin {
-		return crossJoin(ctx, df, right, cfg)
-	}
-	if len(on) == 0 {
-		return nil, fmt.Errorf("dataframe.Join: on must not be empty")
-	}
-	if len(on) > 1 {
-		return nil, fmt.Errorf("dataframe.Join: multi-key join not implemented yet")
-	}
-	key := on[0]
-
-	leftKey, err := df.Column(key)
-	if err != nil {
-		return nil, fmt.Errorf("left: %w", err)
-	}
-	rightKey, err := right.Column(key)
-	if err != nil {
-		return nil, fmt.Errorf("right: %w", err)
-	}
-	if !leftKey.DType().Equal(rightKey.DType()) {
-		return nil, fmt.Errorf("%w: %s vs %s", ErrJoinKeyDTypeMismatch,
-			leftKey.DType(), rightKey.DType())
-	}
-
-	leftIdx, rightIdx, err := hashJoinIndices(leftKey, rightKey, how)
-	if err != nil {
-		return nil, err
-	}
-
-	out, err := buildJoinOutput(ctx, df, right, leftIdx, rightIdx, on, cfg)
-	// The index arrays are only read by the gathers above; recycle them
-	// for the next join.
-	intScratch.put(leftIdx)
-	intScratch.put(rightIdx)
-	return out, err
+	return joinFrames(ctx, df, right, cfg.spec(on, how), cfg)
 }
 
 // hashJoinIndices runs the hash join on the single-key Series and returns
@@ -1094,79 +1095,6 @@ func hashJoinBool(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
 	return lOut, rOut, nil
 }
 
-// buildJoinOutput materializes the result DataFrame from paired indices.
-func buildJoinOutput(ctx context.Context, left, right *DataFrame, leftIdx, rightIdx []int, on []string, cfg joinConfig) (*DataFrame, error) {
-	// Wrap cfg.alloc with the pool so repeated joins (e.g. a tight
-	// benchmark loop or a streaming pipeline) recycle the output arrow
-	// buffers instead of churning the Go allocator. Profiling LeftJoin
-	// 16K showed ~30% of runtime in runtime.gcStart/mallocgc before
-	// pooling; the hash and gather themselves are only ~60% of wall.
-	cfg.alloc = compute.PoolingMem(cfg.alloc)
-	leftCount := len(leftIdx)
-
-	// Pre-reserve: left width + right width - overlap in `on`.
-	outCols := make([]*series.Series, 0, left.Width()+right.Width())
-	release := func() {
-		for _, c := range outCols {
-			if c != nil {
-				c.Release()
-			}
-		}
-	}
-
-	// Identity-leftIdx fast path: when each left row produces exactly one
-	// output row (e.g. LeftJoin with unique right keys, or InnerJoin with
-	// 1:1 matches), leftIdx == [0,1,...,leftLen-1]. In that case the Take
-	// is a no-op: we can reuse the left series directly with Retain.
-	leftIsIdentity := leftCount == left.Height() && isIdentity(leftIdx)
-
-	// 1. Left columns at leftIdx.
-	for _, f := range left.Schema().Fields() {
-		src, _ := left.Column(f.Name)
-		if leftIsIdentity {
-			// Clone wraps a fresh *Series around the same chunked data
-			// with a ref increment, so got.Release() and left.Release()
-			// each drop one independent ref.
-			outCols = append(outCols, src.Clone())
-			continue
-		}
-		out, err := compute.Take(ctx, src, leftIdx, compute.WithAllocator(cfg.alloc))
-		if err != nil {
-			release()
-			return nil, err
-		}
-		outCols = append(outCols, out)
-	}
-
-	// 2. Right columns at rightIdx, skipping join keys; rename on collision.
-	onSet := make(map[string]struct{}, len(on))
-	for _, k := range on {
-		onSet[k] = struct{}{}
-	}
-
-	for _, f := range right.Schema().Fields() {
-		if _, isKey := onSet[f.Name]; isKey {
-			continue
-		}
-		src, _ := right.Column(f.Name)
-		out, err := gatherWithNulls(ctx, src, rightIdx, leftCount, cfg.alloc)
-		if err != nil {
-			release()
-			return nil, err
-		}
-		name := f.Name
-		if left.Schema().Contains(name) {
-			name = name + cfg.suffix
-			renamed := out.Rename(name)
-			out.Release()
-			out = renamed
-		}
-		outCols = append(outCols, out)
-	}
-
-	return New(outCols...)
-}
-
 // isIdentity reports whether indices equals [0, 1, ..., len(indices)-1].
 // Scans the tail first: joins with any non-match break the identity early,
 // and worker partitions each start with their chunk base, so a mismatch
@@ -1200,8 +1128,11 @@ func gatherWithNulls(ctx context.Context, src *series.Series, indices []int, n i
 		return series.FullNull(src.Name(), src.DType().Arrow(), len(indices), series.WithAllocator(alloc))
 	}
 
-	// Construct a safe indices slice (replace -1 with 0) and take, then patch
-	// nulls via a bool mask. Simpler: build per-type directly.
+	if src.NumChunks() != 1 {
+		// The typed gathers below read one chunk; the generic gather
+		// consolidates and treats -1 as null.
+		return src.Gather(indices, series.WithAllocator(alloc))
+	}
 	return gatherNullable(ctx, src, indices, n, alloc)
 }
 
@@ -1498,19 +1429,27 @@ func gatherNullable(ctx context.Context, src *series.Series, indices []int, n in
 	case arrow.DICTIONARY:
 		return catGatherNullable(src, indices, alloc)
 	}
-	return nil, fmt.Errorf("dataframe.Join: unsupported result dtype %s", src.DType())
+	// Every other dtype (small ints, temporals, nested, binary) uses the
+	// generic gather, which treats -1 as null.
+	return src.Gather(indices, series.WithAllocator(alloc))
 }
 
-// crossJoin emits the Cartesian product of left and right.
-func crossJoin(ctx context.Context, left, right *DataFrame, cfg joinConfig) (*DataFrame, error) {
-	total := left.Height() * right.Height()
-	leftIdx := make([]int, 0, total)
-	rightIdx := make([]int, 0, total)
-	for i := 0; i < left.Height(); i++ {
-		for j := 0; j < right.Height(); j++ {
-			leftIdx = append(leftIdx, i)
-			rightIdx = append(rightIdx, j)
+// crossJoin emits the Cartesian product of left and right, left-major.
+func crossJoin(ctx context.Context, left, right *DataFrame, layout []joinOutCol, cfg joinConfig) (*DataFrame, error) {
+	nl, nr := left.Height(), right.Height()
+	total := nl * nr
+	leftIdx := intScratch.get(total)
+	rightIdx := intScratch.get(total)
+	at := 0
+	for i := range nl {
+		for j := range nr {
+			leftIdx[at] = i
+			rightIdx[at] = j
+			at++
 		}
 	}
-	return buildJoinOutput(ctx, left, right, leftIdx, rightIdx, nil, cfg)
+	out, err := buildJoinFrame(ctx, left, right, leftIdx, rightIdx, layout, nil, cfg)
+	intScratch.put(leftIdx)
+	intScratch.put(rightIdx)
+	return out, err
 }

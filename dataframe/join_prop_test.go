@@ -193,8 +193,8 @@ func TestJoinRegressions(t *testing.T) {
 	}
 }
 
-// TestJoinMultiKeyProp is a placeholder for multi-key joins, which
-// polars supports and golars does not yet implement.
+// TestJoinMultiKeyProp checks a multi-key self join: polars'
+// df.join(df, on=["a", "b"]) returns 3 rows.
 func TestJoinMultiKeyProp(t *testing.T) {
 	t.Parallel()
 	mem := testutil.NewCheckedAllocator(t)
@@ -207,8 +207,7 @@ func TestJoinMultiKeyProp(t *testing.T) {
 	defer df.Release()
 	out, err := df.Join(context.Background(), df, []string{"a", "b"}, dataframe.InnerJoin, dataframe.WithJoinAllocator(mem))
 	if err != nil {
-		t.Skipf("known bug: multi-key join not implemented (dataframe/join.go Join): %v; "+
-			"polars: df.join(df, on=[\"a\", \"b\"]) returns 3 rows", err)
+		t.Fatal(err)
 	}
 	defer out.Release()
 	if out.Height() != 3 {
