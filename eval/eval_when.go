@@ -26,6 +26,9 @@ func evalWhenThen(ctx context.Context, ec EvalContext, n expr.WhenThenNode, df *
 	if err := stringSupertype(ctx, ec, ss[1:]); err != nil {
 		return nil, err
 	}
+	if err := temporalSupertype(ctx, ec, ss[1:]); err != nil {
+		return nil, err
+	}
 	pred, ifTrue, ifFalse := ss[0], ss[1], ss[2]
 	// A Null-typed branch (when(...).then(1) with no otherwise) takes
 	// the other branch's dtype, as in polars.
@@ -63,6 +66,15 @@ func evalWhenThen(ctx context.Context, ec EvalContext, n expr.WhenThenNode, df *
 // fillNullFrom replaces the nulls of s with the value of fill in the
 // same row. Both sides are promoted to a common dtype first.
 func fillNullFrom(ctx context.Context, ec EvalContext, s, fill *series.Series) (*series.Series, error) {
+	pair := []*series.Series{s.Clone(), fill.Clone()}
+	defer releaseAll(pair)
+	if err := stringSupertype(ctx, ec, pair); err != nil {
+		return nil, err
+	}
+	if err := temporalSupertype(ctx, ec, pair); err != nil {
+		return nil, err
+	}
+	s, fill = pair[0], pair[1]
 	valid, err := s.IsNotNull(seriesAlloc(ec))
 	if err != nil {
 		return nil, err
@@ -111,4 +123,52 @@ func stringSupertype(ctx context.Context, ec EvalContext, ss []*series.Series) e
 		}
 	}
 	return nil
+}
+
+// temporalSupertype casts two temporal branches of different dtypes to
+// polars' supertype: the coarser unit for two durations or datetimes,
+// and the datetime for a date and a datetime. It replaces the entries
+// of ss it casts.
+func temporalSupertype(ctx context.Context, ec EvalContext, ss []*series.Series) error {
+	if len(ss) != 2 {
+		return nil
+	}
+	a, b := ss[0].DType(), ss[1].DType()
+	if !a.IsTemporal() || !b.IsTemporal() || a.Equal(b) {
+		return nil
+	}
+	var target dtype.DType
+	switch {
+	case a.IsDuration() && b.IsDuration():
+		target = dtype.Duration(coarserUnit(unitOf(a), unitOf(b)))
+	case a.IsDatetime() && b.IsDatetime() && a.TimeZone() == b.TimeZone():
+		target = dtype.Datetime(coarserUnit(unitOf(a), unitOf(b)), a.TimeZone())
+	case a.IsDatetime() && b.IsDate():
+		target = a
+	case a.IsDate() && b.IsDatetime():
+		target = b
+	default:
+		return nil
+	}
+	for i, s := range ss {
+		if s.DType().Equal(target) {
+			continue
+		}
+		c, err := compute.Cast(ctx, s, target, kernelOpts(ec)...)
+		if err != nil {
+			return err
+		}
+		s.Release()
+		ss[i] = c
+	}
+	return nil
+}
+
+func coarserUnit(a, b dtype.TimeUnit) dtype.TimeUnit {
+	return min(a, b)
+}
+
+func unitOf(d dtype.DType) dtype.TimeUnit {
+	u, _ := d.TimeUnit()
+	return u
 }

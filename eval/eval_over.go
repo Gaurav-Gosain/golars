@@ -85,7 +85,9 @@ func evalOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *datafram
 		if err != nil {
 			return nil, err
 		}
-		res, err := evalNode(ctx, ec, n.Inner, sub)
+		gec := ec
+		gec.inGroup = true
+		res, err := evalNode(ctx, gec, n.Inner, sub)
 		sub.Release()
 		if err != nil {
 			return nil, err

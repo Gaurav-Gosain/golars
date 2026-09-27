@@ -24,6 +24,11 @@ import (
 type EvalContext struct {
 	Alloc       memory.Allocator
 	Parallelism int
+
+	// inGroup is set while an expression runs on one group of a
+	// group_by().agg() or over(); a few functions follow polars'
+	// group semantics there (quantile of bools is null).
+	inGroup bool
 }
 
 // Default returns an EvalContext backed by memory.DefaultAllocator.

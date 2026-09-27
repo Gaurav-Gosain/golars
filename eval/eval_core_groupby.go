@@ -350,7 +350,9 @@ func aggOverGroups(ctx context.Context, ec EvalContext, e expr.Expr, sorted *dat
 		if err != nil {
 			return nil, err
 		}
-		res, err := evalNode(ctx, ec, e, sub)
+		gec := ec
+		gec.inGroup = true
+		res, err := evalNode(ctx, gec, e, sub)
 		sub.Release()
 		if err != nil {
 			return nil, err

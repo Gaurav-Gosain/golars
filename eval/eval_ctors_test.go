@@ -30,9 +30,9 @@ func TestCoalesceExpr(t *testing.T) {
 	}
 	defer out.Release()
 	col, _ := out.Column("c")
-	arr := col.Chunk(0).(*array.Float64)
+	arr := col.Chunk(0).(*array.Int64) // polars keeps i64
 	// Row 0: a=1 -> 1. Row 1: a null, b=20 -> 20. Row 2: a=3 -> 3.
-	want := []float64{1, 20, 3}
+	want := []int64{1, 20, 3}
 	for i, v := range want {
 		if arr.Value(i) != v {
 			t.Fatalf("row %d: got %v want %v", i, arr.Value(i), v)

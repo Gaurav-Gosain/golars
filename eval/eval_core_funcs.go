@@ -121,13 +121,13 @@ func registerScalarAggs() {
 	}))
 	registerCore("quantile", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
 		if s.DType().IsBool() {
-			return nil, fmt.Errorf("`quantile` operation not supported for dtype `bool`")
+			return boolQuantile(s, ec)
 		}
 		return aggTyped(ec, "quantile", s)(s.QuantileSeries(paramFloat(n, 0, 0.5), series.QuantileNearest, seriesAlloc(ec)))
 	}))
 	registerCore("quantile_with", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
 		if s.DType().IsBool() {
-			return nil, fmt.Errorf("`quantile` operation not supported for dtype `bool`")
+			return boolQuantile(s, ec)
 		}
 		return aggTyped(ec, "quantile", s)(s.QuantileSeries(paramFloat(n, 0, 0.5), paramString(n, 1, series.QuantileNearest), seriesAlloc(ec)))
 	}))
@@ -463,4 +463,13 @@ func evalReplace(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *d
 	}
 	defer nw.Release()
 	return s.ReplaceStrictSeries(old, nw, dflt, seriesAlloc(ec))
+}
+
+// boolQuantile is polars' quantile of a bool column: an error at the
+// top level, a null bool inside a group.
+func boolQuantile(s *series.Series, ec EvalContext) (*series.Series, error) {
+	if !ec.inGroup {
+		return nil, fmt.Errorf("`quantile` operation not supported for dtype `bool`")
+	}
+	return series.FullNull(s.Name(), s.DType().Arrow(), 1, seriesAlloc(ec))
 }
