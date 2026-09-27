@@ -56,7 +56,7 @@ func InferValuesDType(vals []any) arrow.DataType {
 func FromValues(name string, dt arrow.DataType, vals []any, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
 	if dt.ID() == arrow.NULL {
-		return New(name, array.MakeArrayOfNull(cfg.alloc, dt, len(vals)))
+		return New(name, nullArray(cfg.alloc, dt, len(vals)))
 	}
 	b := array.NewBuilder(cfg.alloc, dt)
 	defer b.Release()

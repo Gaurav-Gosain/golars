@@ -360,7 +360,18 @@ func ConcatSeries(name string, parts []*Series, opts ...Option) (*Series, error)
 // FullNull returns an all-null Series of the given arrow dtype.
 func FullNull(name string, dt arrow.DataType, n int, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
-	return New(name, array.MakeArrayOfNull(cfg.alloc, dt, n))
+	return New(name, nullArray(cfg.alloc, dt, n))
+}
+
+// nullArray builds an all-null array. arrow's MakeArrayOfNull assumes
+// freshly allocated buffers are zeroed; a recycling allocator returns
+// dirty memory, which left garbage offsets in string and list columns
+// (found by internal/difftest), so a builder is used instead.
+func nullArray(alloc memory.Allocator, dt arrow.DataType, n int) arrow.Array {
+	b := array.NewBuilder(alloc, dt)
+	defer b.Release()
+	b.AppendNulls(n)
+	return b.NewArray()
 }
 
 // Broadcast repeats a length-1 Series n times. A Series that is already

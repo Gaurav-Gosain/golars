@@ -56,13 +56,13 @@ func (s *Series) Shift(periods int, opts ...Option) (*Series, error) {
 
 	var chunks []arrow.Array
 	if periods > 0 {
-		nullPrefix := array.MakeArrayOfNull(cfg.alloc, dt, periods)
+		nullPrefix := nullArray(cfg.alloc, dt, periods)
 		dataSlice := array.NewSlice(src, 0, int64(n-periods))
 		chunks = []arrow.Array{nullPrefix, dataSlice}
 	} else {
 		off := -periods
 		dataSlice := array.NewSlice(src, int64(off), int64(n))
-		nullSuffix := array.MakeArrayOfNull(cfg.alloc, dt, off)
+		nullSuffix := nullArray(cfg.alloc, dt, off)
 		chunks = []arrow.Array{dataSlice, nullSuffix}
 	}
 	// arrow.NewChunked retains each chunk; release our local references.
