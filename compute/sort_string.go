@@ -2,6 +2,7 @@ package compute
 
 import (
 	"encoding/binary"
+	"math/bits"
 	"runtime"
 	"slices"
 	"sync"
@@ -33,6 +34,34 @@ type strSortEntry struct {
 	row int
 }
 
+// strSortEntryPool recycles entry and scratch buffers between sorts,
+// bucketed by power-of-two capacity. At 1M rows the two buffers are
+// 32 MB, and a fresh allocation of that size pays for zeroing and page
+// faults on every call.
+var strSortEntryPool [48]sync.Pool
+
+// getStrSortEntries returns a buffer of length n with unspecified
+// contents.
+func getStrSortEntries(n int) []strSortEntry {
+	if n == 0 {
+		return nil
+	}
+	b := bits.Len(uint(n - 1))
+	if v := strSortEntryPool[b].Get(); v != nil {
+		return (*(v.(*[]strSortEntry)))[:n]
+	}
+	return make([]strSortEntry, n, 1<<b)
+}
+
+func putStrSortEntries(s []strSortEntry) {
+	c := cap(s)
+	if c == 0 || c&(c-1) != 0 {
+		return
+	}
+	s = s[:0]
+	strSortEntryPool[bits.Len(uint(c-1))].Put(&s)
+}
+
 // strSortSmall is the run length below which insertion sort beats the
 // radix passes.
 const strSortSmall = 48
@@ -43,7 +72,8 @@ func sortIndicesString(a *array.String, so SortOptions) []int {
 	n := a.Len()
 	out := make([]int, 0, n)
 	var nulls []int
-	entries := make([]strSortEntry, 0, n)
+	entries := getStrSortEntries(n)[:0]
+	defer putStrSortEntries(entries)
 	if a.NullN() == 0 {
 		for i := range n {
 			entries = append(entries, strSortEntry{row: i})
@@ -101,7 +131,8 @@ const strSortParallelMin = 1 << 16
 // of equal keys on a worker pool. Runs occupy disjoint ranges of es and
 // of the scratch buffer, so workers share nothing.
 func (ss *strSorter) sortTop(es []strSortEntry) {
-	tmp := make([]strSortEntry, len(es))
+	tmp := getStrSortEntries(len(es))
+	defer putStrSortEntries(tmp)
 	workers := runtime.GOMAXPROCS(0)
 	if len(es) < strSortParallelMin || workers < 2 {
 		ss.sortRun(es, tmp, 0)
