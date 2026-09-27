@@ -117,3 +117,19 @@ func isUnsignedID(id arrow.Type) bool {
 	}
 	return false
 }
+
+// concatStrings concatenates two equal-length string Series row by
+// row; a null on either side gives null.
+func concatStrings(a, b *series.Series, ec EvalContext) (*series.Series, error) {
+	av, bv := a.ToList(), b.ToList()
+	out := make([]string, len(av))
+	valid := make([]bool, len(av))
+	for i := range av {
+		x, ok1 := av[i].(string)
+		y, ok2 := bv[i].(string)
+		if ok1 && ok2 {
+			out[i], valid[i] = x+y, true
+		}
+	}
+	return series.FromString(a.Name(), out, valid, seriesAlloc(ec))
+}

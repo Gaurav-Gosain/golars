@@ -128,39 +128,50 @@ func (s *Series) Sign(opts ...Option) (*Series, error) {
 	return nil, fmt.Errorf("series: Sign unsupported for dtype %s", s.DType())
 }
 
-// Round rounds each value to the given number of decimal places.
-// decimals=0 rounds to integer. Integers are a no-op clone.
-// NaN stays NaN; ±Inf stays unchanged.
+// Round rounds each value to the given number of decimal places with
+// ties to even, polars' default mode: 25.65 is 25.6 (25.65 * 10 is
+// exactly 256.5 in f64). f32 values are rounded in f64 and cast back.
+// decimals=0 rounds to integer. Integers are a no-op clone. A
+// non-finite result (NaN, Inf, overflow) keeps the input value.
 func (s *Series) Round(decimals int, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
 	chunk := s.Chunk(0)
 	n := chunk.Len()
+	round := func(v float64) float64 {
+		if decimals == 0 {
+			return math.RoundToEven(v)
+		}
+		if decimals >= 326 {
+			return v
+		}
+		scale := math.Pow10(decimals)
+		r := math.RoundToEven(v*scale) / scale
+		if math.IsNaN(r) || math.IsInf(r, 0) {
+			return v
+		}
+		return r
+	}
 	switch a := chunk.(type) {
 	case *array.Float64:
 		raw := a.Float64Values()
-		scale := math.Pow10(decimals)
 		return BuildFloat64DirectNullable(s.Name(), n, cfg.alloc, func(out []float64) {
 			for i, v := range raw {
-				if math.IsNaN(v) || math.IsInf(v, 0) {
-					out[i] = v
-					continue
-				}
-				out[i] = math.Round(v*scale) / scale
+				out[i] = round(v)
 			}
 		}, validFromChunk(chunk))
 	case *array.Float32:
 		raw := a.Float32Values()
 		out := make([]float32, n)
-		scale := float32(math.Pow10(decimals))
 		for i, v := range raw {
-			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-				out[i] = v
-				continue
+			r := float32(round(float64(v)))
+			if math.IsInf(float64(r), 0) {
+				r = v
 			}
-			out[i] = float32(math.Round(float64(v*scale))) / scale
+			out[i] = r
 		}
 		return FromFloat32(s.Name(), out, validFromChunk(chunk), WithAllocator(cfg.alloc))
-	case *array.Int64, *array.Int32, *array.Uint32, *array.Uint64:
+	case *array.Int64, *array.Int32, *array.Uint32, *array.Uint64,
+		*array.Int8, *array.Int16, *array.Uint8, *array.Uint16:
 		return s.Clone(), nil
 	}
 	return nil, fmt.Errorf("series: Round unsupported for dtype %s", s.DType())

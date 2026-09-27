@@ -217,8 +217,11 @@ func (df *DataFrame) Unique(ctx context.Context) (*DataFrame, error) {
 			return out, err
 		}
 	}
-	names := df.ColumnNames()
-	return df.GroupBy(names...).Agg(ctx, nil)
+	// Keep the first occurrence of every distinct row, in input order
+	// (polars unique(maintain_order=True)). rowGroupIDs covers every
+	// dtype and treats null as its own value.
+	_, first := rowGroupIDs(df.cols, df.height)
+	return df.Gather(ctx, first)
 }
 
 // uniqueFastSingle runs single-column Unique via a direct hash dedup.

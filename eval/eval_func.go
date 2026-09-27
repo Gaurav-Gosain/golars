@@ -417,19 +417,19 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 	case "skew":
 		defer func() { releaseOnErr = nil }()
 		defer arg0.Release()
-		v, err := arg0.Skew()
+		v, ok, err := arg0.SkewNullable(paramBool(n, 0, true))
 		if err != nil {
 			return nil, err
 		}
-		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{!isNaN(v)})
+		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{ok})
 	case "kurtosis":
 		defer func() { releaseOnErr = nil }()
 		defer arg0.Release()
-		v, err := arg0.Kurtosis()
+		v, ok, err := arg0.KurtosisNullable(paramBool(n, 0, true), paramBool(n, 1, true))
 		if err != nil {
 			return nil, err
 		}
-		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{!isNaN(v)})
+		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{ok})
 	case "entropy":
 		defer func() { releaseOnErr = nil }()
 		defer arg0.Release()

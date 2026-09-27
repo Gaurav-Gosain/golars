@@ -1,6 +1,6 @@
 {
   "name": "date_minus_huge_duration",
-  "status": "known",
+  "status": "fixed",
   "note": "date - duration that overflows: polars null, golars wraps (column \"c0\" row 0: golars 918203961, polars null)",
   "plan": {
     "seed": 200527,

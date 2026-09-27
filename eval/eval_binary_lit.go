@@ -39,6 +39,10 @@ func evalBinaryLiteralFast(
 		op = toCompareOp(n.Op, true) // flip sense
 	}
 	// Only comparison operators have Lit fast paths.
+	if _, isStr := lit.Value.(string); isStr && isArithOp(op) {
+		// String `+` concatenates; the generic path handles it.
+		return nil, false, nil
+	}
 	if op == opInvalid {
 		return nil, false, nil
 	}

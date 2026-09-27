@@ -1,6 +1,6 @@
 {
   "name": "unique_u8_with_null",
-  "status": "known",
+  "status": "fixed",
   "note": "unique on a u8 column with a null loses the non-null value (column \"c1\" row 0: golars null, polars 243)",
   "plan": {
     "seed": 200367,

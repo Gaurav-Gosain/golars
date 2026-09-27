@@ -1,6 +1,6 @@
 {
   "name": "cum_min_nan",
-  "status": "known",
+  "status": "fixed",
   "note": "cum_min propagates NaN; polars treats NaN as larger than any number: [NaN, 1] (column \"o4\" row 0: golars [NaN, NaN], polars [NaN, 1])",
   "plan": {
     "seed": 200128,

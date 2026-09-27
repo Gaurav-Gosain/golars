@@ -1,6 +1,6 @@
 {
   "name": "date_plus_subday_duration",
-  "status": "known",
+  "status": "fixed",
   "note": "date + duration[ns] of -1: golars 9642, polars 9643 (date is cast to datetime before adding) (column \"o4\" row 0: golars 9642, polars 9643)",
   "plan": {
     "seed": 200043,

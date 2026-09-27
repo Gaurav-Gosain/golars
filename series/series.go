@@ -294,7 +294,7 @@ func (s *Series) consolidateInPlace() {
 	if len(chunks) <= 1 {
 		return
 	}
-	arr, err := array.Concatenate(chunks, memory.DefaultAllocator)
+	arr, err := ConcatArrays(chunks, memory.DefaultAllocator)
 	if err != nil {
 		// Concatenate only fails on dtype mismatch, which arrow already
 		// prevents at NewChunked time; treat as impossible but fall back
@@ -363,7 +363,7 @@ func (s *Series) Consolidated() (arrow.Array, error) {
 		chunks[0].Retain()
 		return chunks[0], nil
 	default:
-		return array.Concatenate(chunks, memory.DefaultAllocator)
+		return ConcatArrays(chunks, memory.DefaultAllocator)
 	}
 }
 

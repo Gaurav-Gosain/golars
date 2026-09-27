@@ -93,14 +93,20 @@ func (df *DataFrame) Unpivot(ctx context.Context, idVars []string, valueVars []s
 			}
 		}
 	}
-	// polars: an index column named "variable" or "value" (or twice)
-	// is a DuplicateError.
-	outNames := map[string]bool{}
-	for _, n := range append(append([]string(nil), idVars...), "variable", "value") {
-		if outNames[n] {
+	// polars resolves the output schema from the whole input schema
+	// plus "variable" and "value", so an input column with either name
+	// is a DuplicateError even when it is not kept.
+	for _, n := range []string{"variable", "value"} {
+		if _, ok := df.sch.Index(n); ok {
 			return nil, fmt.Errorf("dataframe.Unpivot: duplicate column name %q", n)
 		}
-		outNames[n] = true
+	}
+	seenID := map[string]bool{}
+	for _, n := range idVars {
+		if seenID[n] {
+			return nil, fmt.Errorf("dataframe.Unpivot: duplicate column name %q", n)
+		}
+		seenID[n] = true
 	}
 	idCols, err := df.subsetColumns(idVars)
 	if err != nil {

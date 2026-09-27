@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 )
 
@@ -17,72 +18,99 @@ func (s *Series) Skew() (float64, error) { return s.skew(false) }
 func (s *Series) SkewUnbiased() (float64, error) { return s.skew(true) }
 
 func (s *Series) skew(unbiased bool) (float64, error) {
-	vals, err := floatValuesForStats(s)
-	if err != nil {
-		return 0, err
+	v, ok, err := s.SkewNullable(!unbiased)
+	if err != nil || !ok {
+		return math.NaN(), err
 	}
-	n := float64(len(vals))
-	if n < 2 || (unbiased && n < 3) {
-		return math.NaN(), nil
-	}
-	mean := sumFloats(vals) / n
-	var m2, m3 float64
-	for _, v := range vals {
-		d := v - mean
-		m2 += d * d
-		m3 += d * d * d
-	}
-	m2 /= n
-	m3 /= n
-	if m2 == 0 {
-		return math.NaN(), nil
-	}
-	g1 := m3 / math.Pow(m2, 1.5)
-	if !unbiased {
-		return g1, nil
-	}
-	adj := math.Sqrt(n*(n-1)) / (n - 2)
-	return adj * g1, nil
+	return v, nil
 }
 
-// Kurtosis returns the excess kurtosis of the non-null values.
-// Matches polars' default (bias=True, fisher=True): m4/m2^2 - 3,
-// where m_k = (1/n)*sum((x-mean)^k). Call KurtosisUnbiased for the
-// sample-size-corrected scipy formula.
-func (s *Series) Kurtosis() (float64, error) { return s.kurtosis(false) }
+// momentState holds polars' central moment sums of the non-null values.
+type momentState struct{ n, mean, m2, m3, m4 float64 }
 
-// KurtosisUnbiased returns the bias-corrected (scipy bias=False)
-// excess kurtosis.
-func (s *Series) KurtosisUnbiased() (float64, error) { return s.kurtosis(true) }
+func momentsOf(vals []float64) momentState {
+	n := float64(len(vals))
+	if n == 0 {
+		return momentState{}
+	}
+	st := momentState{n: n, mean: sumFloats(vals) / n}
+	for _, v := range vals {
+		d := v - st.mean
+		d2 := d * d
+		st.m2 += d2
+		st.m3 += d * d2
+		st.m4 += d2 * d2
+	}
+	return st
+}
 
-func (s *Series) kurtosis(unbiased bool) (float64, error) {
+// isZeroVar is polars' test for a numerically zero variance.
+func (st momentState) isZeroVar(m2 float64) bool {
+	lim := 2.220446049250313e-16 * st.mean
+	return m2 <= lim*lim
+}
+
+// SkewNullable returns polars' skew: null for no values (or at most
+// two with bias=false), NaN for a zero variance.
+func (s *Series) SkewNullable(bias bool) (float64, bool, error) {
 	vals, err := floatValuesForStats(s)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	n := float64(len(vals))
-	if n < 2 || (unbiased && n < 4) {
-		return math.NaN(), nil
+	st := momentsOf(vals)
+	m2, m3 := st.m2/st.n, st.m3/st.n
+	g1 := math.NaN()
+	if !st.isZeroVar(m2) {
+		g1 = m3 / math.Pow(m2, 1.5)
 	}
-	mean := sumFloats(vals) / n
-	var m2, m4 float64
-	for _, v := range vals {
-		d := v - mean
-		d2 := d * d
-		m2 += d2
-		m4 += d2 * d2
+	if bias {
+		return g1, st.n > 0, nil
 	}
-	if m2 == 0 {
-		return math.NaN(), nil
+	if st.n <= 2 {
+		return 0, false, nil
 	}
-	if !unbiased {
-		m2n := m2 / n
-		m4n := m4 / n
-		return m4n/(m2n*m2n) - 3, nil
+	return math.Sqrt(st.n*(st.n-1)) / (st.n - 2) * g1, true, nil
+}
+
+// KurtosisNullable returns polars' kurtosis: null for no values (or at
+// most three with bias=false), NaN for a zero variance. fisher
+// subtracts 3.
+func (s *Series) KurtosisNullable(fisher, bias bool) (float64, bool, error) {
+	vals, err := floatValuesForStats(s)
+	if err != nil {
+		return 0, false, err
 	}
-	num := n * (n + 1) * m4 * (n - 1)
-	den := (n - 2) * (n - 3) * m2 * m2
-	return num/den - 3*(n-1)*(n-1)/((n-2)*(n-3)), nil
+	st := momentsOf(vals)
+	m4, m2 := st.m4/st.n, st.m2/st.n
+	est := math.NaN()
+	if !st.isZeroVar(m2) {
+		est = m4 / (m2 * m2)
+	}
+	var out float64
+	if bias {
+		if st.n == 0 {
+			return 0, false, nil
+		}
+		out = est
+	} else {
+		n := st.n
+		if n <= 3 {
+			return 0, false, nil
+		}
+		out = (n-1)/(n-2)*((n+1)/(n-3)*est-3*(n-1)/(n-3)) + 3
+	}
+	if fisher {
+		out -= 3
+	}
+	return out, true, nil
+}
+
+func (s *Series) kurtosis(unbiased bool) (float64, error) {
+	v, ok, err := s.KurtosisNullable(true, !unbiased)
+	if err != nil || !ok {
+		return math.NaN(), err
+	}
+	return v, nil
 }
 
 // Entropy returns the Shannon entropy of s' value distribution: the
@@ -248,37 +276,61 @@ func floatFromChunk(chunk any, i int) (float64, bool) {
 // floatValuesForStats returns a []float64 of non-null values from s.
 // Used by reductions that don't need cross-series alignment.
 func floatValuesForStats(s *Series) ([]float64, error) {
-	chunk := s.Chunk(0)
-	out := make([]float64, 0, chunk.Len())
+	out := make([]float64, 0, s.Len())
+	for _, chunk := range s.Chunks() {
+		var err error
+		out, err = appendStatValues(out, chunk)
+		if err != nil {
+			return nil, fmt.Errorf("series: floatValuesForStats unsupported for dtype %s", s.DType())
+		}
+	}
+	return out, nil
+}
+
+func appendStatNums[T int8 | int16 | int32 | int64 | uint8 | uint16 | uint32 | uint64 | float32 | float64](out []float64, a arrow.Array, vals []T) []float64 {
+	for i, v := range vals {
+		if a.NullN() == 0 || a.IsValid(i) {
+			out = append(out, float64(v))
+		}
+	}
+	return out
+}
+
+func appendStatValues(out []float64, chunk arrow.Array) ([]float64, error) {
 	switch a := chunk.(type) {
 	case *array.Float64:
-		for i, v := range a.Float64Values() {
-			if a.NullN() == 0 || a.IsValid(i) {
+		return appendStatNums(out, a, a.Float64Values()), nil
+	case *array.Float32:
+		return appendStatNums(out, a, a.Float32Values()), nil
+	case *array.Int64:
+		return appendStatNums(out, a, a.Int64Values()), nil
+	case *array.Int32:
+		return appendStatNums(out, a, a.Int32Values()), nil
+	case *array.Int16:
+		return appendStatNums(out, a, a.Int16Values()), nil
+	case *array.Int8:
+		return appendStatNums(out, a, a.Int8Values()), nil
+	case *array.Uint64:
+		return appendStatNums(out, a, a.Uint64Values()), nil
+	case *array.Uint32:
+		return appendStatNums(out, a, a.Uint32Values()), nil
+	case *array.Uint16:
+		return appendStatNums(out, a, a.Uint16Values()), nil
+	case *array.Uint8:
+		return appendStatNums(out, a, a.Uint8Values()), nil
+	case *array.Boolean:
+		for i := range a.Len() {
+			if a.IsValid(i) {
+				v := 0.0
+				if a.Value(i) {
+					v = 1
+				}
 				out = append(out, v)
 			}
 		}
-	case *array.Float32:
-		for i, v := range a.Float32Values() {
-			if a.NullN() == 0 || a.IsValid(i) {
-				out = append(out, float64(v))
-			}
-		}
-	case *array.Int64:
-		for i, v := range a.Int64Values() {
-			if a.NullN() == 0 || a.IsValid(i) {
-				out = append(out, float64(v))
-			}
-		}
-	case *array.Int32:
-		for i, v := range a.Int32Values() {
-			if a.NullN() == 0 || a.IsValid(i) {
-				out = append(out, float64(v))
-			}
-		}
-	default:
-		return nil, fmt.Errorf("series: floatValuesForStats unsupported for dtype %s", s.DType())
+		return out, nil
 	}
-	return out, nil
+	return nil, fmt.Errorf("unsupported")
 }
 
 func sumFloats(xs []float64) float64 {
@@ -288,3 +340,13 @@ func sumFloats(xs []float64) float64 {
 	}
 	return s
 }
+
+// Kurtosis returns the excess kurtosis of the non-null values.
+// Matches polars' default (bias=True, fisher=True): m4/m2^2 - 3,
+// where m_k = (1/n)*sum((x-mean)^k). It is NaN where polars returns
+// null; see KurtosisNullable.
+func (s *Series) Kurtosis() (float64, error) { return s.kurtosis(false) }
+
+// KurtosisUnbiased returns the bias-corrected (scipy bias=False)
+// excess kurtosis.
+func (s *Series) KurtosisUnbiased() (float64, error) { return s.kurtosis(true) }

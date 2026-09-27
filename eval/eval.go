@@ -147,6 +147,10 @@ func evalBinaryOperands(ctx context.Context, ec EvalContext, n expr.BinaryNode, 
 		left, right = bl, br
 	}
 
+	if n.Op == expr.OpAdd && left.DType().IsString() && right.DType().IsString() {
+		// polars: `+` on strings concatenates (null if either is null).
+		return concatStrings(left, right, ec)
+	}
 	lhs, rhs, err := promoteBinary(ctx, ec, left, right)
 	if err != nil {
 		return nil, err

@@ -383,27 +383,62 @@ func temporalArithOperands(ctx context.Context, name string, a, b operand, n int
 		if a.kind == kDuration {
 			dateOp, duOp = b, a
 		}
-		per := temporal.UnitsPerDay(duOp.unit)
+		// polars computes date +/- duration in datetime[us] or
+		// datetime[ms] (a ns duration is first truncated to ms), floors
+		// back to days and gives null on overflow. For example
+		// date + (-1ns) keeps the date while date + (-1us) is the
+		// previous day.
+		unit := duOp.unit
+		div := int64(1)
+		if unit == dtype.Nanosecond {
+			unit, div = dtype.Millisecond, 1_000_000
+		}
+		per := temporal.UnitsPerDay(unit)
 		sign := int64(1)
 		if op == opSub {
 			sign = -1
 		}
 		dv, uv := dateOp.ints, duOp.ints
 		db, ub := dateOp.bcast, duOp.bcast
-		return series.BuildTypedInt32WithValidity(name, n, mem, arrow.FixedWidthTypes.Date32, func(out []int32) {
-			parallelFill(ctx, n, func(lo, hi int) {
-				for i := lo; i < hi; i++ {
-					d, du := dv[0], uv[0]
-					if !db {
-						d = dv[i]
-					}
-					if !ub {
-						du = uv[i]
-					}
-					out[i] = int32(temporal.FloorDiv(d*per+sign*du, per))
-				}
-			})
-		}, valid, nulls)
+		vals := make([]int32, n)
+		ok := make([]bool, n)
+		var vbits []byte
+		if valid != nil {
+			vbits = valid.Bytes()
+			defer valid.Release()
+		}
+		for i := range n {
+			if vbits != nil && !bitutil.BitIsSet(vbits, i) {
+				continue
+			}
+			d, du := dv[0], uv[0]
+			if !db {
+				d = dv[i]
+			}
+			if !ub {
+				du = uv[i]
+			}
+			ticks, ok1 := mulOK(d, per)
+			sum, ok2 := addOK(ticks, sign*(du/div))
+			if !ok1 || !ok2 {
+				continue
+			}
+			r := temporal.FloorDiv(sum, per)
+			if r < math.MinInt32 || r > math.MaxInt32 {
+				continue
+			}
+			vals[i], ok[i] = int32(r), true
+		}
+		b := array.NewDate32Builder(mem)
+		defer b.Release()
+		for i, v := range vals {
+			if ok[i] {
+				b.Append(arrow.Date32(v))
+			} else {
+				b.AppendNull()
+			}
+		}
+		return series.New(name, b.NewArray())
 	case a.kind == kDuration && b.kind == kDuration:
 		u := temporal.CoarserUnit(a.unit, b.unit)
 		if op == opDiv {
@@ -671,4 +706,18 @@ func temporalSortKeys(arr arrow.Array) []int64 {
 		return physicalValues(arr)
 	}
 	return nil
+}
+
+// mulOK and addOK report int64 overflow.
+func mulOK(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	c := a * b
+	return c, c/b == a && !(a == -1 && b == math.MinInt64) && !(b == -1 && a == math.MinInt64)
+}
+
+func addOK(a, b int64) (int64, bool) {
+	c := a + b
+	return c, (c > a) == (b > 0)
 }

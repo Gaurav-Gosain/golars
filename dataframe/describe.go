@@ -187,8 +187,8 @@ func collectFloat64(s *series.Series) ([]float64, bool) {
 }
 
 // quantileStats returns (mean, std, min, q25, q50, q75, max) over the
-// non-null samples. Uses linear interpolation between sorted samples for
-// quantiles (pandas/numpy default). std is the sample std dev (N-1).
+// non-null samples. Quantiles use the nearest sorted sample, as polars'
+// describe does. std is the sample std dev (N-1).
 func quantileStats(vals []float64) (mean, std, minV, q25, q50, q75, maxV float64) {
 	n := len(vals)
 	if n == 0 {
@@ -217,28 +217,19 @@ func quantileStats(vals []float64) (mean, std, minV, q25, q50, q75, maxV float64
 	sort.Float64s(sorted)
 	minV = sorted[0]
 	maxV = sorted[n-1]
-	q25 = quantileLinear(sorted, 0.25)
-	q50 = quantileLinear(sorted, 0.50)
-	q75 = quantileLinear(sorted, 0.75)
+	q25 = quantileNearest(sorted, 0.25)
+	q50 = quantileNearest(sorted, 0.50)
+	q75 = quantileNearest(sorted, 0.75)
 	return
 }
 
-func quantileLinear(sorted []float64, p float64) float64 {
-	n := len(sorted)
-	if n == 0 {
+// quantileNearest is polars' "nearest" quantile, which describe uses:
+// the sorted value at round(p*(n-1)), ties away from zero.
+func quantileNearest(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
 		return math.NaN()
 	}
-	if n == 1 {
-		return sorted[0]
-	}
-	idx := p * float64(n-1)
-	lo := int(math.Floor(idx))
-	hi := int(math.Ceil(idx))
-	if lo == hi {
-		return sorted[lo]
-	}
-	frac := idx - float64(lo)
-	return sorted[lo] + frac*(sorted[hi]-sorted[lo])
+	return sorted[int(math.Round(p*float64(len(sorted)-1)))]
 }
 
 func compactValidBools(valid []bool) []bool {

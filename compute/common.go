@@ -113,7 +113,7 @@ func extractChunk(s *series.Series, mem memory.Allocator) (arrow.Array, error) {
 		chunks[0].Retain()
 		return chunks[0], nil
 	default:
-		return array.Concatenate(chunks, mem)
+		return series.ConcatArrays(chunks, mem)
 	}
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "literal_skew_in_agg",
-  "status": "known",
+  "status": "fixed",
   "note": "skew of a literal in group_by.agg: golars null, polars NaN (literal semantics) (column \"o1\" row 0: golars null, polars NaN)",
   "plan": {
     "seed": 200032,

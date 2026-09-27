@@ -1,6 +1,6 @@
 {
   "name": "unpivot_duplicate_names",
-  "status": "known",
+  "status": "fixed",
   "note": "unpivot producing a duplicate column name must raise (polars raised DuplicateError: duplicate column name 'variable')",
   "plan": {
     "seed": 202580,
