@@ -199,9 +199,11 @@ type listView struct {
 	*array.List
 }
 
+// Range uses ValueOffsets, which honours the array's slice offset.
+// Offsets() is the raw buffer and is wrong for sliced arrays.
 func (l listView) Range(i int) (int, int) {
-	off := l.List.Offsets()
-	return int(off[i]), int(off[i+1])
+	start, end := l.List.ValueOffsets(i)
+	return int(start), int(end)
 }
 func (l listView) Values() arrow.Array { return l.List.ListValues() }
 
@@ -210,8 +212,8 @@ type largeListView struct {
 }
 
 func (l largeListView) Range(i int) (int, int) {
-	off := l.LargeList.Offsets()
-	return int(off[i]), int(off[i+1])
+	start, end := l.LargeList.ValueOffsets(i)
+	return int(start), int(end)
 }
 func (l largeListView) Values() arrow.Array { return l.LargeList.ListValues() }
 
