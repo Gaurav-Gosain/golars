@@ -124,7 +124,18 @@ func Filter(ctx context.Context, s, mask *series.Series, opts ...Option) (*serie
 	case arrow.DICTIONARY:
 		return catTake(name, sArr, indices, cfg.alloc)
 	}
-	return nil, isUnsupported("Filter", s.DType())
+	// Small ints, lists, structs and other less common dtypes go through
+	// the generic gather, as in Take.
+	out, err := s.Gather(indices, series.WithAllocator(cfg.alloc))
+	if err != nil {
+		return nil, err
+	}
+	if out.Name() != name {
+		renamed := out.Rename(name)
+		out.Release()
+		return renamed, nil
+	}
+	return out, nil
 }
 
 // Take returns a Series assembled by gathering rows at the given indices.

@@ -78,7 +78,17 @@ func executeStreaming(ctx context.Context, cfg execConfig, plan Node) (*datafram
 		return nil, errStreamNotApplicable
 	}
 	pipeline := stream.New(streamCfg, src, stages, stream.CollectSink(streamCfg))
-	return pipeline.Run(ctx)
+	df, err := pipeline.Run(ctx)
+	if err != nil || df.Width() > 0 {
+		return df, err
+	}
+	// No morsel reached the sink (every row was filtered or sliced
+	// away), so the collected frame has no columns. Keep the schema.
+	if sch, serr := plan.Schema(); serr == nil && sch.Len() > 0 {
+		df.Release()
+		return dataframe.Empty(sch), nil
+	}
+	return df, nil
 }
 
 // executeHybrid walks the plan top-down. For each blocker (Sort, Aggregate,
@@ -127,6 +137,11 @@ func compilePipeline(plan Node, cfg stream.Config, workers int) (stream.Source, 
 	case DataFrameScan:
 		source := stream.DataFrameSource(n.Source, cfg)
 		var stages []stream.Stage
+		// The predicate runs before the projection, as in executeScan:
+		// it may read columns the projection drops.
+		if n.Predicate != nil {
+			stages = append(stages, filterStage(cfg, *n.Predicate, workers))
+		}
 		if len(n.Projection) > 0 {
 			exprs := make([]expr.Expr, len(n.Projection))
 			for i, c := range n.Projection {
@@ -134,14 +149,16 @@ func compilePipeline(plan Node, cfg stream.Config, workers int) (stream.Source, 
 			}
 			stages = append(stages, projectStage(cfg, exprs, workers))
 		}
-		if n.Predicate != nil {
-			stages = append(stages, filterStage(cfg, *n.Predicate, workers))
-		}
 		if n.Length >= 0 {
 			stages = append(stages, stream.SliceStage(cfg, n.Offset, n.Length))
 		}
 		return source, stages, true
 	case Projection:
+		// Only row-wise expressions can run one morsel at a time; cum_sum,
+		// shift, aggregations and the like need the whole column.
+		if !allElementwise(n.Exprs) {
+			return nil, nil, false
+		}
 		src, stages, ok := compilePipeline(n.Input, cfg, workers)
 		if !ok {
 			return nil, nil, false
@@ -149,6 +166,9 @@ func compilePipeline(plan Node, cfg stream.Config, workers int) (stream.Source, 
 		stages = append(stages, projectStage(cfg, n.Exprs, workers))
 		return src, stages, true
 	case WithColumns:
+		if !allElementwise(n.Exprs) {
+			return nil, nil, false
+		}
 		src, stages, ok := compilePipeline(n.Input, cfg, workers)
 		if !ok {
 			return nil, nil, false
@@ -156,6 +176,9 @@ func compilePipeline(plan Node, cfg stream.Config, workers int) (stream.Source, 
 		stages = append(stages, withColumnsStage(cfg, n.Exprs, workers))
 		return src, stages, true
 	case Filter:
+		if !expr.IsElementwise(n.Predicate) {
+			return nil, nil, false
+		}
 		src, stages, ok := compilePipeline(n.Input, cfg, workers)
 		if !ok {
 			return nil, nil, false

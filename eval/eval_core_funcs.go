@@ -285,17 +285,24 @@ func evalBroadcast(ctx context.Context, ec EvalContext, args []expr.Expr, df *da
 	if err != nil {
 		return nil, err
 	}
-	n := 0
+	// Unit-length inputs broadcast to the length of the others, which
+	// may be zero (an empty frame against a literal).
+	n := -1
 	for _, s := range ss {
-		n = max(n, s.Len())
+		if l := s.Len(); l != 1 {
+			n = max(n, l)
+		}
+	}
+	if n < 0 {
+		n = 1
 	}
 	for i, s := range ss {
 		if s.Len() == n {
 			continue
 		}
-		if s.Len() != 1 {
+		if l := s.Len(); l != 1 {
 			releaseAll(ss)
-			return nil, fmt.Errorf("eval: cannot broadcast length %d to %d", s.Len(), n)
+			return nil, fmt.Errorf("eval: cannot broadcast length %d to %d", l, n)
 		}
 		b, err := s.Broadcast(n, seriesAlloc(ec))
 		if err != nil {

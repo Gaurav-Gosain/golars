@@ -109,6 +109,21 @@ func takeArrayOptional(arr arrow.Array, idx []int, mem memory.Allocator) (arrow.
 		bitutil.SetBit(vb, j)
 	}
 
+	// A dictionary array reports a fixed bit width (its index width), so
+	// it must be handled before the fixed-width path: gather the indices
+	// and keep the dictionary.
+	if d, ok := arr.(*array.Dictionary); ok {
+		validBuf.Release()
+		ind := d.Indices()
+		defer ind.Release()
+		outIdx, err := takeArrayOptional(ind, idx, mem)
+		if err != nil {
+			return nil, err
+		}
+		defer outIdx.Release()
+		return array.NewDictionaryArray(dt, outIdx, d.Dictionary()), nil
+	}
+
 	switch t := dt.(type) {
 	case *arrow.BooleanType:
 		vals := memory.NewResizableBuffer(mem)
@@ -117,7 +132,7 @@ func takeArrayOptional(arr arrow.Array, idx []int, mem memory.Allocator) (arrow.
 		for i := range out {
 			out[i] = 0
 		}
-		srcBits := data.Buffers()[1].Bytes()
+		srcBits := bufferBytes(data, 1)
 		for j, i := range idx {
 			if i >= 0 && bitutil.BitIsSet(srcBits, srcOff+i) {
 				bitutil.SetBit(out, j)
@@ -132,7 +147,7 @@ func takeArrayOptional(arr arrow.Array, idx []int, mem memory.Allocator) (arrow.
 		vals := memory.NewResizableBuffer(mem)
 		vals.Resize(n * width)
 		out := vals.Bytes()
-		src := data.Buffers()[1].Bytes()
+		src := bufferBytes(data, 1)
 		switch width {
 		case 8:
 			for j, i := range idx {
@@ -181,6 +196,16 @@ func takeArrayOptional(arr arrow.Array, idx []int, mem memory.Allocator) (arrow.
 	}
 	validBuf.Release()
 	return takeBySlices(arr, idx, mem)
+}
+
+// bufferBytes returns buffer i of data, or nil when the buffer is absent
+// (zero-length arrays may carry nil value buffers).
+func bufferBytes(data arrow.ArrayData, i int) []byte {
+	bufs := data.Buffers()
+	if i >= len(bufs) || bufs[i] == nil {
+		return nil
+	}
+	return bufs[i].Bytes()
 }
 
 func finishTake(dt arrow.DataType, n int, bufs []*memory.Buffer, nulls int) arrow.Array {

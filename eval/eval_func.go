@@ -242,6 +242,12 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		}
 		// Extract the first element of fillArg as the fill scalar.
 		v := scalarOf(fillArg)
+		if v == nil {
+			// A null fill value, or a literal broadcast over a zero-row
+			// frame, leaves the input unchanged.
+			releaseOnErr = nil
+			return arg0, nil
+		}
 		out, err := arg0.FillNull(v, opt)
 		releaseOnErr = nil
 		arg0.Release()

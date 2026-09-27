@@ -44,6 +44,15 @@ func castExtra(ctx context.Context, s *series.Series, to dtype.DType, cfg config
 	case isSmallInt(to.ID()) && (from.IsNumeric() || from.IsBool()):
 		out, err := castToSmallInt(s, to, name, cfg.alloc)
 		return out, true, err
+	case isSmallInt(to.ID()) && from.IsString():
+		// Parse as i64 first, then narrow (out of range becomes null).
+		wide, err := Cast(ctx, s, dtype.Int64(), WithAllocator(cfg.alloc))
+		if err != nil {
+			return nil, true, err
+		}
+		defer wide.Release()
+		out, err := castToSmallInt(wide, to, name, cfg.alloc)
+		return out, true, err
 	case isSmallInt(from.ID()):
 		wide, err := widenToInt64(s, cfg.alloc)
 		if err != nil {
@@ -245,6 +254,9 @@ func castTemporal(ctx context.Context, s *series.Series, to dtype.DType, cfg con
 		return s.Dt().ToString("", opt)
 	case from.ID() == arrow.STRING:
 		switch {
+		case to.IsDuration():
+			// polars parses the string as an integer tick count.
+			return viaInt64(ctx, s, to, cfg)
 		case to.IsDate():
 			return s.Str().ToDate("%Y-%m-%d", series.StrptimeOptions{Exact: true}, opt)
 		case to.IsDatetime():
@@ -263,14 +275,16 @@ func castTemporal(ctx context.Context, s *series.Series, to dtype.DType, cfg con
 	case from.IsDate():
 		switch {
 		case to.IsDatetime():
-			per := temporal.UnitsPerDay(tu)
-			return reinterpretPhysical(s, to, mem, func(v int64) int64 { return v * per })
+			return rescaleChecked(s, to, mem, temporal.UnitsPerDay(tu))
 		case to.IsInteger() || to.IsFloating():
 			return castNumericTarget(ctx, s, to, cfg)
 		}
 	case from.IsDatetime():
 		switch {
 		case to.IsDatetime():
+			if up := upscaleFactor(fu, tu); up > 1 {
+				return rescaleChecked(s, to, mem, up)
+			}
 			return reinterpretPhysical(s, to, mem, func(v int64) int64 { return temporal.ConvertUnit(v, fu, tu, true) })
 		case to.IsDate():
 			return s.Dt().Date(opt)
@@ -287,6 +301,9 @@ func castTemporal(ctx context.Context, s *series.Series, to dtype.DType, cfg con
 	case from.IsDuration():
 		switch {
 		case to.IsDuration():
+			if up := upscaleFactor(fu, tu); up > 1 {
+				return rescaleChecked(s, to, mem, up)
+			}
 			return reinterpretPhysical(s, to, mem, func(v int64) int64 { return temporal.ConvertUnit(v, fu, tu, false) })
 		case to.IsInteger() || to.IsFloating():
 			return castNumericTarget(ctx, s, to, cfg)
@@ -300,9 +317,15 @@ func castTemporal(ctx context.Context, s *series.Series, to dtype.DType, cfg con
 		case to.IsInteger() || to.IsFloating():
 			return castNumericTarget(ctx, s, to, cfg)
 		}
-	case from.IsInteger() || from.IsFloating():
+	case from.IsInteger():
 		if to.IsTemporal() {
 			return reinterpretPhysical(s, to, mem, nil)
+		}
+	case from.IsFloating() || from.IsBool():
+		if to.IsTemporal() {
+			// polars truncates floats (NaN and out of range become null)
+			// and maps bools to 0 and 1 before reinterpreting.
+			return viaInt64(ctx, s, to, cfg)
 		}
 	}
 	return nil, unsupported()

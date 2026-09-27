@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -115,7 +116,7 @@ func groupIDsFor(keyCols []*series.Series, height int) ([]int, int) {
 				buf = append(buf, 0)
 			} else {
 				buf = append(buf, 1)
-				buf = fmt.Appendf(buf, "%v", series.ValueAt(c, r))
+				buf = appendFallbackKey(buf, series.ValueAt(c, r))
 			}
 			buf = append(buf, 0x1f)
 		}
@@ -128,6 +129,21 @@ func groupIDsFor(keyCols []*series.Series, height int) ([]int, int) {
 		}
 	}
 	return gids, len(table)
+}
+
+// appendFallbackKey renders one non-null key value for the generic
+// grouping map. -0.0 folds into 0.0 (polars groups them together; NaNs
+// already print alike), and the value is length prefixed so separator
+// bytes inside a string cannot make two different tuples collide.
+func appendFallbackKey(buf []byte, v any) []byte {
+	if f, ok := v.(float64); ok && f == 0 {
+		v = 0.0
+	}
+	start := len(buf)
+	buf = append(buf, 0, 0, 0, 0)
+	buf = fmt.Appendf(buf, "%v", v)
+	binary.LittleEndian.PutUint32(buf[start:], uint32(len(buf)-start-4))
+	return buf
 }
 
 // GroupByAgg evaluates arbitrary expressions per group. Each expression

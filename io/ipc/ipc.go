@@ -72,6 +72,12 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 		rec := reader.RecordBatch()
 		for i := range numCols {
 			col := rec.Column(i)
+			// The reader does not check offsets against buffer sizes, so
+			// a corrupt stream would otherwise panic later on access.
+			if err := validateArray(col); err != nil {
+				releaseChunks()
+				return nil, fmt.Errorf("ipc: column %q: %w", sch.Field(i).Name, err)
+			}
 			col.Retain()
 			chunks[i] = append(chunks[i], col)
 		}
@@ -204,4 +210,26 @@ func concatChunks(s *series.Series, mem memory.Allocator) (arrow.Array, error) {
 	default:
 		return array.Concatenate(chunks, mem)
 	}
+}
+
+// validateArray runs arrow's full validation for the array types that
+// carry offsets, including dictionary values. arrow-go's ValidateFull
+// itself indexes past the value buffer when the last offset is out of
+// range, so a panic there is reported as a validation error.
+func validateArray(a arrow.Array) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid array data: %v", r)
+		}
+	}()
+	if d, ok := a.(*array.Dictionary); ok {
+		if err := validateArray(d.Dictionary()); err != nil {
+			return err
+		}
+		return validateArray(d.Indices())
+	}
+	if v, ok := a.(interface{ ValidateFull() error }); ok {
+		return v.ValidateFull()
+	}
+	return nil
 }

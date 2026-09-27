@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strconv"
@@ -51,7 +52,17 @@ func Cast(ctx context.Context, s *series.Series, to dtype.DType, opts ...Option)
 
 	name := cfg.outName(s.Name())
 
-	// Dispatch on (fromID, toID) pair.
+	out, err := castDispatch(name, arr, to, cfg)
+	if err != nil && errors.Is(err, ErrUnsupportedDType) {
+		if g, ok, gerr := castGeneric(arr, to, name, cfg); ok {
+			return g, gerr
+		}
+	}
+	return out, err
+}
+
+// castDispatch runs the typed kernel for the target dtype.
+func castDispatch(name string, arr arrow.Array, to dtype.DType, cfg config) (*series.Series, error) {
 	switch to.ID() {
 	case arrow.INT32:
 		return castToInt32(name, arr, cfg)

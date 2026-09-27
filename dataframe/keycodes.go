@@ -37,7 +37,9 @@ func encodeInt64Codes(arr *array.Int64) keyCodes {
 	if !found {
 		lo, hi = 0, -1 // all null or empty: only the null slot
 	}
-	if hi-lo+1 >= 0 && hi-lo < int64(min(denseIntRange, 4*n+64)) {
+	// The span is computed in uint64 because hi-lo overflows int64 when
+	// the keys include both MinInt64 and a large positive value.
+	if !found || uint64(hi)-uint64(lo) < uint64(min(denseIntRange, 4*n+64)) {
 		// Shift values into [0, span) with nulls in the extra last
 		// slot, then number the slots by first appearance.
 		span := int(hi - lo + 1)

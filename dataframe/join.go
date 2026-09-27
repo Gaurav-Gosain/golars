@@ -139,7 +139,8 @@ func hashJoinIndices(left, right *series.Series, how JoinType) ([]int, []int, er
 
 	switch left.DType().ID() {
 	case arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64,
-		arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.UINT64:
+		arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.UINT64,
+		arrow.DATE32, arrow.DATE64, arrow.TIMESTAMP, arrow.DURATION, arrow.TIME32, arrow.TIME64:
 		return hashJoinInt(la, ra, how)
 	case arrow.FLOAT32, arrow.FLOAT64:
 		return hashJoinFloat(la, ra, how)
@@ -961,8 +962,29 @@ func toInt64Slice(arr arrow.Array) []int64 {
 			out[i] = int64(a.Value(i))
 		}
 		return out
+	case *array.Date32:
+		return widenJoinKeys(a.Date32Values())
+	case *array.Date64:
+		return widenJoinKeys(a.Date64Values())
+	case *array.Timestamp:
+		return widenJoinKeys(a.TimestampValues())
+	case *array.Duration:
+		return widenJoinKeys(a.DurationValues())
+	case *array.Time32:
+		return widenJoinKeys(a.Time32Values())
+	case *array.Time64:
+		return widenJoinKeys(a.Time64Values())
 	}
 	return nil
+}
+
+// widenJoinKeys copies temporal physical values to int64 join keys.
+func widenJoinKeys[T ~int32 | ~int64](vals []T) []int64 {
+	out := make([]int64, len(vals))
+	for i, v := range vals {
+		out[i] = int64(v)
+	}
+	return out
 }
 
 func hashJoinFloat(la, ra arrow.Array, how JoinType) ([]int, []int, error) {
@@ -1165,6 +1187,12 @@ func gatherWithNulls(ctx context.Context, src *series.Series, indices []int, n i
 	}
 	if !hasMiss {
 		return compute.Take(ctx, src, indices, compute.WithAllocator(alloc))
+	}
+	if src.Len() == 0 {
+		// Every index misses (for example a left join against an empty
+		// right frame). The typed gathers clamp misses to row 0, which
+		// does not exist here.
+		return series.FullNull(src.Name(), src.DType().Arrow(), len(indices), series.WithAllocator(alloc))
 	}
 
 	// Construct a safe indices slice (replace -1 with 0) and take, then patch

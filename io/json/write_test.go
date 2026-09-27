@@ -39,7 +39,7 @@ func TestWriteMatchesPolars(t *testing.T) {
 	if err := iojson.Write(context.Background(), &buf, df); err != nil {
 		t.Fatal(err)
 	}
-	want := `[{"b":1,"a":"x"},{"b":null,"a":null},{"b":null,"a":"z"}]` + "\n"
+	want := `[{"b":1.0,"a":"x"},{"b":null,"a":null},{"b":null,"a":"z"}]` + "\n"
 	if buf.String() != want {
 		t.Errorf("got  %s\nwant %s", buf.String(), want)
 	}
@@ -51,7 +51,7 @@ func TestWriteNDJSONMatchesPolars(t *testing.T) {
 	if err := iojson.WriteNDJSON(context.Background(), &buf, df); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"b\":1,\"a\":\"x\"}\n{\"b\":null,\"a\":null}\n{\"b\":null,\"a\":\"z\"}\n"
+	want := "{\"b\":1.0,\"a\":\"x\"}\n{\"b\":null,\"a\":null}\n{\"b\":null,\"a\":\"z\"}\n"
 	if buf.String() != want {
 		t.Errorf("got  %q\nwant %q", buf.String(), want)
 	}

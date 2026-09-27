@@ -26,6 +26,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -95,6 +96,13 @@ func inferValue(v any) inferredType {
 	switch t := v.(type) {
 	case bool:
 		return tBool
+	case json.Number:
+		// Like polars, a literal with a fraction or exponent is a float
+		// even when integral (1.0), and integers keep all 64 bits.
+		if _, err := strconv.ParseInt(string(t), 10, 64); err == nil {
+			return tInt
+		}
+		return tFloat
 	case float64:
 		if t == math.Trunc(t) && !math.IsInf(t, 0) && !math.IsNaN(t) {
 			return tInt
@@ -128,7 +136,7 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 		var ord keyOrder
 		rows := make([]map[string]any, len(raws))
 		for i, raw := range raws {
-			if err := json.Unmarshal(raw, &rows[i]); err != nil {
+			if err := unmarshalNumbers(raw, &rows[i]); err != nil {
 				return nil, fmt.Errorf("json.Read: %w", err)
 			}
 			if err := ord.add(rows[i], raw); err != nil {
@@ -142,7 +150,7 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 			return nil, fmt.Errorf("json.Read: object-of-arrays: %w", err)
 		}
 		var cols map[string][]any
-		if err := json.Unmarshal(raw, &cols); err != nil {
+		if err := unmarshalNumbers(raw, &cols); err != nil {
 			return nil, fmt.Errorf("json.Read: object-of-arrays: %w", err)
 		}
 		keys, err := objectKeys(raw)
@@ -209,7 +217,7 @@ func ReadNDJSON(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.Da
 			continue
 		}
 		var row map[string]any
-		if err := json.Unmarshal(trimmed, &row); err != nil {
+		if err := unmarshalNumbers(trimmed, &row); err != nil {
 			return nil, fmt.Errorf("json.ReadNDJSON: line %d: %w", len(rows)+1, err)
 		}
 		if err := ord.add(row, trimmed); err != nil {
@@ -322,6 +330,10 @@ func (rw *rowWriter) writeRow(bw *bufio.Writer, i int) error {
 		b, err := json.Marshal(v)
 		if err != nil {
 			return fmt.Errorf("json: column %s row %d: %w", rw.keys[c], i, err)
+		}
+		if _, isFloat := v.(float64); isFloat && !bytes.ContainsAny(b, ".eE") {
+			// polars writes 1.0, not 1, so the column reads back as float.
+			b = append(b, ".0"...)
 		}
 		bw.Write(b)
 	}
@@ -530,8 +542,8 @@ func materializeCol(name string, rows []map[string]any, t inferredType, mem memo
 			if !ok || v == nil {
 				continue
 			}
-			if f, ok2 := v.(float64); ok2 {
-				vals[i] = int64(f)
+			if x, ok2 := jsonInt(v); ok2 {
+				vals[i] = x
 				valid[i] = true
 			}
 		}
@@ -544,7 +556,7 @@ func materializeCol(name string, rows []map[string]any, t inferredType, mem memo
 			if !ok || v == nil {
 				continue
 			}
-			if f, ok2 := v.(float64); ok2 {
+			if f, ok2 := jsonFloat(v); ok2 {
 				vals[i] = f
 				valid[i] = true
 			}
@@ -589,8 +601,8 @@ func materializeColFromArr(name string, arr []any, t inferredType, mem memory.Al
 			if v == nil {
 				continue
 			}
-			if f, ok := v.(float64); ok {
-				vals[i] = int64(f)
+			if x, ok := jsonInt(v); ok {
+				vals[i] = x
 				valid[i] = true
 			}
 		}
@@ -602,7 +614,7 @@ func materializeColFromArr(name string, arr []any, t inferredType, mem memory.Al
 			if v == nil {
 				continue
 			}
-			if f, ok := v.(float64); ok {
+			if f, ok := jsonFloat(v); ok {
 				vals[i] = f
 				valid[i] = true
 			}
@@ -667,6 +679,42 @@ func arrowCellToGo(arr any, i int) any {
 		return v.ValueStr(i)
 	}
 	return nil
+}
+
+// unmarshalNumbers is json.Unmarshal with numbers kept as json.Number,
+// so integers beyond 2^53 are not rounded through float64.
+func unmarshalNumbers(data []byte, v any) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	if err := d.Decode(v); err != nil {
+		return err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return fmt.Errorf("invalid character after top-level value")
+	}
+	return nil
+}
+
+func jsonInt(v any) (int64, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		i, err := x.Int64()
+		return i, err == nil
+	case float64:
+		return int64(x), true
+	}
+	return 0, false
+}
+
+func jsonFloat(v any) (float64, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		f, err := x.Float64()
+		return f, err == nil
+	case float64:
+		return x, true
+	}
+	return 0, false
 }
 
 // compactValid returns nil when every entry is true (avoiding an unused
