@@ -229,7 +229,8 @@ type Signature struct {
 }
 
 // SignatureAt returns the innermost function call whose argument list
-// contains the position.
+// contains the position. The statement is cut at the cursor and its
+// open brackets closed, so an unfinished call still parses.
 func (r *Result) SignatureAt(line, col int) (Signature, bool) {
 	text := ""
 	if line >= 0 && line < len(r.File.Lines) {
@@ -245,13 +246,12 @@ func (r *Result) SignatureAt(line, col int) (Signature, bool) {
 		}
 		prefix = strings.TrimSuffix(prev, "\\") + " " + prefix
 	}
-	probe := prefix + cursorMark + closers(prefix)
-	f := syntax.Parse(probe)
+	f := syntax.Parse(prefix + closers(prefix))
 	if len(f.Stmts) == 0 {
 		return Signature{}, false
 	}
 	st := f.Stmts[0]
-	off := strings.Index(st.Text, cursorMark)
+	off := len(st.Text) - len(closers(prefix))
 	var p *syntax.Part
 	for i := range st.Parts {
 		if pp := &st.Parts[i]; pp.Kind == syntax.PartExpr && off >= pp.Off && off <= pp.End {
@@ -263,39 +263,18 @@ func (r *Result) SignatureAt(line, col int) (Signature, bool) {
 	}
 	rel := off - p.Off
 	var best *exprparse.Node
-	active := -1
 	p.Expr.Walk(func(n *exprparse.Node) bool {
-		if n.Kind != exprparse.KindCall || !n.CallParens || n.Infix != "" {
-			return true
-		}
-		open := n.NameEnd()
-		if rel <= open || rel >= n.End {
-			return true
-		}
-		best = n
-		active = -1
-		for i, a := range n.Args {
-			if rel >= a.Pos && rel <= a.End {
-				active = i
-			}
-		}
-		for _, k := range n.Kw {
-			if rel >= k.NamePos && rel <= k.Val.End {
-				active = -2
-				best = n
-				break
-			}
+		if n.Kind == exprparse.KindCall && n.CallParens && n.Infix == "" && rel > n.NameEnd() && rel < n.End {
+			best = n
 		}
 		return true
 	})
 	if best == nil {
 		return Signature{}, false
 	}
-	ns := best.NS
-	info, found := exprparse.Lookup(ns, best.Name)
-	if !found && best.Recv == nil && ns != "" {
+	info, found := exprparse.Lookup(best.NS, best.Name)
+	if !found && best.Recv == nil && best.NS != "" {
 		info, found = exprparse.Lookup("", best.Name)
-		ns = ""
 	}
 	if !found {
 		return Signature{}, false
@@ -310,35 +289,62 @@ func (r *Result) SignatureAt(line, col int) (Signature, bool) {
 	for _, k := range info.Keywords {
 		sig.Params = append(sig.Params, k+"=...")
 	}
-	shift := 0
-	if best.Recv != nil {
-		// Method form: the receiver is outside the parentheses.
-		shift = 1
+	// The argument under the cursor: count top-level commas since the
+	// open parenthesis; a `name=` in the current argument selects that
+	// keyword instead.
+	args := p.Text[best.NameEnd()+1 : rel]
+	commas, segment := topLevelCommas(args)
+	if eq := strings.IndexByte(segment, '='); eq > 0 && !strings.Contains(segment[:eq], "(") &&
+		(eq+1 >= len(segment) || segment[eq+1] != '=') {
+		name := strings.TrimSpace(segment[:eq])
+		for i, prm := range sig.Params {
+			if strings.HasPrefix(prm, name+":") || strings.HasPrefix(prm, name+"=") {
+				sig.Active = i
+			}
+		}
+		return sig, true
 	}
-	switch {
-	case active >= 0:
-		sig.Active = min(active+shift, len(sig.Params)-1)
-		if last := len(info.Params) - 1; last >= 0 && info.Params[last].Variadic {
-			base := 0
-			if !info.Free {
-				base = 1
-			}
-			sig.Active = min(sig.Active, base+last)
+	if best.Recv != nil {
+		commas++ // the receiver sits outside the parentheses
+	}
+	sig.Active = commas
+	if last := len(info.Params) - 1; last >= 0 && info.Params[last].Variadic {
+		base := 0
+		if !info.Free {
+			base = 1
 		}
-	case active == -2:
-		for _, k := range best.Kw {
-			if rel >= k.NamePos && rel <= k.Val.End {
-				for i, prm := range sig.Params {
-					if strings.HasPrefix(prm, k.Name+":") || strings.HasPrefix(prm, k.Name+"=") {
-						sig.Active = i
-					}
-				}
-			}
-		}
-	default:
-		if len(best.Args) == 0 && len(best.Kw) == 0 {
-			sig.Active = min(shift, len(sig.Params)-1)
-		}
+		sig.Active = min(sig.Active, base+last)
+	}
+	if sig.Active >= len(sig.Params) {
+		sig.Active = -1
 	}
 	return sig, true
+}
+
+// topLevelCommas counts the commas of s outside brackets and quotes
+// and returns the text after the last one.
+func topLevelCommas(s string) (int, string) {
+	depth, n, last := 0, 0, 0
+	quote := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '(' || c == '[':
+			depth++
+		case c == ')' || c == ']':
+			depth--
+		case c == ',' && depth == 0:
+			n++
+			last = i + 1
+		}
+	}
+	return n, s[last:]
 }
