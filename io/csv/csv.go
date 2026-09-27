@@ -24,6 +24,7 @@ import (
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/dtype"
+	"github.com/Gaurav-Gosain/golars/internal/mmapfile"
 	"github.com/Gaurav-Gosain/golars/schema"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -264,8 +265,18 @@ func readArrow(ctx context.Context, r io.Reader, cfg config) (*dataframe.DataFra
 	return df, nil
 }
 
-// ReadFile opens path and reads CSV into a DataFrame.
+// ReadFile opens path and reads CSV into a DataFrame. The file is
+// memory mapped where the platform supports it and parsed in place; the
+// result does not refer to the mapping.
 func ReadFile(ctx context.Context, path string, opts ...Option) (*dataframe.DataFrame, error) {
+	if cfg := resolve(opts); cfg.tryParseDates == nil {
+		m, err := mmapfile.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("csv: open %q: %w", path, err)
+		}
+		defer m.Close()
+		return readBytes(ctx, m.Data, cfg)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("csv: open %q: %w", path, err)

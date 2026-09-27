@@ -68,6 +68,7 @@ func benchReadFile(b *testing.B, data []byte) {
 	ctx := context.Background()
 	b.SetBytes(int64(len(data)))
 	b.ReportAllocs()
+	done := reportCPU(b)
 	for b.Loop() {
 		df, err := iocsv.ReadFile(ctx, path)
 		if err != nil {
@@ -75,6 +76,7 @@ func benchReadFile(b *testing.B, data []byte) {
 		}
 		df.Release()
 	}
+	done()
 }
 
 func BenchmarkReadNumeric1M(b *testing.B) { benchReadFile(b, genNumericCSV(1<<20)) }
