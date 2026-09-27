@@ -6,6 +6,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	"github.com/Gaurav-Gosain/golars/internal/mempool"
 )
 
 // RollingOptions configures a rolling aggregation. Mirrors polars'
@@ -86,110 +88,51 @@ func (s *Series) RollingSum(opts RollingOptions, callerOpts ...Option) (*Series,
 
 // rollingSumInt64NoNull is the specialised hot path: no validity
 // checks, no closure, constant-time slide. Output has no nulls past
-// the first mp-1 leading rows.
+// the first mp-1 leading rows, so the validity bitmap is written in
+// bulk afterwards rather than one bit per row inside the loop.
 func rollingSumInt64NoNull(
 	name string, vals []int64, n, w, mp int, alloc memory.Allocator,
 ) (*Series, error) {
-	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
-		if n == 0 {
-			return 0
-		}
-		var total int64
-		nulls := 0
+	return BuildFloat64DirectFused(name, n, mempool.Pooling(alloc), func(out []float64, validBits []byte) int {
 		warm := min(w, n)
-		for i := 0; i < warm; i++ {
+		var total int64
+		for i := range warm {
 			total += vals[i]
-			count := i + 1
-			if count >= mp {
-				out[i] = float64(total)
-				validBits[i>>3] |= 1 << uint(i&7)
-			} else {
-				nulls++
+			out[i] = float64(total)
+		}
+		if n > warm {
+			add, drop, dst := vals[warm:n], vals[:n-warm], out[warm:n]
+			drop, dst = drop[:len(add)], dst[:len(add)]
+			for i, v := range add {
+				total += v - drop[i]
+				dst[i] = float64(total)
 			}
 		}
-		i := warm
-		for ; i+4 <= n; i += 4 {
-			d0 := vals[i+0] - vals[i+0-w]
-			d1 := vals[i+1] - vals[i+1-w]
-			d2 := vals[i+2] - vals[i+2-w]
-			d3 := vals[i+3] - vals[i+3-w]
-			total += d0
-			out[i+0] = float64(total)
-			total += d1
-			out[i+1] = float64(total)
-			total += d2
-			out[i+2] = float64(total)
-			total += d3
-			out[i+3] = float64(total)
-			validBits[(i+0)>>3] |= 1 << uint((i+0)&7)
-			validBits[(i+1)>>3] |= 1 << uint((i+1)&7)
-			validBits[(i+2)>>3] |= 1 << uint((i+2)&7)
-			validBits[(i+3)>>3] |= 1 << uint((i+3)&7)
-		}
-		for ; i < n; i++ {
-			total += vals[i] - vals[i-w]
-			out[i] = float64(total)
-			validBits[i>>3] |= 1 << uint(i&7)
-		}
-		return nulls
+		return markValidFrom(validBits, rollingLead(n, mp), n)
 	})
 }
 
+// rollingSumFloat64NoNull slides a float64 total. The add and the
+// evict fuse into one difference per row, like the int64 path.
 func rollingSumFloat64NoNull(
 	name string, vals []float64, n, w, mp int, alloc memory.Allocator,
 ) (*Series, error) {
-	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
-		if n == 0 {
-			return 0
-		}
-		// Two-phase loop: phase 1 warms up the window (i < w), phase 2
-		// slides it (i >= w). Splitting eliminates the `i >= w` branch
-		// from the hot loop and lets the compiler hoist the min/count
-		// check. Measured ~30% wall-time reduction on 1M rows vs the
-		// old single-loop form.
-		var total float64
-		nulls := 0
+	return BuildFloat64DirectFused(name, n, mempool.Pooling(alloc), func(out []float64, validBits []byte) int {
 		warm := min(w, n)
-		for i := 0; i < warm; i++ {
+		var total float64
+		for i := range warm {
 			total += vals[i]
-			count := i + 1
-			if count >= mp {
-				out[i] = total
-				validBits[i>>3] |= 1 << uint(i&7)
-			} else {
-				nulls++
+			out[i] = total
+		}
+		if n > warm {
+			add, drop, dst := vals[warm:n], vals[:n-warm], out[warm:n]
+			drop, dst = drop[:len(add)], dst[:len(add)]
+			for i, v := range add {
+				total += v - drop[i]
+				dst[i] = total
 			}
 		}
-		// Phase 2: both bounds are strictly inside vals, no branches
-		// on count (always >= mp once i >= w). Go auto-vectorises the
-		// subtract-and-accumulate chain less well than the explicit
-		// 4-way unroll below; manual unrolling exposes ILP to the
-		// compiler.
-		i := warm
-		for ; i+4 <= n; i += 4 {
-			d0 := vals[i+0] - vals[i+0-w]
-			d1 := vals[i+1] - vals[i+1-w]
-			d2 := vals[i+2] - vals[i+2-w]
-			d3 := vals[i+3] - vals[i+3-w]
-			total += d0
-			out[i+0] = total
-			total += d1
-			out[i+1] = total
-			total += d2
-			out[i+2] = total
-			total += d3
-			out[i+3] = total
-			validBits[(i+0)>>3] |= 1 << uint((i+0)&7)
-			validBits[(i+1)>>3] |= 1 << uint((i+1)&7)
-			validBits[(i+2)>>3] |= 1 << uint((i+2)&7)
-			validBits[(i+3)>>3] |= 1 << uint((i+3)&7)
-		}
-		for ; i < n; i++ {
-			total += vals[i] - vals[i-w]
-			out[i] = total
-			validBits[i>>3] |= 1 << uint(i&7)
-		}
-		return nulls
+		return markValidFrom(validBits, rollingLead(n, mp), n)
 	})
 }
 
@@ -220,102 +163,50 @@ func (s *Series) RollingMean(opts RollingOptions, callerOpts ...Option) (*Series
 }
 
 // rollingMeanInt64NoNull slides a float64 total over int64 values,
-// dividing by the full window once warm.
+// dividing by the row count while the window warms up and by w after.
 func rollingMeanInt64NoNull(
 	name string, vals []int64, n, w, mp int, alloc memory.Allocator,
 ) (*Series, error) {
-	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
-		if n == 0 {
-			return 0
-		}
-		var total float64
-		nulls := 0
+	return BuildFloat64DirectFused(name, n, mempool.Pooling(alloc), func(out []float64, validBits []byte) int {
 		warm := min(w, n)
-		for i := 0; i < warm; i++ {
+		var total float64
+		for i := range warm {
 			total += float64(vals[i])
-			count := i + 1
-			if count >= mp {
-				out[i] = total / float64(count)
-				validBits[i>>3] |= 1 << uint(i&7)
-			} else {
-				nulls++
+			out[i] = total / float64(i+1)
+		}
+		if n > warm {
+			fw := float64(w)
+			add, drop, dst := vals[warm:n], vals[:n-warm], out[warm:n]
+			drop, dst = drop[:len(add)], dst[:len(add)]
+			for i, v := range add {
+				total += float64(v) - float64(drop[i])
+				dst[i] = total / fw
 			}
 		}
-		fw := float64(w)
-		i := warm
-		for ; i+4 <= n; i += 4 {
-			d0 := float64(vals[i+0]) - float64(vals[i+0-w])
-			d1 := float64(vals[i+1]) - float64(vals[i+1-w])
-			d2 := float64(vals[i+2]) - float64(vals[i+2-w])
-			d3 := float64(vals[i+3]) - float64(vals[i+3-w])
-			total += d0
-			out[i+0] = total / fw
-			total += d1
-			out[i+1] = total / fw
-			total += d2
-			out[i+2] = total / fw
-			total += d3
-			out[i+3] = total / fw
-			validBits[(i+0)>>3] |= 1 << uint((i+0)&7)
-			validBits[(i+1)>>3] |= 1 << uint((i+1)&7)
-			validBits[(i+2)>>3] |= 1 << uint((i+2)&7)
-			validBits[(i+3)>>3] |= 1 << uint((i+3)&7)
-		}
-		for ; i < n; i++ {
-			total += float64(vals[i]) - float64(vals[i-w])
-			out[i] = total / fw
-			validBits[i>>3] |= 1 << uint(i&7)
-		}
-		return nulls
+		return markValidFrom(validBits, rollingLead(n, mp), n)
 	})
 }
 
 func rollingMeanFloat64NoNull(
 	name string, vals []float64, n, w, mp int, alloc memory.Allocator,
 ) (*Series, error) {
-	return BuildFloat64DirectFused(name, n, alloc, func(out []float64, validBits []byte) int {
-		if n == 0 {
-			return 0
-		}
-		var total float64
-		nulls := 0
+	return BuildFloat64DirectFused(name, n, mempool.Pooling(alloc), func(out []float64, validBits []byte) int {
 		warm := min(w, n)
-		for i := 0; i < warm; i++ {
+		var total float64
+		for i := range warm {
 			total += vals[i]
-			count := i + 1
-			if count >= mp {
-				out[i] = total / float64(count)
-				validBits[i>>3] |= 1 << uint(i&7)
-			} else {
-				nulls++
+			out[i] = total / float64(i+1)
+		}
+		if n > warm {
+			fw := float64(w)
+			add, drop, dst := vals[warm:n], vals[:n-warm], out[warm:n]
+			drop, dst = drop[:len(add)], dst[:len(add)]
+			for i, v := range add {
+				total += v - drop[i]
+				dst[i] = total / fw
 			}
 		}
-		fw := float64(w)
-		i := warm
-		for ; i+4 <= n; i += 4 {
-			d0 := vals[i+0] - vals[i+0-w]
-			d1 := vals[i+1] - vals[i+1-w]
-			d2 := vals[i+2] - vals[i+2-w]
-			d3 := vals[i+3] - vals[i+3-w]
-			total += d0
-			out[i+0] = total / fw
-			total += d1
-			out[i+1] = total / fw
-			total += d2
-			out[i+2] = total / fw
-			total += d3
-			out[i+3] = total / fw
-			validBits[(i+0)>>3] |= 1 << uint((i+0)&7)
-			validBits[(i+1)>>3] |= 1 << uint((i+1)&7)
-			validBits[(i+2)>>3] |= 1 << uint((i+2)&7)
-			validBits[(i+3)>>3] |= 1 << uint((i+3)&7)
-		}
-		for ; i < n; i++ {
-			total += vals[i] - vals[i-w]
-			out[i] = total / fw
-			validBits[i>>3] |= 1 << uint(i&7)
-		}
-		return nulls
+		return markValidFrom(validBits, rollingLead(n, mp), n)
 	})
 }
 
@@ -347,7 +238,7 @@ func (s *Series) rollingMinMax(opts RollingOptions, callerOpts []Option, isMin b
 		vals := a.Int64Values()
 		off := a.Data().Offset()
 		if a.NullN() == 0 {
-			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
+			return rollingMinMaxIntNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
 		}
 		return rollingMinMaxNullable(s.Name(), vals, a.NullBitmapBytes(), off, n, w, mp, isMin, cfg.alloc)
 	case *array.Float64:
@@ -361,7 +252,7 @@ func (s *Series) rollingMinMax(opts RollingOptions, callerOpts []Option, isMin b
 		vals := a.Int32Values()
 		off := a.Data().Offset()
 		if a.NullN() == 0 {
-			return rollingMinMaxNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
+			return rollingMinMaxIntNoNull(s.Name(), vals, n, w, mp, isMin, cfg.alloc)
 		}
 		return rollingMinMaxNullable(s.Name(), vals, a.NullBitmapBytes(), off, n, w, mp, isMin, cfg.alloc)
 	}
@@ -389,41 +280,43 @@ func rollingMinMaxNoNull[T rollingOrdered](
 		}
 		var zero T
 		_, isFloat := any(zero).(float64)
-		dq := make([]int, 0, min(w, n)+1)
-		nulls := 0
+		dq := newIdxRing(min(w, n) + 1)
 		for i := range n {
-			if ev := i - w; len(dq) > 0 && dq[0] <= ev {
-				dq = dq[1:]
+			if ev := i - w; !dq.empty() && dq.front() <= ev {
+				dq.popFront()
 			}
 			vi := vals[i]
 			if !isFloat || !math.IsNaN(float64(vi)) {
 				if isMin {
-					for len(dq) > 0 && vals[dq[len(dq)-1]] >= vi {
-						dq = dq[:len(dq)-1]
+					for !dq.empty() && vals[dq.back()] >= vi {
+						dq.popBack()
 					}
 				} else {
-					for len(dq) > 0 && vals[dq[len(dq)-1]] <= vi {
-						dq = dq[:len(dq)-1]
+					for !dq.empty() && vals[dq.back()] <= vi {
+						dq.popBack()
 					}
 				}
-				dq = append(dq, i)
+				dq.pushBack(i)
 			}
-			if i+1 >= mp {
-				oldest := i - w + 1
-				if oldest < 0 {
-					oldest = 0
-				}
-				if isFloat && math.IsNaN(float64(vals[oldest])) {
-					out[i] = math.NaN()
-				} else {
-					out[i] = float64(vals[dq[0]])
-				}
-				validBits[i>>3] |= 1 << uint(i&7)
+			oldest := max(i-w+1, 0)
+			if isFloat && math.IsNaN(float64(vals[oldest])) {
+				out[i] = math.NaN()
 			} else {
-				nulls++
+				out[i] = float64(vals[dq.front()])
 			}
 		}
-		return nulls
+		return markValidFrom(validBits, rollingLead(n, mp), n)
+	})
+}
+
+// rollingMinMaxIntNoNull is the integer driver for columns without
+// nulls; see rollingMinMaxIntKernel.
+func rollingMinMaxIntNoNull[T int64 | int32](
+	name string, vals []T, n, w, mp int, isMin bool, alloc memory.Allocator,
+) (*Series, error) {
+	return BuildFloat64DirectFused(name, n, mempool.Pooling(alloc), func(out []float64, validBits []byte) int {
+		rollingMinMaxIntKernel(out, vals, w, isMin)
+		return markValidFrom(validBits, rollingLead(n, mp), n)
 	})
 }
 
@@ -440,38 +333,38 @@ func rollingMinMaxNullable[T rollingOrdered](
 		}
 		var zero T
 		_, isFloat := any(zero).(float64)
-		dq := make([]int, 0, min(w, n)+1)
-		order := make([]int, 0, min(w, n)+1)
+		dq := newIdxRing(min(w, n) + 1)
+		order := newIdxRing(min(w, n) + 1)
 		nulls := 0
 		for i := range n {
 			ev := i - w
-			if len(dq) > 0 && dq[0] <= ev {
-				dq = dq[1:]
+			if !dq.empty() && dq.front() <= ev {
+				dq.popFront()
 			}
-			if len(order) > 0 && order[0] <= ev {
-				order = order[1:]
+			if !order.empty() && order.front() <= ev {
+				order.popFront()
 			}
 			if nullBits[(i+off)>>3]&(1<<uint((i+off)&7)) != 0 {
-				order = append(order, i)
+				order.pushBack(i)
 				vi := vals[i]
 				if !isFloat || !math.IsNaN(float64(vi)) {
 					if isMin {
-						for len(dq) > 0 && vals[dq[len(dq)-1]] >= vi {
-							dq = dq[:len(dq)-1]
+						for !dq.empty() && vals[dq.back()] >= vi {
+							dq.popBack()
 						}
 					} else {
-						for len(dq) > 0 && vals[dq[len(dq)-1]] <= vi {
-							dq = dq[:len(dq)-1]
+						for !dq.empty() && vals[dq.back()] <= vi {
+							dq.popBack()
 						}
 					}
-					dq = append(dq, i)
+					dq.pushBack(i)
 				}
 			}
-			if len(order) >= mp {
-				if oldest := order[0]; isFloat && math.IsNaN(float64(vals[oldest])) {
+			if order.size() >= mp {
+				if oldest := order.front(); isFloat && math.IsNaN(float64(vals[oldest])) {
 					out[i] = math.NaN()
 				} else {
-					out[i] = float64(vals[dq[0]])
+					out[i] = float64(vals[dq.front()])
 				}
 				validBits[i>>3] |= 1 << uint(i&7)
 			} else {
