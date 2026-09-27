@@ -163,13 +163,15 @@ func releaseFrames(fs []*dataframe.DataFrame) {
 	}
 }
 
-// concatMorsels stitches batch results in order into one frame with
-// contiguous columns, consuming parts.
-func concatMorsels(ctx context.Context, parts []*dataframe.DataFrame) (*dataframe.DataFrame, error) {
+// concatMorsels stitches batch results in order into one frame,
+// consuming parts. With contiguous set every column is copied into one
+// chunk, which kernels that read a column several times want; without
+// it the columns keep one chunk per batch and no copy is made.
+func concatMorsels(ctx context.Context, parts []*dataframe.DataFrame, contiguous bool) (*dataframe.DataFrame, error) {
 	defer releaseFrames(parts)
 	all, err := dataframe.Concat(parts...)
-	if err != nil {
-		return nil, err
+	if err != nil || !contiguous {
+		return all, err
 	}
 	return rechunkFrame(ctx, all)
 }
@@ -178,6 +180,23 @@ func concatMorsels(ctx context.Context, parts []*dataframe.DataFrame) (*datafram
 // at least one operator over a batched source. ok is false when the
 // eager path should run instead.
 func tryMorselChain(ctx context.Context, cfg execConfig, n Node) (*dataframe.DataFrame, bool, error) {
+	return morselChain(ctx, cfg, n, true)
+}
+
+// executeJoinInput executes one input of a join. A morsel fragment keeps
+// its per-batch chunks: the join reads each column once (the gather
+// concatenates it then), so making the whole input contiguous first
+// would only add a full copy to the peak.
+func executeJoinInput(ctx context.Context, cfg execConfig, n Node) (*dataframe.DataFrame, error) {
+	if cfg.profiler == nil && cfg.tracer == nil {
+		if out, ok, err := morselChain(ctx, cfg, n, false); ok {
+			return out, err
+		}
+	}
+	return executeNode(ctx, cfg, n)
+}
+
+func morselChain(ctx context.Context, cfg execConfig, n Node, contiguous bool) (*dataframe.DataFrame, bool, error) {
 	src, ops, ok := morselFragment(n)
 	if !ok || ops == 0 {
 		return nil, false, nil
@@ -189,6 +208,6 @@ func tryMorselChain(ctx context.Context, cfg execConfig, n Node) (*dataframe.Dat
 	if err != nil {
 		return nil, true, err
 	}
-	out, err := concatMorsels(ctx, parts)
+	out, err := concatMorsels(ctx, parts, contiguous)
 	return out, true, err
 }

@@ -219,11 +219,11 @@ func joinBuildSmaller(ctx context.Context, cfg execConfig, left, right *datafram
 // to compute runs inline. On error both results are released.
 func executeBoth(ctx context.Context, cfg execConfig, a, b Node) (*dataframe.DataFrame, *dataframe.DataFrame, error) {
 	if isTrivialInput(a) || isTrivialInput(b) {
-		l, err := executeNode(ctx, cfg, a)
+		l, err := executeJoinInput(ctx, cfg, a)
 		if err != nil {
 			return nil, nil, err
 		}
-		r, err := executeNode(ctx, cfg, b)
+		r, err := executeJoinInput(ctx, cfg, b)
 		if err != nil {
 			l.Release()
 			return nil, nil, err
@@ -236,10 +236,10 @@ func executeBoth(ctx context.Context, cfg execConfig, a, b Node) (*dataframe.Dat
 	}
 	ch := make(chan res, 1)
 	go func() {
-		df, err := executeNode(ctx, cfg, b)
+		df, err := executeJoinInput(ctx, cfg, b)
 		ch <- res{df, err}
 	}()
-	l, lerr := executeNode(ctx, cfg, a)
+	l, lerr := executeJoinInput(ctx, cfg, a)
 	r := <-ch
 	if lerr != nil || r.err != nil {
 		if l != nil {

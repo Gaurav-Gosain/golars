@@ -190,7 +190,7 @@ func tryMorselAggregate(ctx context.Context, cfg execConfig, input Node, keys []
 		// Without a reference the combined dtypes are used as is.
 		want = nil
 	}
-	stacked, err := concatMorsels(ctx, parts)
+	stacked, err := concatMorsels(ctx, parts, true)
 	if err != nil {
 		return nil, true, err
 	}
