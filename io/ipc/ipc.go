@@ -1,4 +1,5 @@
-// Package ipc reads and writes the Arrow IPC stream format.
+// Package ipc reads and writes the Arrow IPC stream format. Readers also
+// accept the Arrow IPC file format.
 //
 // IPC is the native wire format for Apache Arrow and the fastest way to move
 // DataFrames between processes. No type coercion is performed; columns
@@ -6,6 +7,8 @@
 package ipc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -44,8 +47,27 @@ func WithAllocator(alloc memory.Allocator) Option {
 // Read consumes an Arrow IPC stream from r and returns a DataFrame. Each
 // incoming record batch becomes one chunk per column; columns may be chunked
 // when the stream contains multiple batches.
+//
+// The Arrow IPC file format (Feather v2, what polars' write_ipc
+// produces) is detected by its magic and read as well.
 func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFrame, error) {
 	cfg := resolve(opts)
+	if ra, ok := r.(arrowipc.ReadAtSeeker); ok {
+		var head [len(fileMagic)]byte
+		if n, _ := ra.ReadAt(head[:], 0); n == len(head) && string(head[:]) == fileMagic {
+			return readFileFormat(ctx, ra, cfg)
+		}
+	} else {
+		br := bufio.NewReader(r)
+		if head, _ := br.Peek(len(fileMagic)); string(head) == fileMagic {
+			data, err := io.ReadAll(br)
+			if err != nil {
+				return nil, fmt.Errorf("ipc: read: %w", err)
+			}
+			return readFileFormat(ctx, bytes.NewReader(data), cfg)
+		}
+		r = br
+	}
 	reader, err := arrowipc.NewReader(r, arrowipc.WithAllocator(cfg.alloc))
 	if err != nil {
 		return nil, fmt.Errorf("ipc: new reader: %w", err)
@@ -87,6 +109,44 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 		return nil, fmt.Errorf("ipc: read stream: %w", err)
 	}
 
+	return buildDataFrameFromChunks(sch, chunks)
+}
+
+// fileMagic starts (and ends) an Arrow IPC file.
+const fileMagic = "ARROW1"
+
+// readFileFormat reads every record batch of an Arrow IPC file.
+func readFileFormat(ctx context.Context, r arrowipc.ReadAtSeeker, cfg config) (*dataframe.DataFrame, error) {
+	reader, err := arrowipc.NewFileReader(r, arrowipc.WithAllocator(cfg.alloc))
+	if err != nil {
+		return nil, fmt.Errorf("ipc: new file reader: %w", err)
+	}
+	defer reader.Close()
+	sch := reader.Schema()
+	chunks := make([][]arrow.Array, sch.NumFields())
+	release := func() {
+		for _, cs := range chunks {
+			for _, c := range cs {
+				c.Release()
+			}
+		}
+	}
+	for i := range reader.NumRecords() {
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, err
+		}
+		rec, err := reader.RecordBatch(i)
+		if err != nil {
+			release()
+			return nil, fmt.Errorf("ipc: read record batch %d: %w", i, err)
+		}
+		for c := range chunks {
+			col := rec.Column(c)
+			col.Retain()
+			chunks[c] = append(chunks[c], col)
+		}
+	}
 	return buildDataFrameFromChunks(sch, chunks)
 }
 
