@@ -271,3 +271,32 @@ func joinLayout(ls, rs *schema.Schema, spec JoinSpec) ([]joinOutCol, error) {
 	}
 	return out, nil
 }
+
+// JoinColumnSource names where one output column of a join comes from:
+// the left and/or right input column feeding it ("" for a side that
+// does not). A coalesced full-join key has both.
+type JoinColumnSource struct {
+	Name, Left, Right string
+}
+
+// JoinOutputSources lists the output columns of a join with their
+// source columns, for planners that prune join inputs.
+func JoinOutputSources(ls, rs *schema.Schema, spec JoinSpec) ([]JoinColumnSource, error) {
+	cols, err := joinLayout(ls, rs, spec)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]JoinColumnSource, len(cols))
+	for i, c := range cols {
+		out[i].Name = c.name
+		switch c.src {
+		case joinFromLeft:
+			out[i].Left = c.col
+		case joinFromRight:
+			out[i].Right = c.col
+		case joinFromBoth:
+			out[i].Left, out[i].Right = spec.LeftOn[c.key], spec.RightOn[c.key]
+		}
+	}
+	return out, nil
+}

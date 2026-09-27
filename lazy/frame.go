@@ -319,44 +319,12 @@ func rebuildAgg(op expr.AggOp, inner expr.Expr) (expr.Expr, bool) {
 	return expr.Expr{}, false
 }
 
-// Join merges lf with other on a set of key columns.
-//
-// # Parameters
-//
-//   - other: right-hand side [LazyFrame].
-//   - on: shared key column names (must exist in both frames).
-//   - how: one of [dataframe.InnerJoin], [dataframe.LeftJoin],
-//     [dataframe.CrossJoin]. Inner drops rows with no match on
-//     either side; left keeps all rows from lf; cross produces the
-//     Cartesian product (ignores `on`).
-//
-// # Returns
-//
-// A [LazyFrame] whose output has the union of both schemas; key
-// columns appear once, collisions on non-key columns surface as an
-// error at execute time.
-//
-// # Examples
-//
-//	// Merge salaries onto people by name:
-//	people := lazy.FromDataFrame(peopleDF)
-//	salaries := lazy.FromDataFrame(salariesDF)
-//	out, _ := people.Join(salaries, []string{"name"}, dataframe.InnerJoin).
-//	    Filter(expr.Col("salary").Gt(expr.LitFloat64(50_000))).
-//	    Collect(ctx)
-func (lf LazyFrame) Join(other LazyFrame, on []string, how dataframe.JoinType) LazyFrame {
-	return LazyFrame{plan: Join{Left: lf.plan, Right: other.plan, On: on, How: how}}
-}
-
 // JoinOn joins on one key column that has a different name on each
-// side, like polars join(left_on=..., right_on=...). The output keeps
-// the left key and drops the right one, which is what polars does for
-// inner and left joins.
-func (lf LazyFrame) JoinOn(other LazyFrame, leftOn, rightOn string, how dataframe.JoinType) LazyFrame {
-	if leftOn != rightOn {
-		other = other.Rename(rightOn, leftOn)
-	}
-	return lf.Join(other, []string{leftOn}, how)
+// side, like polars join(left_on=..., right_on=...). It is shorthand
+// for Join with [dataframe.WithJoinKeys].
+func (lf LazyFrame) JoinOn(other LazyFrame, leftOn, rightOn string, how dataframe.JoinType, opts ...dataframe.JoinOption) LazyFrame {
+	opts = append([]dataframe.JoinOption{dataframe.WithJoinKeys([]string{leftOn}, []string{rightOn})}, opts...)
+	return lf.Join(other, nil, how, opts...)
 }
 
 // keep dataframe import referenced via JoinType.

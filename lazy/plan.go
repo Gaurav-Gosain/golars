@@ -66,57 +66,6 @@ func (a Aggregate) String() string {
 	return fmt.Sprintf("AGG keys=%v [%s]", a.Keys, strings.Join(aggs, ", "))
 }
 
-// Join is a two-source join.
-type Join struct {
-	Left  Node
-	Right Node
-	On    []string
-	How   dataframe.JoinType
-}
-
-func (Join) isLogicalNode() {}
-
-func (j Join) Children() []Node { return []Node{j.Left, j.Right} }
-
-func (j Join) WithChildren(children []Node) Node {
-	if len(children) != 2 {
-		panic("lazy: Join takes two children")
-	}
-	return Join{Left: children[0], Right: children[1], On: j.On, How: j.How}
-}
-
-func (j Join) Schema() (*schema.Schema, error) {
-	ls, err := j.Left.Schema()
-	if err != nil {
-		return nil, err
-	}
-	rs, err := j.Right.Schema()
-	if err != nil {
-		return nil, err
-	}
-	onSet := make(map[string]struct{}, len(j.On))
-	for _, k := range j.On {
-		onSet[k] = struct{}{}
-	}
-	fields := make([]schema.Field, 0, ls.Len()+rs.Len())
-	fields = append(fields, ls.Fields()...)
-	for _, f := range rs.Fields() {
-		if _, isKey := onSet[f.Name]; isKey {
-			continue
-		}
-		name := f.Name
-		if ls.Contains(name) {
-			name = name + "_right"
-		}
-		fields = append(fields, schema.Field{Name: name, DType: f.DType})
-	}
-	return schema.New(fields...)
-}
-
-func (j Join) String() string {
-	return fmt.Sprintf("JOIN %s on=%v", j.How, j.On)
-}
-
 // Ensure dtype import is referenced in this file even when callers do not use
 // nested inference paths.
 var _ = dtype.Null

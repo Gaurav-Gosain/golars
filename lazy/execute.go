@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -178,7 +179,7 @@ func executeJoin(ctx context.Context, cfg execConfig, j Join) (*dataframe.DataFr
 	if out, ok, err := joinBuildSmaller(ctx, cfg, left, right, j); ok {
 		return out, err
 	}
-	return left.Join(ctx, right, j.On, j.How, dataframe.WithJoinAllocator(cfg.alloc))
+	return left.Join(ctx, right, j.On, j.How, j.options(cfg.alloc)...)
 }
 
 // joinBuildSmaller runs an inner join with the inputs swapped when the
@@ -188,13 +189,17 @@ func executeJoin(ctx context.Context, cfg execConfig, j Join) (*dataframe.DataFr
 // over the large side: several times more memory and slower probes.
 // The swapped result is restored to the left-then-right column layout.
 // Row order is not part of the inner join contract (polars' default
-// maintain_order is "none"). Only applies when no non-key column name
-// occurs on both sides, so no suffixing is involved.
+// maintain_order is "none"). Only applies to a coalesced inner join on
+// same-named keys with no order or validation request, when no non-key
+// column name occurs on both sides, so no suffixing is involved.
 func joinBuildSmaller(ctx context.Context, cfg execConfig, left, right *dataframe.DataFrame, j Join) (*dataframe.DataFrame, bool, error) {
-	if j.How != dataframe.InnerJoin || right.Height() <= 2*left.Height() {
+	spec := j.Spec()
+	if spec.How != dataframe.InnerJoin || !spec.Coalesce || spec.Order != dataframe.JoinOrderNone ||
+		spec.Validate != dataframe.ValidateManyToMany || !slices.Equal(spec.LeftOn, spec.RightOn) ||
+		right.Height() <= 2*left.Height() {
 		return nil, false, nil
 	}
-	keys := stringSet(j.On)
+	keys := stringSet(spec.LeftOn)
 	names := append(make([]string, 0, left.Width()+right.Width()), left.ColumnNames()...)
 	for _, n := range right.ColumnNames() {
 		if _, isKey := keys[n]; isKey {
@@ -205,7 +210,8 @@ func joinBuildSmaller(ctx context.Context, cfg execConfig, left, right *datafram
 		}
 		names = append(names, n)
 	}
-	swapped, err := right.Join(ctx, left, j.On, j.How, dataframe.WithJoinAllocator(cfg.alloc))
+	swapped, err := right.Join(ctx, left, spec.LeftOn, spec.How,
+		dataframe.WithJoinNullsEqual(spec.NullsEqual), dataframe.WithJoinAllocator(cfg.alloc))
 	if err != nil {
 		return nil, true, err
 	}

@@ -123,7 +123,7 @@ func executeHybrid(ctx context.Context, cfg execConfig, plan Node) (*dataframe.D
 			return nil, err
 		}
 		defer right.Release()
-		return left.Join(ctx, right, n.On, n.How, dataframe.WithJoinAllocator(cfg.alloc))
+		return left.Join(ctx, right, n.On, n.How, n.options(cfg.alloc)...)
 	}
 	// Any other node that we could not compile as streaming: fall back fully.
 	return executeNode(ctx, cfg, plan)
