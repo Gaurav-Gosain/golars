@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -144,6 +145,25 @@ func evalListMulti(ctx context.Context, ec EvalContext, n expr.FunctionNode, df 
 			return nil, err
 		}
 		inputs = append(inputs, s)
+	}
+	if inner, ok := listInnerDType(inputs[0]); ok {
+		// An untyped literal takes the list's inner dtype, as in polars.
+		for i := 1; i < len(inputs); i++ {
+			l, dyn := dynLit(n.Args[i])
+			if !dyn {
+				continue
+			}
+			t, ok := dynTarget(l, inner)
+			if !ok || inputs[i].DType().Equal(t) {
+				continue
+			}
+			c, err := compute.Cast(ctx, inputs[i], t, kernelOpts(ec)...)
+			if err != nil {
+				return nil, err
+			}
+			inputs[i].Release()
+			inputs[i] = c
+		}
 	}
 	lst := inputs[0].List()
 	opt := seriesAlloc(ec)

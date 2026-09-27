@@ -1,6 +1,6 @@
 {
   "name": "literal_is_first_distinct",
-  "status": "known",
+  "status": "fixed",
   "note": "literal.is_first_distinct() broadcast before evaluation (literal semantics) (golars 1 rows, polars 2 rows)",
   "plan": {
     "seed": 200437,

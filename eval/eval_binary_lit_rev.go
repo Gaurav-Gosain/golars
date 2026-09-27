@@ -80,6 +80,11 @@ func litLeftArith(ctx context.Context, ec EvalContext, n expr.BinaryNode, col *s
 	if err != nil {
 		return nil, err
 	}
-	defer left.Release()
-	return evalBinaryOperands(ctx, ec, n, left, col)
+	ss := []*series.Series{left, col}
+	// Only ss[0] (the literal) can be replaced; col stays borrowed.
+	defer func() { ss[0].Release() }()
+	if err := adoptDynLiterals(ctx, ec, []expr.Expr{n.Left, n.Right}, ss); err != nil {
+		return nil, err
+	}
+	return evalBinaryOperands(ctx, ec, n, ss[0], col)
 }

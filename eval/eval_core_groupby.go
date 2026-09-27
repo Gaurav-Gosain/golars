@@ -285,6 +285,20 @@ func GroupByAgg(ctx context.Context, ec EvalContext, df *dataframe.DataFrame, ke
 // scalar column or a list column.
 func aggOverGroups(ctx context.Context, ec EvalContext, e expr.Expr, sorted *dataframe.DataFrame, offsets []int, numGroups int) (*series.Series, error) {
 	name := expr.OutputName(e)
+	if expr.IsLiteralOnly(e) {
+		// A literal-only expression (lit(1), lit("a").shift(1)) has
+		// the same unit-length value in every group, and polars gives
+		// it one scalar per group rather than a list.
+		res, err := evalNode(ctx, ec, e, sorted)
+		if err != nil {
+			return nil, err
+		}
+		if res.Len() == 1 {
+			defer res.Release()
+			return res.Broadcast(numGroups, seriesAlloc(ec))
+		}
+		res.Release()
+	}
 	scalar := expr.ReturnsScalar(e)
 	parts := make([]*series.Series, 0, numGroups)
 	defer func() { releaseAll(parts) }()

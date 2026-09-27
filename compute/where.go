@@ -217,7 +217,25 @@ func Where(ctx context.Context, cond, ifTrue, ifFalse *series.Series, opts ...Op
 		}
 		return series.FromString(name, out, valid, series.WithAllocator(cfg.alloc))
 	}
-	return nil, fmt.Errorf("compute.Where: unsupported dtype %s", ifTrue.DType())
+	return whereGather(name, pick, ifTrue, ifFalse, n, cfg.alloc)
+}
+
+// whereGather is the any-dtype path of Where: it concatenates both
+// branches and gathers row i from the first or second half.
+func whereGather(name string, pick func(int) bool, ifTrue, ifFalse *series.Series, n int, alloc memory.Allocator) (*series.Series, error) {
+	both, err := series.ConcatSeries(name, []*series.Series{ifTrue, ifFalse}, series.WithAllocator(alloc))
+	if err != nil {
+		return nil, fmt.Errorf("compute.Where: %w", err)
+	}
+	defer both.Release()
+	idx := make([]int, n)
+	for i := range idx {
+		idx[i] = i
+		if !pick(i) {
+			idx[i] = n + i
+		}
+	}
+	return both.Gather(idx, series.WithAllocator(alloc))
 }
 
 // whereInt64Fused is the direct-buffer specialisation: reads the

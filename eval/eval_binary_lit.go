@@ -48,6 +48,23 @@ func evalBinaryLiteralFast(
 	}
 	defer colSer.Release()
 	litVal := lit.Value
+	if isArithOp(op) && (colSer.DType().IsNumeric() || colSer.DType().IsBool()) {
+		// Compute in the polars result dtype: col(i8) + 1000 is i16,
+		// col(f32) + 1 stays f32, col(i16) + LitInt64(1) is i64.
+		if target, ok := litTargetDType(lit, colSer.DType()); ok {
+			if !target.Equal(colSer.DType()) {
+				cs, err := compute.Cast(ctx, colSer, target, kernelOpts(ec)...)
+				if err != nil {
+					return nil, true, err
+				}
+				defer cs.Release()
+				colSer = cs
+			}
+			if iv, isInt := litVal.(int64); isInt && target.IsFloating() {
+				litVal = float64(iv)
+			}
+		}
+	}
 	if isArithOp(op) {
 		// polars supertypes: an integer column with a float literal is
 		// computed in f64, and `/` is true division, so an integer

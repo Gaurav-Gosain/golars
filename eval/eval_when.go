@@ -12,21 +12,17 @@ import (
 // evalWhenThen materialises when(pred).then(a).otherwise(b) by
 // evaluating every branch then delegating to compute.Where.
 func evalWhenThen(ctx context.Context, ec EvalContext, n expr.WhenThenNode, df *dataframe.DataFrame) (*series.Series, error) {
-	pred, err := evalNode(ctx, ec, n.Pred, df)
+	// Literal and aggregated branches are unit length; they broadcast
+	// against the others as in polars.
+	ss, err := evalBroadcast(ctx, ec, []expr.Expr{n.Pred, n.Then, n.Otherwise}, df)
 	if err != nil {
 		return nil, err
 	}
-	defer pred.Release()
-	ifTrue, err := evalNode(ctx, ec, n.Then, df)
-	if err != nil {
+	defer releaseAll(ss)
+	if err := adoptDynLiterals(ctx, ec, []expr.Expr{n.Then, n.Otherwise}, ss[1:]); err != nil {
 		return nil, err
 	}
-	defer ifTrue.Release()
-	ifFalse, err := evalNode(ctx, ec, n.Otherwise, df)
-	if err != nil {
-		return nil, err
-	}
-	defer ifFalse.Release()
+	pred, ifTrue, ifFalse := ss[0], ss[1], ss[2]
 	// A Null-typed branch (when(...).then(1) with no otherwise) takes
 	// the other branch's dtype, as in polars.
 	if ifFalse.DType().IsNull() && !ifTrue.DType().IsNull() {

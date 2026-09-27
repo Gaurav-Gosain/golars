@@ -289,7 +289,11 @@ func (PredicatePushdownPass) Apply(plan Node) (Node, bool, error) {
 		case Projection:
 			// Only push below projection when all refs are plain columns from
 			// the input (not aliases or computed outputs).
-			if allElementwise(inner.Exprs) && projPassesThrough(inner.Exprs, refs) {
+			// A projection of literals only has one row whatever its
+			// input; like polars, only an elementwise predicate moves
+			// below it (and then filters the input rows instead).
+			if allElementwise(inner.Exprs) && projPassesThrough(inner.Exprs, refs) &&
+				(anyColumnRef(inner.Exprs) || expr.IsElementwise(filter.Predicate)) {
 				return Projection{
 					Input: Filter{Input: inner.Input, Predicate: filter.Predicate},
 					Exprs: inner.Exprs,

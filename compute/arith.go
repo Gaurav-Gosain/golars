@@ -210,6 +210,15 @@ func runArithLit(ctx context.Context, a *series.Series, lit any, opts []Option, 
 		return nil, err
 	}
 	defer litSer.Release()
+	if a.DType().IsNumeric() && litSer.DType().IsNumeric() && !a.DType().Equal(litSer.DType()) {
+		// The literal takes the column's dtype (f32 column, f64 literal).
+		cast, err := Cast(ctx, litSer, a.DType(), WithAllocator(cfg.alloc))
+		if err != nil {
+			return nil, err
+		}
+		defer cast.Release()
+		litSer = cast
+	}
 	return runArith(ctx, a, litSer, opts, kernel, op)
 }
 
@@ -451,6 +460,25 @@ func runArith(ctx context.Context, a, b *series.Series, opts []Option, kernel st
 		return dispatchArithFloat32(ctx, name, aArr, bArr, op, cfg.alloc, par)
 	case arrow.FLOAT64:
 		return dispatchArithFloat64(ctx, name, aArr, bArr, op, cfg.alloc, par)
+	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16:
+		// Narrow integers compute in i64 and wrap back, as polars'
+		// wrapping integer arithmetic does.
+		wa, err := widenToInt64(a, cfg.alloc)
+		if err != nil {
+			return nil, err
+		}
+		defer wa.Release()
+		wb, err := widenToInt64(b, cfg.alloc)
+		if err != nil {
+			return nil, err
+		}
+		defer wb.Release()
+		res, err := runArith(ctx, wa, wb, []Option{WithAllocator(cfg.alloc)}, kernel, op)
+		if err != nil {
+			return nil, err
+		}
+		defer res.Release()
+		return wrapInt64To(res, a.DType().Arrow(), name, cfg.alloc)
 	}
 	return nil, isUnsupported(kernel, a.DType())
 }

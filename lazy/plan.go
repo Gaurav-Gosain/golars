@@ -392,6 +392,13 @@ func inferExprDType(e expr.Expr, in *schema.Schema) (dtype.DType, error) {
 		if err != nil {
 			return dtype.DType{}, err
 		}
+		if !lt.Equal(rt) {
+			// Mixed dtypes follow the evaluator's supertype and untyped
+			// literal rules; ask it.
+			if dt := inferByEmptyEval(e, in); !dt.IsNull() {
+				return dt, nil
+			}
+		}
 		out := promote(lt, rt)
 		if n.Op == expr.OpDiv && out.IsInteger() {
 			return dtype.Float64(), nil // `/` is true division

@@ -49,7 +49,7 @@ func evalNode(ctx context.Context, ec EvalContext, e expr.Expr, df *dataframe.Da
 		return col.Clone(), nil
 
 	case expr.LitNode:
-		return literalSeries(n, df.Height(), ec.Alloc)
+		return literalSeries(n, 1, ec.Alloc)
 
 	case expr.BinaryNode:
 		return evalBinary(ctx, ec, n, df)
@@ -114,13 +114,19 @@ func evalBinary(ctx context.Context, ec EvalContext, n expr.BinaryNode, df *data
 	if err != nil {
 		return nil, err
 	}
-	defer left.Release()
 	right, err := evalOperand(ctx, ec, n.Right, n.Left, df)
 	if err != nil {
+		left.Release()
 		return nil, err
 	}
-	defer right.Release()
-	return evalBinaryOperands(ctx, ec, n, left, right)
+	ss := []*series.Series{left, right}
+	defer releaseAll(ss)
+	if !isLogicalOp(n.Op) {
+		if err := adoptDynLiterals(ctx, ec, []expr.Expr{n.Left, n.Right}, ss); err != nil {
+			return nil, err
+		}
+	}
+	return evalBinaryOperands(ctx, ec, n, ss[0], ss[1])
 }
 
 // evalBinaryOperands applies n to already evaluated operands. It borrows
@@ -216,30 +222,17 @@ func evalUnary(ctx context.Context, ec EvalContext, n expr.UnaryNode, df *datafr
 		if out, ok, err := negateTemporal(ctx, ec, inner); ok {
 			return out, err
 		}
-		switch inner.DType().ID() {
-		case dtype.Int64().ID():
+		dt := inner.DType()
+		switch {
+		case dt.IsFloating():
 			// Scalar kernel: no n-row column of -1 to build.
-			return compute.MulLit(ctx, inner, int64(-1), kernelOpts(ec)...)
-		case dtype.Float64().ID():
 			return compute.MulLit(ctx, inner, float64(-1), kernelOpts(ec)...)
-		case dtype.Int32().ID():
-			one, err := series.FromInt64("one", fillInt64(-1, inner.Len()), nil,
-				series.WithAllocator(ec.Alloc))
-			if err != nil {
-				return nil, err
-			}
-			defer one.Release()
-			return compute.Mul(ctx, inner, one, kernelOpts(ec)...)
-		case dtype.Float32().ID():
-			one, err := series.FromFloat64("one", fillFloat64(-1, inner.Len()), nil,
-				series.WithAllocator(ec.Alloc))
-			if err != nil {
-				return nil, err
-			}
-			defer one.Release()
-			return compute.Mul(ctx, inner, one, kernelOpts(ec)...)
+		case dt.IsInteger() && !isUnsignedID(dt.ID()):
+			// Wraps like polars: -(-128 as i8) is -128.
+			return compute.MulLit(ctx, inner, int64(-1), kernelOpts(ec)...)
 		}
-		return nil, fmt.Errorf("eval: Neg on %s not supported", inner.DType())
+		// polars: "`neg` operation not supported for dtype `u32`".
+		return nil, fmt.Errorf("eval: `neg` operation not supported for dtype %s", dt)
 	}
 	return nil, fmt.Errorf("eval: unknown unary op %d", n.Op)
 }
@@ -357,6 +350,18 @@ func evalAgg(ctx context.Context, ec EvalContext, n expr.AggNode, df *dataframe.
 }
 
 func literalSeries(l expr.LitNode, n int, alloc memory.Allocator) (*series.Series, error) {
+	s, err := literalSeriesRaw(l, n, alloc)
+	if err != nil || l.Value == nil || !l.DType.IsNumeric() || s.DType().Equal(l.DType) {
+		return s, err
+	}
+	// Numeric values are held as int64 or float64; materialize them in
+	// the literal's dtype (i32 for a small untyped int, f32 for a
+	// float32 literal).
+	defer s.Release()
+	return compute.Cast(context.Background(), s, l.DType, compute.WithAllocator(alloc))
+}
+
+func literalSeriesRaw(l expr.LitNode, n int, alloc memory.Allocator) (*series.Series, error) {
 	if s, ok, err := temporalLiteralSeries(l, n, EvalContext{Alloc: alloc}); ok {
 		return s, err
 	}

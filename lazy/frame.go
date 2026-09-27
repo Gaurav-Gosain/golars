@@ -270,6 +270,11 @@ func rewriteAggInput(e expr.Expr, nextID *int) (expr.Expr, expr.Expr, bool) {
 	if !expr.IsElementwise(agg.Inner) {
 		return e, expr.Expr{}, false
 	}
+	// A literal input is one value, not one per row: lit(1).count() is
+	// 1 in every group. Hoisting it would broadcast it to the frame.
+	if expr.IsLiteralOnly(agg.Inner) {
+		return e, expr.Expr{}, false
+	}
 	// Hoist the inner expression.
 	synth := fmt.Sprintf("__agg_%d", *nextID)
 	*nextID++

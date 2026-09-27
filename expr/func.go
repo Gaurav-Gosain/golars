@@ -99,7 +99,7 @@ func (e Expr) Pow(exponent float64) Expr { return fn1p("pow", e, exponent) }
 // FillNull replaces nulls with the given scalar value. The value is
 // wrapped in a literal Expr internally so the planner can fold.
 func (e Expr) FillNull(v any) Expr {
-	return Expr{FunctionNode{Name: "fill_null", Args: []Expr{e, Lit(v)}}}
+	return Expr{FunctionNode{Name: "fill_null", Args: []Expr{e, scalarLit(v)}}}
 }
 
 // FillNullExpr replaces nulls with the result of another expression
@@ -240,7 +240,7 @@ func (e Expr) IsIn(values ...any) Expr {
 	}
 	out := e.Eq(Lit(values[0]))
 	for _, v := range values[1:] {
-		out = out.Or(e.Eq(Lit(v)))
+		out = out.Or(e.Eq(scalarLit(v)))
 	}
 	return out
 }

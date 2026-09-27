@@ -378,6 +378,11 @@ func extraArithLit(ctx context.Context, a *series.Series, lit any, opts []Option
 		return nil, true, err
 	}
 	defer res.Release()
+	if a.DType().IsInteger() && op != opDiv {
+		// Integer arithmetic wraps on overflow, as in polars.
+		out, err := wrapInt64To(res, a.DType().Arrow(), cfg.outName(a.Name()), cfg.alloc)
+		return out, true, err
+	}
 	out, err := Cast(ctx, res, a.DType(), WithAllocator(cfg.alloc), WithName(cfg.outName(a.Name())))
 	return out, true, err
 }

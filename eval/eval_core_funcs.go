@@ -285,6 +285,12 @@ func evalBroadcast(ctx context.Context, ec EvalContext, args []expr.Expr, df *da
 	if err != nil {
 		return nil, err
 	}
+	return broadcastUnits(ss, ec)
+}
+
+// broadcastUnits broadcasts the length-1 series in ss to the length of
+// the others. It consumes ss, also on error.
+func broadcastUnits(ss []*series.Series, ec EvalContext) ([]*series.Series, error) {
 	// Unit-length inputs broadcast to the length of the others, which
 	// may be zero (an empty frame against a literal).
 	n := -1

@@ -15,9 +15,9 @@ func TestExpressionCompatibility(t *testing.T) {
 		{`coalesce(primary, backup).str.trim()`, expr.Coalesce(expr.Col("primary"), expr.Col("backup")).Str().Trim()},
 		{`col("price").sum()`, expr.Col("price").Sum()},
 		{`(price + tax).abs()`, expr.Col("price").Add(expr.Col("tax")).Abs()},
-		{`.5`, expr.LitFloat64(0.5)},
-		{`1e-3`, expr.LitFloat64(0.001)},
-		{`2E+2`, expr.LitFloat64(200)},
+		{`.5`, expr.LitFloat(0.5)},
+		{`1e-3`, expr.LitFloat(0.001)},
+		{`2E+2`, expr.LitFloat(200)},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
 			got, err := Parse(tc.input)

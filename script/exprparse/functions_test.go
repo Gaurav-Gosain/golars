@@ -127,9 +127,9 @@ func TestFunctionForms(t *testing.T) {
 		{`round(x, 2)`, expr.Col("x").Round(2)},
 		{`x.round()`, expr.Col("x").Round(0)},
 		{`a // b`, expr.Col("a").FloorDiv(expr.Col("b"))},
-		{`a % 2`, expr.Col("a").Mod(expr.LitInt64(2))},
-		{`a ** 2`, expr.Col("a").PowExpr(expr.LitInt64(2))},
-		{`-a ** 2`, expr.Col("a").PowExpr(expr.LitInt64(2)).Neg()},
+		{`a % 2`, expr.Col("a").Mod(expr.LitInt(2))},
+		{`a ** 2`, expr.Col("a").PowExpr(expr.LitInt(2))},
+		{`-a ** 2`, expr.Col("a").PowExpr(expr.LitInt(2)).Neg()},
 		{`a + b * c`, expr.Col("a").Add(expr.Col("b").Mul(expr.Col("c")))},
 		{`str.to_date(s, "%Y")`, expr.Col("s").Str().ToDate("%Y")},
 		{`str.to_date(s, "%Y", strict=false)`, expr.Col("s").Str().ToDateWith("%Y",
@@ -148,7 +148,7 @@ func TestFunctionForms(t *testing.T) {
 		{`date_range(a, b, "1h")`, expr.DateRange(expr.Col("a"), expr.Col("b"), "1h", "both")},
 		{`date_range(a, b, closed="left")`, expr.DateRange(expr.Col("a"), expr.Col("b"), "1d", "left")},
 		{`x.cast("datetime[ms]")`, expr.Col("x").Cast(dtype.Datetime(dtype.Millisecond, ""))},
-		{`WHEN a THEN 1 OTHERWISE 2`, expr.When(expr.Col("a")).Then(expr.LitInt64(1)).Otherwise(expr.LitInt64(2))},
+		{`WHEN a THEN 1 OTHERWISE 2`, expr.When(expr.Col("a")).Then(expr.LitInt(1)).Otherwise(expr.LitInt(2))},
 		{`name contains "x" AND NOT b is_null`, expr.Col("name").Str().Contains("x").And(expr.Col("b").IsNull().Not())},
 		{`col("my col").sum()`, expr.Col("my col").Sum()},
 	} {
@@ -197,15 +197,15 @@ func TestFunctionErrors(t *testing.T) {
 func TestGoSource(t *testing.T) {
 	for src, want := range map[string]string{
 		`dt.year(ts)`: `expr.Col("ts").Dt().Year()`,
-		`x // 2`:      `expr.Col("x").FloorDiv(expr.LitInt64(2))`,
+		`x // 2`:      `expr.Col("x").FloorDiv(expr.LitInt(2))`,
 		`cut(x, [0, 10], labels=["a", "b", "c"])`: `expr.Col("x").Cut([]float64{0, 10}, expr.CutOptions{Labels: []string{"a", "b", "c"}})`,
 		`x in [1, 2]`:                  `expr.Col("x").IsIn(int64(1), int64(2))`,
-		`when a then 1`:                `expr.When(expr.Col("a")).Then(expr.LitInt64(1)).Otherwise(expr.LitNull(dtype.Null()))`,
+		`when a then 1`:                `expr.When(expr.Col("a")).Then(expr.LitInt(1)).Otherwise(expr.LitNull(dtype.Null()))`,
 		`x.cast("date")`:               `expr.Col("x").Cast(dtype.Date())`,
 		`str.to_date(s, strict=false)`: `expr.Col("s").Str().ToDateWith("", expr.StrptimeOptions{Strict: false, Exact: true, Ambiguous: "raise"})`,
 		`rolling_mean_by(x, ts, "2d", min_periods=1)`: `expr.Col("x").RollingMeanBy(expr.Col("ts"), "2d", expr.WithMinPeriods(1))`,
 		`replace_strict(x, [1], ["a"], default="z")`:  `expr.Col("x").ReplaceStrict([]any{int64(1)}, []any{"a"}, expr.ReplaceStrictOptions{Default: new(expr.LitString("z"))})`,
-		`is_between(x, 1, 2)`:                         `expr.Col("x").IsBetween(expr.LitInt64(1), expr.LitInt64(2), expr.IntervalClosed("both"))`,
+		`is_between(x, 1, 2)`:                         `expr.Col("x").IsBetween(expr.LitInt(1), expr.LitInt(2), expr.IntervalClosed("both"))`,
 		`sort_by(a, b, descending=true)`:              `expr.Col("a").SortBy([]expr.Expr{expr.Col("b")}, expr.SortByOptions{Descending: []bool{true}})`,
 	} {
 		got, err := GoSource(src)

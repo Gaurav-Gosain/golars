@@ -84,6 +84,37 @@ func ReturnsScalar(e Expr) bool {
 	return false
 }
 
+// IsLiteralOnly reports whether every leaf of e is a literal, so its
+// value does not depend on the frame: it reads no column and no frame
+// height (len(), int_range and selectors are function nodes without
+// arguments and do not count). polars evaluates such an expression
+// once, as a unit-length value, in every context.
+func IsLiteralOnly(e Expr) bool {
+	ok := true
+	Walk(e, func(x Expr) bool {
+		switch n := x.node.(type) {
+		case LitNode, AliasNode, CastNode, UnaryNode, IsNullNode, BinaryNode,
+			WhenThenNode, AggNode:
+			return true
+		case FunctionNode:
+			if len(n.Args) == 0 {
+				ok = false
+				return false
+			}
+			for _, p := range n.Params {
+				if pe, isExpr := p.(Expr); isExpr && pe.node != nil && !IsLiteralOnly(pe) {
+					ok = false
+					return false
+				}
+			}
+			return true
+		}
+		ok = false
+		return false
+	})
+	return ok
+}
+
 // IsElementwise reports whether every node in e maps input rows to
 // output rows one to one, independent of the other rows. Such
 // expressions can be computed on the whole frame before grouping, and

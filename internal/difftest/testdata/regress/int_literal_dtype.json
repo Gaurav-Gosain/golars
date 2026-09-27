@@ -1,6 +1,6 @@
 {
   "name": "int_literal_dtype",
-  "status": "known",
+  "status": "fixed",
   "note": "a bare integer literal materializes as i64 in golars and i32 in polars (golars {o1: i64})",
   "plan": {
     "seed": 200136,

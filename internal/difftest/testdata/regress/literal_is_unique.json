@@ -1,6 +1,6 @@
 {
   "name": "literal_is_unique",
-  "status": "known",
+  "status": "fixed",
   "note": "literal.is_unique() is evaluated on the literal broadcast to the frame height; polars evaluates it on one value (golars 0 rows, polars 2 rows)",
   "plan": {
     "seed": 200348,

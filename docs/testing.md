@@ -106,11 +106,26 @@ against the oracle.
 ## Known open bug classes
 
 See the `known` files under `internal/difftest/testdata/regress` for
-minimal repros. The largest class is literal semantics: golars
-broadcasts a literal to the frame (or group) height before applying
-functions to it, while polars keeps literals at length one. This makes
-`lit(x).count()`, `.len()`, `.is_unique()`, `.shift()`, `.var()` and
-friends differ, makes `select(lit(x))` return the frame height instead
-of one row, and turns literals inside `group_by().agg()` into lists.
-A bare integer literal also materializes as i64 in golars and i32 in
-polars.
+minimal repros.
+
+## Literal semantics
+
+golars follows polars here:
+
+- A literal evaluates to one row. Functions on it (`count`, `shift`,
+  `var`, `is_unique`, ...) see that single value, and it broadcasts
+  only when combined with a frame-length column or when the output
+  frame is built. `select(lit(x))` has one row.
+- In `group_by().agg()` an expression built only from literals is one
+  scalar per group, not a list.
+- An untyped numeric literal (glr `1`, `1.5`; Go `expr.Lit(1)`,
+  `expr.LitInt`, `expr.LitFloat` and the `AddLit`-style sugar) is i32
+  on its own (i64 when the value does not fit) or f64, and next to a
+  numeric column it takes the column's dtype when the value fits:
+  `col(i8) + 1` is i8, `col(i8) + 1000` is i16, `col(f32) * 1.5` is
+  f32. `expr.LitInt64`, `expr.LitFloat64` and Go `int64`, `int32` and
+  `float32` values passed to `expr.Lit` pin the dtype, like
+  `pl.lit(1, dtype=pl.Int64)`.
+- Two typed numeric operands combine in the polars supertype
+  (`dtype.NumericSupertype`): `i16 + i32` is i32, `u8 + i8` is i16,
+  `f32 + i16` is f32. Integer arithmetic wraps on overflow.

@@ -1,6 +1,6 @@
 {
   "name": "literal_var_in_agg",
-  "status": "known",
+  "status": "fixed",
   "note": "var of a literal in group_by.agg: golars 0, polars null (literal broadcast to group length) (column \"o2\" row 0: golars 0, polars null)",
   "plan": {
     "seed": 200293,

@@ -1,6 +1,6 @@
 {
   "name": "date_literal_in_agg",
-  "status": "known",
+  "status": "fixed",
   "note": "a date literal in group_by.agg becomes list[date]; polars keeps a scalar per group (golars {c1: bool, c0: duration[us], o2: list[date]})",
   "plan": {
     "seed": 200201,

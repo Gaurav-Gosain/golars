@@ -1,6 +1,6 @@
 {
   "name": "literal_rolling_max",
-  "status": "known",
+  "status": "fixed",
   "note": "rolling_max of a literal: literal broadcast before the window (literal semantics) (column \"o4\" row 0: golars 1, polars null)",
   "plan": {
     "seed": 200062,

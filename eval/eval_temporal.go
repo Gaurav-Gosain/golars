@@ -189,9 +189,9 @@ func promoteExtra(ctx context.Context, ec EvalContext, left, right *series.Serie
 	if !ld.IsNumeric() || !rd.IsNumeric() {
 		return nil, nil, false, nil
 	}
-	target := dtype.Int64()
-	if ld.IsFloating() || rd.IsFloating() {
-		target = dtype.Float64()
+	target, ok := dtype.NumericSupertype(ld, rd)
+	if !ok {
+		return nil, nil, false, nil
 	}
 	cast := func(s *series.Series) (*series.Series, error) {
 		if s.DType().Equal(target) {

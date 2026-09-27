@@ -65,9 +65,9 @@ func compileNode(n *Node) (val, error) {
 func litVal(v any) (val, error) {
 	switch x := v.(type) {
 	case int64:
-		return val{expr.LitInt64(x), fmt.Sprintf("expr.LitInt64(%d)", x)}, nil
+		return val{expr.LitInt(x), fmt.Sprintf("expr.LitInt(%d)", x)}, nil
 	case float64:
-		return val{expr.LitFloat64(x), fmt.Sprintf("expr.LitFloat64(%s)", goFloat(x))}, nil
+		return val{expr.LitFloat(x), fmt.Sprintf("expr.LitFloat(%s)", goFloat(x))}, nil
 	case string:
 		return val{expr.LitString(x), fmt.Sprintf("expr.LitString(%q)", x)}, nil
 	case bool:
