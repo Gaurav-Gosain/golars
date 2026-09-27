@@ -16,6 +16,7 @@ Most of these docs are for contributors. User-facing documentation lives at the 
 8. [Scripting](scripting.md). The `.glr` pipe language used by the `golars` REPL and `golars run`.
 9. [MCP](mcp.md). The `golars-mcp` server that exposes golars as tools for an LLM host.
 10. [Jupyter](jupyter.md). The `golars-kernel` Jupyter kernel and the `jupyter/render` package for Go notebooks.
+11. [Verification](verification.md). The Lean model of golars' core semantics, what is proved about it, and how the Go code is tested against it.
 
 ## Non-goals
 
