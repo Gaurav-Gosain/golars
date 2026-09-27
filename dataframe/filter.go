@@ -40,6 +40,15 @@ func resolveFilter(opts []FilterOption) filterConfig {
 // independent Series owning its own buffers. Narrow frames stay serial,
 // and compute.Filter parallelizes rows internally above its cutoff.
 func (df *DataFrame) Filter(ctx context.Context, mask *series.Series, opts ...FilterOption) (*DataFrame, error) {
+	if mask.Len() == 1 && df.height != 1 && mask.DType().IsBool() {
+		// A scalar predicate (lit(true), col("a").sum() > 3) broadcasts
+		// over every row, as in polars. This includes the empty frame.
+		arr := mask.Chunk(0)
+		if b, ok := arr.(interface{ Value(int) bool }); ok && arr.IsValid(0) && b.Value(0) {
+			return df.Clone(), nil
+		}
+		return df.Slice(0, 0)
+	}
 	if mask.Len() != df.height {
 		return nil, fmt.Errorf("%w: mask=%d df=%d", compute.ErrLengthMismatch, mask.Len(), df.height)
 	}
