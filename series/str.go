@@ -269,19 +269,21 @@ func (o StrOps) Slice(start, length int, opts ...Option) (*Series, error) {
 	return o.mapString("Slice", func(s string) string {
 		runes := []rune(s)
 		n := len(runes)
+		// polars computes the stop from the unclamped start, so a
+		// negative offset past the beginning shortens the window:
+		// "c0".slice(-3, 2) is "c".
 		a := start
 		if a < 0 {
 			a = n + a
 		}
-		if a < 0 {
-			a = 0
-		}
-		if a > n {
-			return ""
-		}
 		b := n
-		if length >= 0 && a+length < n {
+		if length >= 0 {
 			b = a + length
+		}
+		a = max(0, min(a, n))
+		b = max(0, min(b, n))
+		if b <= a {
+			return ""
 		}
 		return string(runes[a:b])
 	}, opts)
