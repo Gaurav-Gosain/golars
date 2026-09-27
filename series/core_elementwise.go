@@ -9,6 +9,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	"github.com/Gaurav-Gosain/golars/dtype"
 )
 
 // pairCmp returns a comparator between row i of a and row j of b for
@@ -278,6 +280,10 @@ func intOutType(a, b arrow.DataType) arrow.DataType {
 	if arrow.TypeEqual(a, b) && a.ID() != arrow.BOOL {
 		return a
 	}
+	// Mixed widths take the polars supertype (i8 % i16 is i16).
+	if st, ok := dtype.NumericSupertype(dtype.FromArrow(a), dtype.FromArrow(b)); ok && st.IsInteger() {
+		return st.Arrow()
+	}
 	return arrow.PrimitiveTypes.Int64
 }
 
@@ -397,13 +403,22 @@ func (s *Series) Mod(other *Series, opts ...Option) (*Series, error) {
 			r += y
 		}
 		return r, true
-	}, func(x, y float64) float64 {
-		r := math.Mod(x, y)
-		if r != 0 && (r < 0) != (y < 0) {
-			r += y
+	}, floatMod(s.DType(), other.DType()), false, opts)
+}
+
+// floatMod is polars' float modulo, l - r*floor(l/r), evaluated in f32
+// when the result is f32 so the rounding matches.
+func floatMod(a, b dtype.DType) func(x, y float64) float64 {
+	if st, ok := dtype.NumericSupertype(a, b); ok && st.ID() == arrow.FLOAT32 {
+		return func(x, y float64) float64 {
+			l, r := float32(x), float32(y)
+			q := float32(math.Floor(float64(l / r)))
+			return float64(l - float32(r*q))
 		}
-		return r
-	}, false, opts)
+	}
+	return func(x, y float64) float64 {
+		return x - float64(y*math.Floor(x/y))
+	}
 }
 
 // TrueDiv divides as floating point.

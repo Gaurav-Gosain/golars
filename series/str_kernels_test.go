@@ -183,14 +183,14 @@ func TestWholeBufferStringKernels(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkStrings(t, label+"/upper", up, mapWant(c.vals, strings.ToUpper), c.valid)
+			checkStrings(t, label+"/upper", up, mapWant(c.vals, fullToUpper), c.valid)
 			up.Release()
 
 			lo, err := ops.ToLowercase(WithAllocator(mem))
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkStrings(t, label+"/lower", lo, mapWant(c.vals, strings.ToLower), c.valid)
+			checkStrings(t, label+"/lower", lo, mapWant(c.vals, fullToLower), c.valid)
 			lo.Release()
 
 			lb, err := ops.LenBytes(WithAllocator(mem))

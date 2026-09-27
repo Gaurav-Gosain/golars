@@ -58,6 +58,27 @@ func binaryCore(fn func(a, b *series.Series, n expr.FunctionNode, ec EvalContext
 	}
 }
 
+// binaryCoreAdopt is binaryCore for arithmetic functions (mod,
+// floordiv): an untyped literal operand first takes the other
+// operand's dtype, as for the binary operators.
+func binaryCoreAdopt(fn func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error)) coreFn {
+	return func(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *dataframe.DataFrame) (*series.Series, error) {
+		if len(n.Args) < 2 {
+			return nil, fmt.Errorf("eval: %s requires two input expressions", n.Name)
+		}
+		a, b, err := evalPair(ctx, ec, n.Args[0], n.Args[1], df)
+		if err != nil {
+			return nil, err
+		}
+		ss := []*series.Series{a, b}
+		defer releaseAll(ss)
+		if err := adoptDynLiterals(ctx, ec, n.Args[:2], ss); err != nil {
+			return nil, err
+		}
+		return fn(ss[0], ss[1], n, ec)
+	}
+}
+
 // evalPair evaluates two expressions and broadcasts a length-1 result
 // to the other's length.
 func evalPair(ctx context.Context, ec EvalContext, x, y expr.Expr, df *dataframe.DataFrame) (*series.Series, *series.Series, error) {

@@ -85,12 +85,12 @@ func (o StrOps) mapBool(op string, fn func(string) bool, opts []Option) (*Series
 // copies the offsets unchanged. Other columns fall back to
 // strings.ToUpper per row.
 func (o StrOps) ToUppercase(opts ...Option) (*Series, error) {
-	return o.caseFold("ToUppercase", true, strings.ToUpper, opts)
+	return o.caseFold("ToUppercase", true, fullToUpper, opts)
 }
 
 // ToLowercase is the symmetric counterpart of ToUppercase.
 func (o StrOps) ToLowercase(opts ...Option) (*Series, error) {
-	return o.caseFold("ToLowercase", false, strings.ToLower, opts)
+	return o.caseFold("ToLowercase", false, fullToLower, opts)
 }
 
 func (o StrOps) caseFold(op string, upper bool, slow func(string) string, opts []Option) (*Series, error) {

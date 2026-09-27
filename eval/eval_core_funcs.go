@@ -183,10 +183,10 @@ func registerElementwise() {
 			return a.LogicOp(op, b, seriesAlloc(ec))
 		}))
 	}
-	registerCore("floordiv", binaryCore(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
+	registerCore("floordiv", binaryCoreAdopt(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
 		return a.FloorDiv(b, seriesAlloc(ec))
 	}))
-	registerCore("mod", binaryCore(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
+	registerCore("mod", binaryCoreAdopt(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
 		return a.Mod(b, seriesAlloc(ec))
 	}))
 	registerCore("truediv", binaryCore(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {

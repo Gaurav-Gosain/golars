@@ -226,9 +226,9 @@ func castGenericString(arr arrow.Array, name string, cfg config) (*series.Series
 			b.Append(strconv.FormatBool(v.i != 0))
 		case 'f':
 			if f32 {
-				b.Append(strconv.FormatFloat(v.f, 'g', -1, 32))
+				b.Append(FormatFloatPolars(v.f, 32))
 			} else {
-				b.Append(strconv.FormatFloat(v.f, 'g', -1, 64))
+				b.Append(FormatFloatPolars(v.f, 64))
 			}
 		}
 	}

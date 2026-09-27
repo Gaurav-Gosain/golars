@@ -149,24 +149,24 @@ func explodeValues(la arrayList, nullMask []bool, totalLen int) arrow.Array {
 	if child.Len() == 0 {
 		return makeAllNull(mem, child.DataType(), totalLen)
 	}
+	// -1 marks the null slot of a null or empty source list.
 	idxs := make([]int, 0, totalLen)
+	hasNull := false
 	n := la.Len()
 	for i := 0; i < n; i++ {
-		if la.IsNull(i) {
-			idxs = append(idxs, 0)
-			continue
+		start, end := 0, 0
+		if !la.IsNull(i) {
+			start, end = la.Range(i)
 		}
-		start, end := la.Range(i)
 		if end == start {
-			idxs = append(idxs, 0)
+			idxs = append(idxs, -1)
+			hasNull = true
 			continue
 		}
 		for j := start; j < end; j++ {
 			idxs = append(idxs, j)
 		}
 	}
-	// Wrap the child as a Series, Take via compute, then null-fill
-	// the positions in nullMask.
 	// child is borrowed from la; FromArrowArray consumes a reference.
 	child.Retain()
 	childSer, err := series.FromArrowArray("", child)
@@ -175,15 +175,20 @@ func explodeValues(la arrayList, nullMask []bool, totalLen int) arrow.Array {
 		return makeAllNull(mem, child.DataType(), totalLen)
 	}
 	defer childSer.Release()
-	taken, err := compute.Take(context.Background(), childSer, idxs)
+	var taken *series.Series
+	if !hasNull {
+		taken, err = compute.Take(context.Background(), childSer, idxs)
+	}
+	if hasNull || err != nil {
+		// Gather takes -1 as null and covers every dtype, including a
+		// nested child (a list of lists).
+		taken, err = childSer.Gather(idxs)
+	}
 	if err != nil {
 		return makeAllNull(mem, child.DataType(), totalLen)
 	}
 	defer taken.Release()
-
-	// Produce an arrow.Array from the taken series, overlaying the
-	// null-mask positions.
-	return applyNullMask(mem, taken.ToArrow(), nullMask)
+	return taken.ToArrow()
 }
 
 // arrayList is the slice of the arrow.ListLike surface we need
@@ -321,18 +326,3 @@ func makeAllNull(mem memory.Allocator, dt arrow.DataType, n int) arrow.Array {
 	return b.NewArray()
 }
 
-// applyNullMask returns a copy of src with rows where mask[i]==true
-// rewritten as nulls. The input array is released by the caller.
-func applyNullMask(mem memory.Allocator, src arrow.Array, mask []bool) arrow.Array {
-	b := array.NewBuilder(mem, src.DataType())
-	defer b.Release()
-	for i := 0; i < src.Len(); i++ {
-		if mask[i] {
-			b.AppendNull()
-			continue
-		}
-		appendScalar(b, src, i)
-	}
-	src.Release()
-	return b.NewArray()
-}

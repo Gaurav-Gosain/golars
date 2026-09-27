@@ -57,6 +57,7 @@ func temporalAgg(n expr.AggNode, inner *series.Series, ec EvalContext) (*series.
 		return nil, true, fmt.Errorf("eval: aggregation on %s not supported", dt)
 	}
 	var sum big.Int
+	var sumF float64
 	var best int64
 	count := 0
 	for i, v := range vals {
@@ -67,6 +68,7 @@ func temporalAgg(n expr.AggNode, inner *series.Series, ec EvalContext) (*series.
 			best = v
 		}
 		sum.Add(&sum, big.NewInt(v))
+		sumF += float64(v)
 		count++
 	}
 	out := series.TemporalScalar{DType: dt, Null: count == 0}
@@ -83,8 +85,8 @@ func temporalAgg(n expr.AggNode, inner *series.Series, ec EvalContext) (*series.
 			return nil, true, fmt.Errorf("`mean` operation not supported for dtype `%s`", dt)
 		}
 		if count > 0 {
-			q := new(big.Int).Quo(&sum, big.NewInt(int64(count)))
-			out.Value = q.Int64()
+			// polars averages in f64 and truncates back to ticks.
+			out.Value = int64(sumF / float64(count))
 		}
 		if dt.IsDate() {
 			out.DType = dtype.Datetime(dtype.Microsecond, "")

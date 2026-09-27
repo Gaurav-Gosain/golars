@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 
 	"github.com/Gaurav-Gosain/golars/internal/pool"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -333,11 +334,69 @@ func MeanFloat64(ctx context.Context, s *series.Series, opts ...Option) (float64
 	if c == 0 {
 		return math.NaN(), false, nil
 	}
+	if dt := s.DType(); dt.IsInteger() || dt.IsBool() {
+		// polars averages integers in f64: summing in i64 first would
+		// wrap for large values.
+		sum, err := sumIntsAsFloat(s)
+		if err != nil {
+			return 0, false, err
+		}
+		return sum / float64(c), true, nil
+	}
 	sum, err := SumFloat64(ctx, s, opts...)
 	if err != nil {
 		return 0, false, err
 	}
 	return sum / float64(c), true, nil
+}
+
+func sumIntsAsFloat(s *series.Series) (float64, error) {
+	var total float64
+	for _, c := range s.Chunks() {
+		switch a := c.(type) {
+		case *array.Int8:
+			total += sumValsFloat(a, a.Int8Values())
+		case *array.Int16:
+			total += sumValsFloat(a, a.Int16Values())
+		case *array.Int32:
+			total += sumValsFloat(a, a.Int32Values())
+		case *array.Int64:
+			total += sumValsFloat(a, a.Int64Values())
+		case *array.Uint8:
+			total += sumValsFloat(a, a.Uint8Values())
+		case *array.Uint16:
+			total += sumValsFloat(a, a.Uint16Values())
+		case *array.Uint32:
+			total += sumValsFloat(a, a.Uint32Values())
+		case *array.Uint64:
+			total += sumValsFloat(a, a.Uint64Values())
+		case *array.Boolean:
+			for i := range a.Len() {
+				if a.IsValid(i) && a.Value(i) {
+					total++
+				}
+			}
+		default:
+			return 0, isUnsupported("MeanFloat64", s.DType())
+		}
+	}
+	return total, nil
+}
+
+func sumValsFloat[T int8 | int16 | int32 | int64 | uint8 | uint16 | uint32 | uint64](a arrow.Array, vals []T) float64 {
+	var total float64
+	if a.NullN() == 0 {
+		for _, v := range vals {
+			total += float64(v)
+		}
+		return total
+	}
+	for i, v := range vals {
+		if a.IsValid(i) {
+			total += float64(v)
+		}
+	}
+	return total
 }
 
 // MinInt64 returns the minimum non-null integer value as int64. The bool

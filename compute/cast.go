@@ -577,7 +577,7 @@ func castToString(name string, arr arrow.Array, cfg config) (*series.Series, err
 			if arr.IsNull(i) {
 				continue
 			}
-			out[i] = strconv.FormatFloat(raw[i], 'g', -1, 64)
+			out[i] = FormatFloatPolars(raw[i], 64)
 			valid[i] = true
 		}
 	case *array.Boolean:
