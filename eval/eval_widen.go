@@ -33,10 +33,15 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 	return nil, err
 }
 
+// isUnsupportedDTypeErr reports a golars kernel gap ("unsupported for
+// dtype", "does not accept"), not an error polars raises too (those
+// read "`op` operation not supported for dtype").
 func isUnsupportedDTypeErr(err error) bool {
 	msg := err.Error()
-	return strings.Contains(msg, "unsupported") || strings.Contains(msg, "not supported") ||
-		strings.Contains(msg, "does not accept")
+	if strings.Contains(msg, "operation not supported") {
+		return false
+	}
+	return strings.Contains(msg, "unsupported") || strings.Contains(msg, "does not accept")
 }
 
 func retryWidened(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *dataframe.DataFrame) (*series.Series, bool) {
@@ -48,12 +53,16 @@ func retryWidened(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 	orig := arg0.DType()
 	var wide dtype.DType
 	switch orig.ID() {
-	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16, arrow.UINT32:
+	case arrow.INT8, arrow.INT16, arrow.INT32, arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.BOOL:
 		wide = dtype.Int64()
 	case arrow.FLOAT32:
 		wide = dtype.Float64()
 	default:
-		return nil, false
+		if !orig.IsTemporal() || n.Name == "diff" {
+			return nil, false
+		}
+		// Temporal values work on their physical ticks.
+		wide = dtype.Int64()
 	}
 	w, err := compute.Cast(ctx, arg0, wide, kernelOpts(ec)...)
 	if err != nil {
@@ -101,6 +110,10 @@ func widenedResultDType(name string, orig, got dtype.DType) (dtype.DType, bool) 
 			return got, false
 		}
 		return orig, true
+	case orig.IsTemporal() && got.ID() == arrow.INT64:
+		return orig, true
+	case orig.IsBool() && got.ID() == arrow.INT64:
+		return got, false
 	case orig.IsInteger() && got.ID() == arrow.INT64:
 		if name == "diff" {
 			switch orig.ID() {

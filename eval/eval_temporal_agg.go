@@ -81,9 +81,6 @@ func temporalAgg(n expr.AggNode, inner *series.Series, ec EvalContext) (*series.
 		}
 		out.Value, out.Null = sum.Int64(), false
 	case expr.AggMean:
-		if dt.IsTime() {
-			return nil, true, fmt.Errorf("`mean` operation not supported for dtype `%s`", dt)
-		}
 		if count > 0 {
 			// polars averages in f64 and truncates back to ticks.
 			out.Value = int64(sumF / float64(count))

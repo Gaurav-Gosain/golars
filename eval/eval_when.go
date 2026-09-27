@@ -5,6 +5,7 @@ import (
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -20,6 +21,9 @@ func evalWhenThen(ctx context.Context, ec EvalContext, n expr.WhenThenNode, df *
 	}
 	defer releaseAll(ss)
 	if err := adoptDynLiterals(ctx, ec, []expr.Expr{n.Then, n.Otherwise}, ss[1:]); err != nil {
+		return nil, err
+	}
+	if err := stringSupertype(ctx, ec, ss[1:]); err != nil {
 		return nil, err
 	}
 	pred, ifTrue, ifFalse := ss[0], ss[1], ss[2]
@@ -80,4 +84,31 @@ func fillNullFrom(ctx context.Context, ec EvalContext, s, fill *series.Series) (
 	}
 	defer out.Release()
 	return out.Rename(s.Name()), nil
+}
+
+// stringSupertype casts numeric and bool branches to strings when any
+// branch is a string: polars' supertype of str and a number is str
+// (when(c).then("a").otherwise(1.5) gives "a" and "1.5"). It replaces
+// the entries of ss it casts.
+func stringSupertype(ctx context.Context, ec EvalContext, ss []*series.Series) error {
+	hasStr := false
+	for _, s := range ss {
+		if s.DType().IsString() {
+			hasStr = true
+		}
+	}
+	if !hasStr {
+		return nil
+	}
+	for i, s := range ss {
+		if d := s.DType(); d.IsNumeric() || d.IsBool() {
+			c, err := compute.Cast(ctx, s, dtype.String(), kernelOpts(ec)...)
+			if err != nil {
+				return err
+			}
+			s.Release()
+			ss[i] = c
+		}
+	}
+	return nil
 }

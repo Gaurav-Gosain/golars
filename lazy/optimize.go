@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 )
 
@@ -652,7 +653,11 @@ func simplifyNode(e expr.Expr) (expr.Expr, bool) {
 	switch n := e.Node().(type) {
 	case expr.FunctionNode:
 		if n.Name == "is_between" {
-			return rewriteIsBetween(n)
+			// A bound that is not a plain literal (-lit(2)) is not
+			// rewritten; e itself must come back then, not a nil Expr.
+			if out, ok := rewriteIsBetween(n); ok {
+				return out, true
+			}
 		}
 	case expr.BinaryNode:
 		// Constant folding on two literals.
@@ -726,7 +731,34 @@ func simplifyNode(e expr.Expr) (expr.Expr, bool) {
 // foldBinary folds a binary op over two literals into a single literal when
 // possible.
 func foldBinary(op expr.BinaryOp, l, r expr.LitNode) (expr.Expr, bool) {
-	// Only handle same-type numeric or same-type bool folding.
+	// Arithmetic folds only literals of one kind, and keeps that kind:
+	// two untyped literals give an untyped literal (lit(3) + lit(4) is
+	// still i32), two i64 or f64 literals give the same dtype. Anything
+	// else would change the result dtype, so it is left to the
+	// evaluator. Comparisons fold for any pair of numbers.
+	sameKind := l.Dyn == r.Dyn && l.DType.Equal(r.DType)
+	intLit := func(v int64) (expr.Expr, bool) {
+		switch {
+		case !sameKind:
+			return expr.Expr{}, false
+		case l.Dyn:
+			return expr.LitInt(v), true
+		case l.DType.Equal(dtype.Int64()):
+			return expr.LitInt64(v), true
+		}
+		return expr.Expr{}, false
+	}
+	floatLit := func(v float64) (expr.Expr, bool) {
+		switch {
+		case !sameKind:
+			return expr.Expr{}, false
+		case l.Dyn:
+			return expr.LitFloat(v), true
+		case l.DType.Equal(dtype.Float64()):
+			return expr.LitFloat64(v), true
+		}
+		return expr.Expr{}, false
+	}
 	switch la := l.Value.(type) {
 	case int64:
 		ra, ok := r.Value.(int64)
@@ -735,16 +767,11 @@ func foldBinary(op expr.BinaryOp, l, r expr.LitNode) (expr.Expr, bool) {
 		}
 		switch op {
 		case expr.OpAdd:
-			return expr.LitInt64(la + ra), true
+			return intLit(la + ra)
 		case expr.OpSub:
-			return expr.LitInt64(la - ra), true
+			return intLit(la - ra)
 		case expr.OpMul:
-			return expr.LitInt64(la * ra), true
-		case expr.OpDiv:
-			if ra == 0 {
-				return expr.Expr{}, false
-			}
-			return expr.LitInt64(la / ra), true
+			return intLit(la * ra)
 		case expr.OpEq:
 			return expr.LitBool(la == ra), true
 		case expr.OpNe:
@@ -765,13 +792,13 @@ func foldBinary(op expr.BinaryOp, l, r expr.LitNode) (expr.Expr, bool) {
 		}
 		switch op {
 		case expr.OpAdd:
-			return expr.LitFloat64(la + ra), true
+			return floatLit(la + ra)
 		case expr.OpSub:
-			return expr.LitFloat64(la - ra), true
+			return floatLit(la - ra)
 		case expr.OpMul:
-			return expr.LitFloat64(la * ra), true
+			return floatLit(la * ra)
 		case expr.OpDiv:
-			return expr.LitFloat64(la / ra), true
+			return floatLit(la / ra)
 		case expr.OpEq:
 			return expr.LitBool(la == ra), true
 		case expr.OpNe:

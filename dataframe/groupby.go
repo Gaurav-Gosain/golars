@@ -756,11 +756,11 @@ func kernelAggInputs(df *DataFrame, aggs []expr.Expr) bool {
 			arrow.FLOAT32, arrow.FLOAT64:
 		case arrow.STRING, arrow.BOOL:
 			// The kernels only count and pick rows for these.
-			if !positional && sp.op != expr.AggSum {
+			if !positional {
 				return false
 			}
 		default:
-			if !positional {
+			if sp.op != expr.AggCount && sp.op != expr.AggNullCount {
 				return false
 			}
 		}

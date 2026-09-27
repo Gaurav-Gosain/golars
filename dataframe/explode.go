@@ -230,7 +230,10 @@ func concatListChunks(ch *arrow.Chunked) (arrayList, error) {
 	chunks := ch.Chunks()
 	switch len(chunks) {
 	case 0:
-		return nil, errors.New("dataframe.Explode: empty chunked list")
+		// A zero-row column may carry no chunks at all.
+		empty := array.MakeArrayOfNull(memory.DefaultAllocator, ch.DataType(), 0)
+		defer empty.Release()
+		return wrapListArray(empty)
 	case 1:
 		return wrapListArray(chunks[0])
 	default:

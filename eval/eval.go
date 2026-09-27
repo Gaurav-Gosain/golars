@@ -278,8 +278,8 @@ func evalAggValues(ctx context.Context, ec EvalContext, n expr.AggNode, inner *s
 	name := expr.OutputName(n.Inner)
 	opts := kernelOpts(ec)
 	switch inner.DType().ID() {
-	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16, arrow.BOOL:
-		// The reduction kernels take 32 and 64 bit inputs.
+	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.BOOL:
+		// The reduction kernels take i32, i64 and floats.
 		if n.Op == expr.AggSum || n.Op == expr.AggMin || n.Op == expr.AggMax {
 			wide, err := compute.Cast(ctx, inner, dtype.Int64(), opts...)
 			if err != nil {

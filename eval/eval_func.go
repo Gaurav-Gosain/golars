@@ -244,6 +244,16 @@ func evalFunctionRaw(ctx context.Context, ec EvalContext, n expr.FunctionNode, d
 		pair[0].Release()
 		fillArg = pair[1]
 		defer fillArg.Release()
+		if arg0.Len() == 1 && fillArg.Len() > 1 {
+			// A unit input (a literal) broadcasts to the fill column.
+			b, err := arg0.Broadcast(fillArg.Len(), opt)
+			if err != nil {
+				return nil, err
+			}
+			arg0.Release()
+			arg0 = b
+			releaseOnErr = arg0
+		}
 		// A column-valued fill (fill_null(col("b"))) fills row by row. On
 		// an empty or one-row frame the column has no usable first value
 		// (it is empty or null), so it also takes the row-wise path.
