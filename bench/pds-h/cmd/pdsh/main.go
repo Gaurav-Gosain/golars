@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Gaurav-Gosain/golars/bench/pds-h/queries"
+	"github.com/Gaurav-Gosain/golars/io/parquet"
 )
 
 func main() {
@@ -33,6 +34,7 @@ func main() {
 		outPath     = flag.String("out", "bench/pds-h/output/timings.csv", "csv path (appended)")
 		printOutput = flag.Bool("print", false, "print the result frame after each query (slow on large SFs)")
 		cpuProfile  = flag.String("cpuprofile", "", "write a CPU profile covering all runs to this file")
+		dumpDir     = flag.String("dump", "", "write each query result to DIR/q<N>.parquet (for answer checks)")
 	)
 	flag.Parse()
 	if *cpuProfile != "" {
@@ -75,7 +77,7 @@ func main() {
 			continue
 		}
 		for rep := 0; rep < *repeats; rep++ {
-			if err := runOne(ctx, id, rep, fn, *dataDir, *sfFlag, *printOutput, csv); err != nil {
+			if err := runOne(ctx, id, rep, fn, *dataDir, *sfFlag, *printOutput, *dumpDir, csv); err != nil {
 				fmt.Fprintf(os.Stderr, "q%d rep %d: %v\n", id, rep, err)
 			}
 		}
@@ -84,7 +86,7 @@ func main() {
 
 // runOne executes one query+repetition, prints its timing, and
 // appends one row to the timings csv.
-func runOne(ctx context.Context, id, rep int, fn queries.QueryFn, dataDir, sf string, printOut bool, csv *csvAppender) error {
+func runOne(ctx context.Context, id, rep int, fn queries.QueryFn, dataDir, sf string, printOut bool, dumpDir string, csv *csvAppender) error {
 	lf, err := fn(dataDir)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
@@ -101,6 +103,11 @@ func runOne(ctx context.Context, id, rep int, fn queries.QueryFn, dataDir, sf st
 		elapsed.Truncate(time.Microsecond), df.Height(), df.Width())
 	if printOut {
 		fmt.Println(df.Summary())
+	}
+	if dumpDir != "" && rep == 0 {
+		if err := parquet.WriteFile(ctx, filepath.Join(dumpDir, fmt.Sprintf("q%d.parquet", id)), df); err != nil {
+			return fmt.Errorf("dump: %w", err)
+		}
 	}
 	return csv.Append(id, elapsed.Seconds(), sf)
 }

@@ -343,6 +343,17 @@ func (lf LazyFrame) Join(other LazyFrame, on []string, how dataframe.JoinType) L
 	return LazyFrame{plan: Join{Left: lf.plan, Right: other.plan, On: on, How: how}}
 }
 
+// JoinOn joins on one key column that has a different name on each
+// side, like polars join(left_on=..., right_on=...). The output keeps
+// the left key and drops the right one, which is what polars does for
+// inner and left joins.
+func (lf LazyFrame) JoinOn(other LazyFrame, leftOn, rightOn string, how dataframe.JoinType) LazyFrame {
+	if leftOn != rightOn {
+		other = other.Rename(rightOn, leftOn)
+	}
+	return lf.Join(other, []string{leftOn}, how)
+}
+
 // keep dataframe import referenced via JoinType.
 var _ dataframe.JoinType
 
