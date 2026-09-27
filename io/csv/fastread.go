@@ -514,6 +514,7 @@ func (r *fastReader) parseChunk(c *chunkState, fb *fixedBuffers) {
 	tok := tokenizer{data: r.data[:c.hi], delim: r.delim, quotes: r.quotes}
 	colMap := r.colMap
 	ncols := r.ncols
+	fastNum := !numericNull(r.nulls)
 	pos := c.lo
 	row := 0
 	for {
@@ -524,6 +525,38 @@ func (r *fastReader) parseChunk(c *chunkState, fb *fixedBuffers) {
 		start := pos
 		f := 0
 		for {
+			// Numbers parse in the same pass that finds the end of the
+			// field; anything unusual goes through the tokenizer.
+			if fastNum && f < ncols {
+				if t := colMap[f]; t >= 0 {
+					col := &c.cols[t]
+					var next int
+					var eor, ok bool
+					switch col.kind {
+					case kInt64:
+						var v int64
+						if v, next, eor, ok = intPrefix(tok.data, pos, r.delim); ok {
+							col.i64[row] = v
+						}
+					case kFloat64:
+						var v float64
+						if v, next, eor, ok = floatPrefix(tok.data, pos, r.delim); ok {
+							col.f64[row] = v
+						}
+					}
+					if ok {
+						if col.valid != nil {
+							bitutil.SetBit(col.valid, row)
+						}
+						pos = next
+						f++
+						if eor {
+							break
+						}
+						continue
+					}
+				}
+			}
 			field, next, eor, err := tok.field(pos)
 			if err != nil {
 				c.err, c.errPos = err, start

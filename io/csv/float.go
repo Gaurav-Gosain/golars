@@ -276,3 +276,94 @@ func eiselLemire64(man uint64, exp10 int, neg bool) (float64, bool) {
 	}
 	return math.Float64frombits(retBits), true
 }
+
+// fieldEnd reports whether a field ends at i: the delimiter, a newline,
+// CRLF or the end of d. It returns the position after the terminator
+// and whether it ended the record.
+func fieldEnd(d []byte, i int, delim byte) (int, bool, bool) {
+	if i >= len(d) {
+		return len(d), true, true
+	}
+	switch d[i] {
+	case delim:
+		return i + 1, false, true
+	case '\n':
+		return i + 1, true, true
+	case '\r':
+		if i+1 < len(d) && d[i+1] == '\n' {
+			return i + 2, true, true
+		}
+		if i+1 == len(d) {
+			return len(d), true, true
+		}
+	}
+	return 0, false, false
+}
+
+// intPrefix parses a plain integer field (optional sign, 1 to 18
+// digits) starting at pos and ending at a field terminator.
+func intPrefix(d []byte, pos int, delim byte) (int64, int, bool, bool) {
+	i := pos
+	neg := false
+	if i < len(d) && (d[i] == '-' || d[i] == '+') {
+		neg = d[i] == '-'
+		i++
+	}
+	mant, e := scanDigits(d, i, 0)
+	if nd := e - i; nd == 0 || nd > 18 {
+		return 0, 0, false, false
+	}
+	next, eor, ok := fieldEnd(d, e, delim)
+	if !ok {
+		return 0, 0, false, false
+	}
+	v := int64(mant)
+	if neg {
+		v = -v
+	}
+	return v, next, eor, true
+}
+
+// floatPrefix parses a plain decimal field (optional sign, digits, an
+// optional fraction, at most 19 significant digits, no exponent)
+// starting at pos and ending at a field terminator.
+func floatPrefix(d []byte, pos int, delim byte) (float64, int, bool, bool) {
+	i := pos
+	neg := false
+	if i < len(d) && (d[i] == '-' || d[i] == '+') {
+		neg = d[i] == '-'
+		i++
+	}
+	start := i
+	mant, i := scanDigits(d, i, 0)
+	nd := i - start
+	frac := 0
+	if i < len(d) && d[i] == '.' {
+		fs := i + 1
+		mant, i = scanDigits(d, fs, mant)
+		frac = i - fs
+	}
+	if nd+frac == 0 || nd+frac > 19 {
+		return 0, 0, false, false
+	}
+	next, eor, ok := fieldEnd(d, i, delim)
+	if !ok {
+		return 0, 0, false, false
+	}
+	v, ok := finishFloat(mant, -frac, neg, d[pos:i])
+	return v, next, eor, ok
+}
+
+// numericNull reports whether a null marker could parse as a number,
+// in which case numeric fields must go through the null check.
+func numericNull(nulls []string) bool {
+	for _, n := range nulls {
+		if n == "" {
+			continue
+		}
+		if _, ok := parseFloat64([]byte(n)); ok {
+			return true
+		}
+	}
+	return false
+}
