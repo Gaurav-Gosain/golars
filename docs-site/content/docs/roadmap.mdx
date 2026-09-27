@@ -1,10 +1,14 @@
-# Roadmap
+---
+title: Roadmap
+description: "Phased delivery plan: what has shipped, what is pending, and the open design threads."
+icon: FileText
+---
 
 Phased delivery plan. Dates are deliberately absent: a phase ships
 when it is tested, benchmarked, and documented.
 
 Live throughput ratios vs polars 1.39 live in
-[`bench/polars-compare/`](../bench/polars-compare/). Numbers here
+[`bench/polars-compare/`](https://github.com/Gaurav-Gosain/golars/tree/main/bench/polars-compare). Numbers here
 would drift; the bench harness is authoritative.
 
 ## Status
@@ -78,7 +82,7 @@ has a read, a write and a lazy scan; CSV, Parquet, IPC and NDJSON also
 have lazy sinks.
 
 Parallelism: kernels split work across goroutines above per-kernel row
-cutoffs. See [parallelism.md](parallelism.md).
+cutoffs. See [parallelism.md](/docs/parallelism).
 
 ## Phase 2: Expression API and lazy execution
 
@@ -121,7 +125,7 @@ lives alongside the untyped API and produces identical plans.
 
 ## Phase 3: Streaming engine
 
-Morsel-driven parallel executor. See [parallelism.md](parallelism.md)
+Morsel-driven parallel executor. See [parallelism.md](/docs/parallelism)
 for the detailed design.
 
 Features:
@@ -161,8 +165,8 @@ business days) and backs:
 - CSV date and datetime inference (`WithTryParseDates`)
 
 Subset SQL shipped: SELECT (DISTINCT), FROM, WHERE, GROUP BY,
-ORDER BY, LIMIT. See [scripting.md](scripting.md) for the CLI and
-[mcp.md](mcp.md) for the MCP `sql` tool.
+ORDER BY, LIMIT. See [scripting.md](/docs/scripting) for the CLI and
+[mcp.md](/docs/mcp) for the MCP `sql` tool.
 
 Pending:
 
@@ -185,7 +189,7 @@ Shipped:
   of gopyter at
   [github.com/Gaurav-Gosain/gopyter](https://github.com/Gaurav-Gosain/gopyter),
   is the planned home for Go notebooks; it is not published yet. See
-  [jupyter.md](jupyter.md).
+  [jupyter.md](/docs/jupyter).
 
 Pending:
 
@@ -286,4 +290,4 @@ methods, the temporal kernels, and the list and array namespaces. The generated 
 `bench/polars-compare/temporal_parity.py`.
 
 Remaining gaps are tracked per method in
-[api-surface.md](api-surface.md).
+[api-surface.md](/docs/api-surface).

@@ -22,6 +22,7 @@ There is no process-wide worker pool: goroutines are spawned per call. Spawning 
 - Arithmetic, filter, take, sort: serial below a per-kernel row cutoff, parallel above. Representative values: filter parallelises above 256K rows (`compute/filter_parallel_cutoff_*.go`), take above 64K, horizontal reductions above 128K rows with 4 workers up to 256K rows and 8 above.
 - Group-by hash paths (single and multi-key) fan out at 128K rows (`hashAggParThreshold`); the multi-key path additionally samples the first partition and stays serial for high-cardinality inputs where every worker would rediscover every group.
 - Cast to float64 uses SIMD kernels below 128K rows, parallel workers up to 1M rows, streaming stores above.
+- Readers: the CSV reader splits its input into record-aligned chunks of about 512 KB and parses them concurrently straight into arrow buffers; the Parquet reader decodes row groups concurrently, and each row group fans out over its columns. Both size their worker count from `GOMAXPROCS` rather than the cap of 8, since decoding is the whole cost of a read.
 - Rolling, top-k heaps and small sorts stay serial; lazily evaluated wide projections (`Select` with 8+ expressions) and wide filters (8+ columns) fan out across columns instead.
 
 ## Morsel-driven streaming
@@ -36,7 +37,7 @@ Primitives currently available:
 - `ParallelMapStage` is the combinator that turns a per-morsel function into an order-preserving fan-out. It tags morsels on ingress with a sequence number, dispatches to a small worker pool, and uses a reorder buffer on egress so downstream stages see input order regardless of worker count. `ParallelFilterStage`, `ParallelProjectStage`, `ParallelWithColumnsStage` are thin wrappers. Parallel stages are the default (`min(GOMAXPROCS, 8)` workers, `WithStreamingWorkers(1)` forces serial).
 - `CollectSink` concatenates morsel chunks column-wise into a single DataFrame. A single morsel skips the pipeline entirely and evaluates eagerly.
 
-Hybrid execution: `lazy.Collect(ctx, lazy.WithStreaming())` runs the longest streaming-friendly prefix through the pipeline executor. When a blocker node (Sort, Aggregate, Join) appears above that prefix, the upstream DataFrame is materialized first and the blocker runs eagerly. This keeps the surface simple (one `Collect` call) while letting streaming pay off for scan + filter + project chains and not regress for blockers.
+Hybrid execution: `lf.Collect(ctx, lazy.WithStreaming())` runs the longest streaming-friendly prefix through the pipeline executor. When a blocker node (Sort, Aggregate, Join) appears above that prefix, the upstream DataFrame is materialized first and the blocker runs eagerly. This keeps the surface simple (one `Collect` call) while letting streaming pay off for scan + filter + project chains and not regress for blockers.
 
 ```mermaid
 flowchart LR
@@ -49,7 +50,7 @@ flowchart LR
 
 **Channel back-pressure.** Every inter-stage channel has a small buffer (default 4). When a downstream stage is slow, its input channel fills, blocking the producer. This is the back-pressure mechanism, and it costs no allocation.
 
-**Pipeline breakers.** Sort and groupby-agg with no suitable partition key are pipeline breakers. They buffer, compute, and then emit. The streaming executor tracks breakers explicitly so planners can decide when spilling is necessary.
+**Pipeline breakers.** Sort, Aggregate (group-by) and Join are pipeline breakers. They need their whole input, so the streaming prefix below them is materialized and the breaker runs eagerly. There is no spill to disk today, so a breaker's input must fit in memory.
 
 **Cancellation.** Every stage takes a `context.Context`. When the context cancels (user abort, downstream error, sink closed), stages drain their input channels, release references to any morsels they hold, and return.
 

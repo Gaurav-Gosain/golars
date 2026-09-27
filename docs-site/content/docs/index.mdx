@@ -31,10 +31,11 @@ fmt.Println(adults)
 
 ## Highlights
 
-- **Eager + lazy execution.** Build pipelines as logical plans, let the optimizer fuse projections/filters, then `Collect(ctx)`.
-- **Streaming engine.** Morsel-driven execution for datasets that don't fit in memory.
+- **Eager + lazy execution.** Build pipelines as logical plans, let the optimizer push filters, projections and slices down to the scan, then `Collect(ctx)`.
+- **Polars-style expressions.** The `str`, `dt`, `list`, `arr`, `struct`, `name`, `bin` and `cat` namespaces, time zones, `group_by_dynamic` and rolling windows, asof and inequality joins, Categorical and Enum dtypes.
+- **Streaming engine.** Morsel-driven, order-preserving pipeline execution for scan, filter and project chains.
 - **Polars-grade performance.** Matches or beats polars 1.39 on most polars-compare workloads.
-- **I/O included.** CSV, Parquet, IPC, JSON, NDJSON readers/writers; `io/sql` bridge for any `database/sql` driver.
+- **I/O included.** CSV (native parallel reader), Parquet (parallel row groups), IPC, JSON, NDJSON readers and writers; `io/sql` bridge for any `database/sql` driver.
 - **Scripting + REPL.** `.glr` scripts run via `golars run my.glr` or inside the interactive REPL with inline ghost-text completions.
 - **LLM-native.** MCP server exposes golars tools to Claude Desktop, Cursor, Windsurf, and other MCP hosts.
 
@@ -58,5 +59,6 @@ go install github.com/Gaurav-Gosain/golars/cmd/golars@latest
   <Card href="/docs/scripting" title=".glr scripting" description="The one-command-per-line pipeline language." />
   <Card href="/docs/sql" title="SQL frontend" description="SELECT / FROM / WHERE / GROUP BY / ORDER BY / LIMIT." />
   <Card href="/docs/mcp" title="MCP integration" description="Plug golars into Claude Desktop and co." />
+  <Card href="/docs/jupyter" title="Jupyter" description="The .glr kernel and notebook rendering for Go." />
   <Card href="/docs/api-surface" title="API reference" description="polars to golars method-level status table." />
 </Cards>

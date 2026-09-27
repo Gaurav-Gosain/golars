@@ -4,7 +4,6 @@ description: "End-to-end recipes for common tasks. Every snippet compiles."
 icon: FileText
 ---
 
-
 End-to-end recipes for common tasks. Every snippet compiles and
 assumes `import "github.com/Gaurav-Gosain/golars"` plus whatever
 sub-package a particular line needs.
@@ -31,29 +30,242 @@ out, _ := lazy.FromDataFrame(df).
     Collect(ctx)
 ```
 
-The runtime plan is identical to the untyped `expr.Col("qty").
-GtLit(int64(2))` form. Passing a string literal to an int-typed
+The runtime plan is identical to the untyped
+`expr.Col("qty").GtLit(int64(2))` form. Passing a string literal to an int-typed
 column fails at build time rather than panicking at evaluation.
-See `examples/*/generic/` in the repository for side-by-side
-comparisons.
+See `examples/*/generic/` for side-by-side comparisons.
 
-## List and struct namespaces
+## List, struct and name namespaces
 
-Expression-level helpers mirror polars' `.list.*` and `.struct.*`:
+Expression namespaces mirror polars' `.list.*`, `.struct.*` and
+`.name.*`. `Str().Split` produces a `List<str>` column to work on, and
+`List().Eval` runs any expression over the elements of each list, with
+`golars.Element()` standing in for the element:
 
 ```go
-import "github.com/Gaurav-Gosain/golars/expr"
+tagList := golars.Col("tags").Str().Split(",")
+nums := golars.Col("scores").Str().Split(" ").
+    List().Eval(golars.Element().Cast(dtype.Int64()))
 
-lazy.FromDataFrame(df).Select(
-    expr.Col("tags").List().Len().Alias("tag_count"),
-    expr.Col("payload").Struct().Field("x").Alias("x"),
-    expr.Col("csv").Str().SplitExact(",").List().Get(0).Alias("first"),
-).Collect(ctx)
+out, _ := golars.Lazy(df).
+    Select(
+        golars.Col("user"),
+        tagList.List().Len().Alias("n_tags"),
+        tagList.List().Contains("go").Alias("has_go"),
+        tagList.List().Unique(true).List().JoinWith("|", true).Alias("unique_tags"),
+        nums.List().Sum().Alias("total"),
+        nums.List().Sort(true, false).List().Head(2).Alias("top2"),
+        nums.List().Eval(golars.Element().Mul(golars.Lit(int64(10)))).Alias("x10"),
+    ).
+    Collect(ctx)
+// "go,db,go" / "3 9 4" gives n_tags=3, has_go=true, unique_tags="go|db",
+// total=16, top2=[9, 4], x10=[30, 90, 40].
 ```
 
-Supported list reducers: `Len`, `Sum`, `Mean`, `Min`, `Max`, `First`,
-`Last`, `Get(idx)`, `Contains(needle)`, `Join(sep)` (string lists).
-Supported struct ops: `Field(name)`.
+The list namespace also covers the reducers (`Mean`, `Min`, `Max`,
+`Median`, `Std`, `Var`, `NUnique`, `ArgMin`, `ArgMax`, `Any`, `All`),
+positional access (`Get`, `First`, `Last`, `Gather`, `Slice`, `Tail`),
+set operations (`SetUnion`, `SetIntersection`, `SetDifference`),
+`Filter`, `Explode`, `ToStruct` and `ToArray`. Fixed-width arrays have
+the same shape of API under `Arr()`.
+
+Build a struct with `golars.Struct`, then read, rename or unnest its
+fields:
+
+```go
+packed, _ := golars.Lazy(df).
+    Select(golars.Col("user"), golars.Struct(golars.Col("x"), golars.Col("y")).Alias("point")).
+    Collect(ctx)
+
+flat, _ := golars.Lazy(packed).
+    Select(
+        golars.Col("point").Struct().Field("y").Alias("point_y"),
+        // Unnest expands into one output column per field.
+        golars.Col("point").Struct().RenameFields("px", "py").Struct().Unnest(),
+    ).
+    Collect(ctx)
+// columns: point_y, px, py
+```
+
+`Name()` renames an expression's output without touching its values:
+
+```go
+named, _ := golars.Lazy(df).
+    Select(
+        golars.Col("x").Name().Prefix("raw_"),                       // raw_x
+        golars.Col("y").Mul(golars.Lit(2.0)).Name().Suffix("_x2"),   // y_x2
+        golars.Col("user").Name().Map(strings.ToUpper),              // USER
+    ).
+    Collect(ctx)
+```
+
+See [`examples/namespaces`](https://github.com/Gaurav-Gosain/golars/blob/main/examples/namespaces/main.go) for a
+runnable version that also covers the `str` and `cat` namespaces.
+
+## Parse dates and work with time
+
+`Str().ToDate`, `ToDatetime` and `ToTime` parse strings with
+strftime-style formats (`Str().Strptime` takes an explicit dtype).
+The `Dt()` namespace then reads calendar fields, truncates, formats,
+and converts time zones:
+
+```go
+df, _ := golars.Lazy(raw).
+    WithColumns(golars.Col("ts").Str().ToDatetime("%Y-%m-%d %H:%M")).
+    WithColumns(
+        golars.Col("ts").Dt().Weekday().Alias("weekday"),     // 1 = Monday
+        golars.Col("ts").Dt().Truncate("1h").Alias("hour"),
+        golars.Col("ts").Dt().Strftime("%a %H:%M").Alias("label"),
+        // Mean over the trailing 2 hours of each row's timestamp.
+        golars.Col("temp").RollingMeanBy(golars.Col("ts"), "2h").Alias("temp_2h"),
+    ).
+    Collect(ctx)
+
+// Attach a zone to naive timestamps, then convert for display.
+tokyo, _ := golars.Lazy(df).
+    Select(golars.Col("ts").Dt().ReplaceTimeZone("UTC").
+        Dt().ConvertTimeZone("Asia/Tokyo").Alias("tokyo")).
+    Collect(ctx)
+```
+
+Durations use polars' string form (`"90s"`, `"1h30m"`, `"1mo"`,
+`"2w"`), and calendar units such as `mo` and `y` respect month lengths.
+`golars.DateRange`, `DatetimeRange` and `TimeRange` build ranges as
+expressions; `golars.DateRangeSeries` builds one directly.
+
+The CSV reader infers ISO dates and timestamps by default.
+`golars.WithTryParseDates(true)` also accepts layouts such as
+`31/12/2021` and UTC offsets, and `WithTryParseDates(false)` keeps
+those columns as strings, like polars' default.
+
+## Time windows with group_by_dynamic
+
+`GroupByDynamic` buckets a sorted temporal (or integer) index column
+into fixed windows, the equivalent of polars' `group_by_dynamic`:
+
+```go
+buckets, _ := golars.Lazy(df).
+    GroupByDynamic("ts", golars.DynamicGroupOptions{
+        Every:             "3h",
+        IncludeBoundaries: true,
+    }).
+    Agg(
+        golars.Col("temp").Mean().Alias("avg_temp"),
+        golars.Col("temp").Count().Alias("n"),
+    ).
+    Collect(ctx)
+// _lower_boundary      _upper_boundary      ts                   avg_temp  n
+// 2024-03-01T06:00:00  2024-03-01T09:00:00  2024-03-01T06:00:00  18.75     2
+// ...
+```
+
+`DynamicGroupOptions` also takes `Period` (window length, default
+`Every`), `Offset`, `Closed`, `Label`, `StartBy` and `GroupBy` for
+per-key windows. The one-window-per-row variant is
+`lf.Rolling(index, golars.RollingGroupOptions{Period: "2h"})`. Both
+exist on the eager `DataFrame` too.
+
+## Asof joins
+
+`JoinAsof` matches every left row with the nearest right row by a
+sorted key, optionally inside exact-match `By` groups. The classic use
+is attaching the latest quote to each trade:
+
+```go
+at := func(hms string) time.Time {
+    t, _ := time.Parse(time.DateTime, "2024-05-01 "+hms)
+    return t
+}
+tt, _ := golars.FromTimes("time", []time.Time{at("09:30:05"), at("09:31:00"), at("09:36:00")}, nil, golars.Milliseconds, "")
+tsym, _ := golars.FromString("symbol", []string{"AAPL", "MSFT", "AAPL"}, nil)
+qty, _ := golars.FromInt64("qty", []int64{100, 50, 75}, nil)
+trades, _ := golars.NewDataFrame(tt, tsym, qty)
+defer trades.Release()
+
+qt, _ := golars.FromTimes("time", []time.Time{at("09:30:00"), at("09:30:00"), at("09:33:00")}, nil, golars.Milliseconds, "")
+qsym, _ := golars.FromString("symbol", []string{"AAPL", "MSFT", "AAPL"}, nil)
+bid, _ := golars.FromFloat64("bid", []float64{189.1, 410.0, 189.4}, nil)
+quotes, _ := golars.NewDataFrame(qt, qsym, bid)
+defer quotes.Release()
+
+// Latest quote for the same symbol, at most two minutes old.
+out, _ := trades.JoinAsof(ctx, quotes, golars.AsofOptions{
+    On:        "time",
+    By:        []string{"symbol"},
+    Strategy:  dataframe.AsofBackward,
+    Tolerance: "2m",
+})
+// bid: 189.1, 410, null (the 09:33 AAPL quote is 3 minutes old)
+
+// The lazy form takes the same options.
+near, _ := golars.Lazy(trades).
+    JoinAsof(golars.Lazy(quotes), golars.AsofOptions{
+        On: "time", By: []string{"symbol"}, Strategy: dataframe.AsofNearest,
+    }).
+    Collect(ctx)
+```
+
+Strategies are `AsofBackward` (the default), `AsofForward` and
+`AsofNearest`. Without `By`, both key columns must be sorted ascending
+unless `SkipSortednessCheck` is set. For inequality joins on arbitrary
+predicates see `lf.JoinWhere`. A runnable version lives in
+[`examples/join_asof`](https://github.com/Gaurav-Gosain/golars/blob/main/examples/join_asof/main.go).
+
+## Bin values with cut and qcut
+
+```go
+bins, _ := golars.Lazy(df).
+    WithColumns(
+        golars.Col("v").Cut([]float64{5, 10}, expr.CutOptions{}).Alias("cut"),
+        golars.Col("v").Cut([]float64{5, 10},
+            expr.CutOptions{Labels: []string{"low", "mid", "high"}}).Alias("label"),
+        golars.Col("v").QCutN(2, expr.CutOptions{}).Alias("half"),
+        golars.Col("v").QCut([]float64{0.25, 0.75},
+            expr.CutOptions{Labels: []string{"q1", "iqr", "q4"}}).Alias("quartile"),
+    ).
+    Collect(ctx)
+// v=[1, 5, 9, 12, 20]
+// cut:      (-inf, 5]  (-inf, 5]  (5, 10]  (10, inf]  (10, inf]
+// quartile: q1         q1         iqr      iqr        q4
+```
+
+`CutOptions.LeftClosed` switches to `[a, b)` intervals and
+`IncludeBreaks` returns a `{breakpoint, category}` struct. The category
+column is a string column; polars returns Categorical with the same
+labels.
+
+## Custom Go functions with map_batches
+
+`MapBatches` hands the whole evaluated column to a Go function and
+uses the returned Series. Inside `GroupBy().Agg` and `Over` the
+function sees one group at a time.
+
+```go
+zscore := func(s *series.Series) (*series.Series, error) {
+    mean, err := s.Mean()
+    if err != nil {
+        return nil, err
+    }
+    std, err := s.Std()
+    if err != nil {
+        return nil, err
+    }
+    return s.ApplyFloat64(func(x float64) float64 { return (x - mean) / std })
+}
+
+z, _ := golars.Lazy(df).
+    Select(golars.Col("v").Cast(dtype.Float64()).MapBatches(zscore).Alias("z")).
+    Collect(ctx)
+
+// Per value, with Go types checked at compile time:
+lower, _ := golars.Lazy(df).
+    Select(golars.MapElements(golars.Col("symbol"), strings.ToLower).Alias("sym")).
+    Collect(ctx)
+```
+
+The function must not retain or release its input. Prefer a built-in
+expression when one exists: the optimiser can see through it, while a
+Go callback is opaque to it.
 
 ## Unnest / explode / upsample
 
@@ -75,18 +287,19 @@ Upsample a sorted timestamp column to a dense grid:
 
 ```go
 out, _ := df.Upsample(ctx, "ts", "1d")
-// rows spaced > 1d apart get filled with null-valued neighbours.
+// missing daily slots are inserted with nulls in every other column.
 ```
 
 Accepted intervals: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, `w`.
-Calendar units (`mo`, `y`) are rejected.
+The column must already be sorted ascending. Calendar units (`mo`,
+`q`, `y`) are rejected.
 
 ## Pretty-print a logical plan
 
 ```go
-fmt.Println(lazy.ExplainTree(plan.Plan()))
+fmt.Println(lazy.ExplainTree(lf.Plan()))
 // SORT [total desc]
-// └── AGG keys=[dept] aggs=[...]
+// └── AGG keys=[dept] [col("salary").sum().alias("total")]
 //     └── FILTER (col("salary") > 75)
 //         └── SCAN df
 ```
@@ -119,13 +332,16 @@ agg, _ := golars.Lazy(df).
         golars.Mean("price").Alias("avg_price"),
         golars.Max("price").Alias("hi"),
     ).
-    Sort("qty_sum", true).
+    Sort("qty", true).
     Collect(ctx)
 ```
 
-golars detects that every agg targets the same column in a single
-bucket and fuses them through `groupby_fused.go`, so four aggregations
-cost one scan.
+An unaliased aggregation keeps its input column name, so
+`golars.Sum("qty")` produces a column named `qty`. golars buckets the
+aggregations by input column; when a bucket holds two or more of
+sum/mean/min/max/count/null_count over an int64 or float64 column,
+they are fused through `dataframe/groupby_fused.go`, so the mean and
+max over `price` cost one scan.
 
 ## Join a CSV against a Parquet lookup table
 
@@ -154,8 +370,8 @@ lf := iocsv.Scan("/tmp/huge.csv").
 
 for batch, err := range lf.IterBatches(ctx) {
     if err != nil { log.Fatal(err) }
-    defer batch.Release()
     // stream-process each batch here
+    batch.Release()
 }
 ```
 
@@ -260,8 +476,8 @@ with no nulls take a SIMD-friendly O(n) slide (two-phase warmup +
 
 ```go
 // Boolean mask for regex hits.
-mask, _ := series.FromString("s", []string{"a1", "xx", "b22"}, nil).
-    Str().ContainsRegex(`\d+`)
+s, _ := series.FromString("s", []string{"a1", "xx", "b22"}, nil)
+mask, _ := s.Str().ContainsRegex(`\d+`)
 
 // Extract first capture group.
 ids, _ := emails.Str().Extract(`@([a-z.]+)$`, 1)
@@ -337,7 +553,7 @@ topSellers, _ := df.TopK(ctx, 10, "revenue")
 worstLatency, _ := df.BottomK(ctx, 5, "p99_ms")
 
 // Pipe keeps chained code flat:
-out, _ := df.Pipe(func(d *DataFrame) (*DataFrame, error) {
+out, _ := df.Pipe(func(d *golars.DataFrame) (*golars.DataFrame, error) {
     return d.Filter(ctx, mask)
 })
 ```
@@ -523,10 +739,20 @@ checks.
 | `pl.col("x").rolling_sum(w)` | `golars.Col("x").RollingSum(w, 0)` |
 | `pl.col("x").sum().over("k")` | `golars.Col("x").Sum().Over("k")` |
 | `s.str.extract(pattern, i)` | `s.Str().Extract(pattern, i)` |
-| `s.str.contains_regex(p)` | `s.Str().ContainsRegex(p)` |
+| `s.str.contains(p)` (regex) | `s.Str().ContainsRegex(p)` |
 | `df.pivot(index=, on=, values=)` | `df.Pivot(ctx, index, on, values, agg)` |
 | `df.sum()` | `df.SumAll(ctx)` |
 | `pl.scan_csv(p)` | `golars.ScanCSV(p)` |
 | `pl.scan_parquet(p)` | `golars.ScanParquet(p)` |
+| `s.str.to_datetime(fmt)` | `golars.Col("s").Str().ToDatetime(fmt)` |
+| `pl.col("ts").dt.truncate("1h")` | `golars.Col("ts").Dt().Truncate("1h")` |
+| `df.group_by_dynamic("ts", every="1h")` | `lf.GroupByDynamic("ts", golars.DynamicGroupOptions{Every: "1h"})` |
+| `pl.col("x").rolling_mean_by("ts", "2h")` | `golars.Col("x").RollingMeanBy(golars.Col("ts"), "2h")` |
+| `df.join_asof(q, on="t", by="k")` | `df.JoinAsof(ctx, q, golars.AsofOptions{On: "t", By: []string{"k"}})` |
+| `pl.col("l").list.eval(pl.element() * 2)` | `golars.Col("l").List().Eval(golars.Element().Mul(golars.Lit(int64(2))))` |
+| `pl.struct("a", "b")` | `golars.Struct(golars.Col("a"), golars.Col("b"))` |
+| `pl.col("x").name.suffix("_raw")` | `golars.Col("x").Name().Suffix("_raw")` |
+| `pl.col("x").cut([0, 10])` | `golars.Col("x").Cut([]float64{0, 10}, expr.CutOptions{})` |
+| `pl.col("x").map_batches(f)` | `golars.Col("x").MapBatches(f)` |
 
 See `docs/api-surface.md` for the full cross-reference.

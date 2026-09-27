@@ -12,13 +12,13 @@ Reference counting rules:
 - Cloning a `Series` shares buffers, not copies them.
 - Slicing a `Series` shares buffers with an offset and length.
 - A `DataFrame` holds retains on every Series it owns.
-- Release happens through `Series.Release()` and `DataFrame.Release()`. Without an explicit release, the GC collects the wrapper and the underlying arrow buffer release runs via a finalizer. Finalizers are a safety net, not the intended path. Release explicitly in tight loops.
+- Release happens through `Series.Release()` and `DataFrame.Release()`. `Series` and `DataFrame` do not register finalizers. With the default Go-backed allocators, a buffer that is never released is still reclaimed by the GC, but a pooled buffer then never goes back to the pool, so the next kernel call allocates fresh memory. Release explicitly, especially in tight loops. (The one finalizer in the engine is on the `lazy` Cache node, which releases its memoised frame when the cache state is collected.)
 
 ## Allocator
 
-Every Series, array, and kernel output is allocated through a `memory.Allocator`. The default is `memory.DefaultAllocator`. For benchmarks and tests we use `memory.NewCheckedAllocator` which panics on unreleased buffers. Every test that constructs Series must use a checked allocator and verify zero leaks at teardown.
+Every Series, array, and kernel output is allocated through a `memory.Allocator`. The default is `memory.DefaultAllocator`. Hot kernels route the default through the process-wide pooled allocator in `internal/mempool` (`compute.PoolingMem`), which recycles size-bucketed buffers across calls. For tests we use `memory.NewCheckedAllocator` (wrapped by `testutil.NewCheckedAllocator`), which fails the test on unreleased buffers; a checked allocator bypasses the pool so leak detection keeps working. Every test that constructs Series should use one and verify zero leaks at teardown.
 
-Allocator choice flows through a `ctx.Context` in plan execution. Expression evaluation takes the allocator from the surrounding execution context, not from a global.
+Allocator choice flows through functional options, not a global: `compute.WithAllocator`, `series.WithAllocator`, the IO packages' `WithAllocator`, and `lazy.WithExecAllocator` for plan execution. Expression evaluation takes the allocator from the execution config of the surrounding `Collect`.
 
 ## Immutability
 
@@ -44,7 +44,7 @@ Why chunks:
 - Natural unit of streaming (a morsel is a DataFrame-shaped collection of chunks, one per column).
 - Enables append-without-copy: appending two Series concatenates chunk lists instead of copying.
 
-The downside is that kernels must iterate over chunks. We mitigate this with a `series.Iter()` helper that yields `(chunk arrow.Array, offset int)` pairs.
+The downside is that kernels must iterate over chunks. Most kernels handle this by walking `s.Chunks()` or by consolidating a multi-chunk input into a single array first (`s.Consolidated()` returns one `arrow.Array`; `s.Rechunk()` returns a single-chunk Series).
 
 ## Null masks
 
@@ -57,10 +57,10 @@ Bitmaps are shared via buffer refcounts just like data buffers.
 Performance work follows a small set of rules:
 
 1. **No allocation in inner loops.** Pre-allocate result buffers sized to the input. Use `memory.Allocator.Allocate(n)` once per chunk, not per row.
-2. **No interface boxing in inner loops.** Hot kernels dispatch on dtype once at the outer level and then work on concrete `[]T` slices. We rely on generated code (`go generate`) to produce dtype-specialized kernels rather than paying interface dispatch cost per row.
-3. **No map operations in inner loops.** Hash tables used by groupby and join are dedicated open-addressing implementations under `internal/hash`. No `map[K]V` in aggregation critical paths.
-4. **Reuse buffers across morsels.** The streaming executor keeps a free-list of `memory.Buffer` per operator and reuses them across morsels where size permits.
-5. **Bounded per-operator memory.** Operators declare a memory budget and spill to disk when they exceed it.
+2. **No interface boxing in inner loops.** Hot kernels dispatch on dtype once at the outer level and then work on concrete `[]T` slices. The dtype-specialized kernels are hand-written (Go generics plus per-dtype type switches), not generated, so there is no interface dispatch cost per row.
+3. **Avoid map operations in inner loops.** The int64-keyed hash paths in group-by and join use the dedicated open-addressing map in `internal/intmap` instead of `map[int64]int32`. String keys are dictionary-encoded without copying (`dataframe/strcodes.go`): keys of up to 7 bytes are packed into a uint64 and looked up in an integer table, longer ones go through a pointer-free table of views into the arrow data buffer (`dataframe/strtable.go`, hashed with `internal/strhash`), and the string-key hash join uses partitioned open-addressing tables (`dataframe/join_str.go`). Some less common join key types still use Go maps.
+4. **Reuse buffers across calls.** Output buffers come from the pooled allocator in `internal/mempool`, so back-to-back kernel calls (and successive morsels in the streaming executor) reuse the same size-bucketed backing slices instead of hitting `mallocgc`.
+5. **Bounded per-operator memory (planned).** Operators do not yet declare a memory budget and there is no spill to disk. Pipeline breakers (sort, group-by, join) materialise their full input in memory.
 
 ## Cross-operator sharing
 
@@ -73,12 +73,12 @@ Go's GC is concurrent and low-latency, but allocation pressure still drives paus
 - Working in large `[]T` slices instead of many small objects.
 - Using `sync.Pool` for short-lived per-morsel scratch buffers (hash temp arrays, partition index buffers).
 - Avoiding string allocation on the hot path. String columns are kept in arrow's native offset-plus-buffer layout and operated on as byte slices.
-- Keeping the `Chunk` struct small (a few pointers) so that slices of chunks fit in cache.
+- Keeping the `Series` struct small (a name plus a pointer to an `arrow.Chunked`) so wrappers are cheap to create and share.
 
-We run the test suite under `GODEBUG=gctrace=1` in CI and watch for surprise allocation.
+Allocation regressions are caught with `go test -benchmem` and by checking pprof profiles for `mallocgc` in hot kernels. CI runs the race detector over the hot packages.
 
 ## A note on off-heap
 
 We do not use off-heap memory (mmap backed by anonymous regions) by default. arrow-go's `memory.GoAllocator` returns Go-managed slices. We switch to `memory.CgoArrowAllocator` only if profiling shows GC overhead is a problem on real workloads, and only if we decide to relax the no-cgo constraint. For now, staying on-heap is simpler and fast enough.
 
-Spill-to-disk for OOC is different and uses mmap on regular files. That is not off-heap allocation; that is swapping to disk.
+Out-of-core execution (spill to disk) is not implemented. If it lands, it would be a separate mechanism from off-heap allocation.

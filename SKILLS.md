@@ -90,7 +90,7 @@ entry points:
   `.ShowGraph()` for plan introspection. `lazy.MermaidGraph(node)`
   and `lazy.ExplainTree(node)` are the plan-tree renderers used by
   the CLI.
-- **`expr` namespaces** — `Expr.Str()`, `Expr.List()`, `Expr.Struct()`
+- **`expr` namespaces**: `Expr.Str()`, `Expr.List()`, `Expr.Struct()`
   mirror polars' `.str` / `.list` / `.struct` surfaces. `expr.C[T]`
   plus shorthand `expr.Int` / `Float` / `Str` / `Bool` give typed
   column handles that take bare Go literals.
@@ -99,7 +99,7 @@ entry points:
 - **`repl` package** is stand-alone: it ships the interactive prompt
   primitives (history, ghost-text suggestions, suggester callback)
   without any golars coupling.
-- **`browse` package** exposes the TUI grid as `browse.Run(df)` so
+- **`browse` package** exposes the TUI grid as `browse.Run(df, title)` so
   downstream apps can reuse the viewer on their own DataFrames.
 
 ## `.glr` REPL-only commands
@@ -107,12 +107,12 @@ entry points:
 The REPL / `.glr` runner adds commands that don't have a standalone
 subcommand equivalent. Highlights:
 
-- `.tree`, `.graph`, `.mermaid` — three views of the current lazy plan
-- `.unnest COL`, `.explode COL`, `.upsample COL EVERY` — reshape
+- `.tree`, `.graph`, `.mermaid`: three views of the current lazy plan
+- `.unnest COL`, `.explode COL`, `.upsample COL EVERY`: reshape
 - `.sum_all`, `.mean_all`, `.min_all`, `.max_all`, `.std_all`,
-  `.var_all`, `.median_all` — frame-wide scalar aggregates
-- `.source PATH.glr` — run another script inline
-- `.ishow` — open the current pipeline in the browse TUI and return
+  `.var_all`, `.median_all`: frame-wide scalar aggregates
+- `.source PATH.glr`: run another script inline
+- `.ishow`: open the current pipeline in the browse TUI and return
   to the REPL when the viewer quits
 
 Run `.help` inside the REPL for the complete list.

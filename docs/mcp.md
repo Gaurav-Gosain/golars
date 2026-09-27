@@ -51,8 +51,17 @@ restart needed in Cursor; the server picks up automatically.
 | `null_counts` | Per-column null counts |
 
 Every tool returns _both_ a plain-text fallback (for hosts that only
-render text) and a `structuredContent` payload with `columns` +
-`rows` arrays so richer UIs can render a table.
+render text) and a `structuredContent` payload. The table-shaped
+tools (`head`, `describe`, `sql`) put `columns` + `rows` arrays in
+it so richer UIs can render a table. The others use their own shape:
+`schema` returns `path`, `rows` and a `columns` list of
+`{name, dtype}`; `row_count` returns `rows` and `columns` as counts;
+`null_counts` returns `counts` (a list of `{column, nulls}`) and
+`total_rows`.
+
+File arguments (`path`, and each entry of `files` for `sql`) should
+be absolute paths. For `sql`, each file is registered as a table
+named after its filename without the extension.
 
 ## Example session
 
@@ -79,7 +88,7 @@ The MCP server is **read-only**. It cannot write files, start
 subprocesses, or reach the network. The tools only accept a path
 string and execute a query against its contents; SQL is compiled to
 a lazy plan with a whitelist of operators (no arbitrary expressions
-or DDL). That said, it _will_ read any file the caller names :
+or DDL). That said, it _will_ read any file the caller names, so
 don't point a host LLM at secrets.
 
 ## Extending

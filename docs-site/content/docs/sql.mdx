@@ -1,6 +1,6 @@
 ---
 title: SQL frontend
-description: "SELECT / FROM / WHERE / GROUP BY / ORDER BY / LIMIT — compiles to the same lazy plan as the Go API."
+description: "SELECT / FROM / WHERE / GROUP BY / ORDER BY / LIMIT, compiled to the same lazy plan as the Go API."
 icon: Database
 ---
 
@@ -15,10 +15,11 @@ golars sql "SELECT dept, SUM(amount) AS total FROM sales GROUP BY dept ORDER BY 
 ```
 
 Each file becomes a table whose name is the filename stem. Multiple
-files register as separate tables so cross-file queries Just Work:
+files register as separate tables, and each query reads from the one
+named in its `FROM` clause (there is no `JOIN` yet):
 
 ```sh
-golars sql "SELECT t.*, s.name FROM trades t" trades.csv symbols.csv
+golars sql "SELECT symbol, price FROM symbols WHERE price > 100" trades.csv symbols.csv
 ```
 
 ## From Go

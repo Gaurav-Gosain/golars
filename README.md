@@ -18,6 +18,11 @@ Eager and lazy execution with a plan-rewriting optimiser, a streaming
 engine, and AVX2/AVX-512 kernels on amd64 and NEON on arm64. A single
 `go build` cross-compiles to Linux, macOS, Windows.
 
+The expression API follows polars closely: the `str`, `dt`, `list`,
+`arr`, `struct`, `name`, `bin` and `cat` namespaces, time zones,
+`group_by_dynamic` and rolling windows, asof and inequality joins,
+Categorical and Enum dtypes, and a parallel CSV reader.
+
 Matches or beats polars 1.39 on most polars-compare workloads,
 Arrow-native end to end (no conversion cost talking to polars,
 PyArrow, DuckDB), and ships a full terminal stack:
@@ -152,7 +157,7 @@ backing store so it scales to tens of millions of rows without copying.
 
 <p align="center"><img src="vhs/out/pipes.gif" alt="golars | jq | awk | round-trip"></p>
 
-Every command speaks `-o table|csv|tsv|json|ndjson|markdown|parquet|arrow`,
+Every data-printing command speaks `-o table|csv|tsv|json|ndjson|markdown|parquet|arrow`,
 so golars drops straight into a Unix pipeline. `--json`, `--csv`, and
 friends are shorthand flags.
 
@@ -189,10 +194,26 @@ sort total desc
 head 5
 ```
 
-`with NAME = EXPR` supports arithmetic, comparisons, string methods
-(`col.str.upper()`, `contains_regex`, `like`, ...), aggregates,
-rolling/EWM windows, casts, and `coalesce`. See [`docs/scripting.md`](docs/scripting.md)
-for the full expression grammar.
+`with NAME = EXPR` derives a column from an expression, and `filter`
+and `select` take the same expression language. It reaches the golars
+expression API directly: every method is callable by its snake_case
+name, either on the value or as a function (`ts.dt.year()` or
+`dt.year(ts)`), across the `str`, `dt`, `list`, `arr`, `struct`,
+`name`, `bin` and `cat` namespaces, with `[lists]`, keyword options,
+`//`, `%`, `**`, `in [...]` and `when ... then ... otherwise`:
+
+```glr
+with day   = dt.truncate(str.to_datetime(ts, "%Y-%m-%d %H:%M"), "1d")
+with band  = cut(amount, [10, 100], labels=["small", "medium", "large"])
+with ntags = list.len(str.split(tags, ";"))
+filter user in ["ada", "bo"] and amount % 2 == 0
+join_asof rates on ts by user tolerance 2h
+group_by_dynamic ts every 1h amount:sum:total amount:count:n
+```
+
+See [`docs/scripting.md`](docs/scripting.md) for the full language
+and [`examples/script/expressions.glr`](examples/script/expressions.glr)
+for a runnable tour.
 
 Convert a `.glr` script to a standalone Go program:
 
@@ -287,16 +308,25 @@ import "github.com/janpfeifer/gonb/gonbui"
 gonbui.DisplayHTML(jrender.HTML(df))
 ```
 
+`DataFrame.MimeBundle()` and `Series.MimeBundle()` return `text/plain`,
+`text/html` and a JSON table (`application/vnd.golars.table+json`) in
+one map, so any notebook front end that duck types on a `MimeBundle`
+method picks the richest form it supports. A terminal notebook built
+on a fork of [gopyter](https://github.com/Gaurav-Gosain/gopyter) uses
+the JSON table to draw themed tables; that fork is the planned home
+for Go notebooks but is not published yet.
+
 See [docs/jupyter.md](docs/jupyter.md) for the full walkthrough.
 
 ## Performance
 
 The [polars-compare bench](bench/polars-compare/) runs the same
 workloads against polars-py, the polars-rs crate, `golars-scalar`,
-and `golars-simd` in one pass. Categories covered include SumInt64,
-MeanFloat64, MinFloat64, GroupBy (single and multi-agg), InnerJoin,
-Filter, Take, WhenThenOtherwise, SumOverGroup, RollingSum, and
-end-to-end pipelines (filter-groupby-sort).
+and `golars-simd` in one pass. It covers reductions, arithmetic,
+filters, sorts, casts, take, group-by (numeric, string and multi-key),
+hash, asof and inequality joins, window and rolling functions, string
+and temporal kernels, CSV and Parquet reads, and end-to-end lazy
+pipelines, each at several input sizes.
 
 ```sh
 cd bench/polars-compare
@@ -310,18 +340,22 @@ reproducibly faster on your hardware.
 
 ## Library API
 
-- **Eager + lazy**: `df.Filter(...)` for in-place, `lazy.FromDataFrame(df).Filter(...).Collect(ctx)` for plan-optimised.
-- **Expressions**: `Col`, `Lit`, `When/Then/Otherwise`, binary ops, `.Alias`, `.Cast`, `.Sum/Min/Max/Mean/Std/Var/Quantile/Skew/Kurtosis/Entropy`, `.RollingSum/Mean/...`, `.Over(keys...)`, `.ForwardFill`, `.Coalesce`, `.IntRange`.
-- **Reshape**: `df.Pivot / Unpivot / Transpose / Explode / Unnest / Upsample / PartitionBy / TopK / BottomK / Pipe`.
-- **Horizontal**: `SumHorizontal / MeanHorizontal / MinHorizontal / MaxHorizontal / AllHorizontal / AnyHorizontal`.
+- **Eager + lazy**: `df.Filter(...)` runs immediately, `lazy.FromDataFrame(df).Filter(...).Collect(ctx)` builds an optimised plan.
+- **Expressions**: `Col`, `Lit`, `When/Then/Otherwise`, binary ops, `.Alias`, `.Cast`, `.Sum/Min/Max/Mean/Std/Var/Quantile/Skew/Kurtosis/Entropy`, `.RollingSum/Mean/...`, `.Over(keys...)`, `.Cut / .QCut`, `.Rle`, `.ReplaceStrict`, `.SortBy`, `.TopKBy`, `.Interpolate`, `.MapBatches`, `Fold / Reduce`, `Coalesce`, `IntRange`.
+- **Namespaces**: `.Str()`, `.Dt()`, `.List()` (including `.Eval` with `Element()`), `.Arr()`, `.Struct()`, `.Name()`, `.Bin()`, `.Cat()`.
+- **Temporal**: strptime/strftime, calendar fields, truncate/round/offset with polars duration strings (`"1mo"`, `"2h30m"`), time zones, `DateRange / DatetimeRange / TimeRange`, `GroupByDynamic`, `Rolling`, `RollingMeanBy` and friends.
+- **Joins**: inner, left and cross hash joins, `JoinAsof` (backward, forward, nearest, with `By` groups and tolerance), `JoinWhere` for inequality predicates.
+- **Reshape**: `Pivot / Unpivot / Transpose / Explode / Unnest / Upsample / PartitionBy / TopK / BottomK / ToDummies / Update / MergeSorted / WithRowIndex / Pipe`, most of them on `LazyFrame` too.
+- **Horizontal**: `SumHorizontal / MeanHorizontal / MinHorizontal / MaxHorizontal / AllHorizontal / AnyHorizontal`, as frame helpers and as expressions.
 - **Stats**: `Skew / Kurtosis / Entropy / PearsonCorr / Covariance / ApproxNUnique`, plus `df.Corr / df.Cov` matrices.
-- **Optimiser**: simplify, predicate pushdown, projection pushdown, slice pushdown, CSE.
+- **Dtypes**: integers, floats, bool, string, binary, date, datetime (with time zone), duration, time, list, array, struct, Categorical, Enum.
+- **Optimiser**: simplify, slice pushdown, predicate pushdown, projection pushdown.
 - **Profiler + tracer**: `lazy.NewProfiler()` + `lazy.WithProfiler(p)` for per-node timings; `lazy.WithTracer(t)` for OTel span integration.
 
 ```go
 // CSV, Parquet, Arrow/IPC, JSON, NDJSON - file or URL
-df, _ := csv.ReadFile(ctx, "trades.csv")
-df, _ := parquet.ReadURL(ctx, "https://example.com/trades.parquet")
+trades, _ := csv.ReadFile(ctx, "trades.csv")
+remote, _ := parquet.ReadURL(ctx, "https://example.com/trades.parquet")
 
 // Lazy scans defer the open until Collect so the optimiser can push
 // projections and filters through the reader
@@ -340,7 +374,7 @@ sw.Close()
 
 // database/sql bridge (any pure-Go driver)
 db, _ := sql.Open("sqlite", "data.db")
-df, _ := iosql.ReadSQL(ctx, db, "SELECT id, price FROM trades WHERE volume > ?", 100)
+fromDB, _ := iosql.ReadSQL(ctx, db, "SELECT id, price FROM trades WHERE volume > ?", 100)
 ```
 
 See the [cookbook](docs/cookbook.md) for end-to-end recipes and the
@@ -351,14 +385,16 @@ method-level status table.
 
 | Binary / path                                               | What it is                                                                                                                                                   |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`cmd/golars`](cmd/golars/)                                 | REPL + `run` / `sql` / `transpile` / `fmt` / `lint` / `browse` / `schema` / `stats` / `peek` / `diff` / `convert` / `cat` / `explain` / `doctor` / `completion` / `sample` |
+| [`cmd/golars`](cmd/golars/)                                 | REPL + `repl` / `run` / `sql` / `transpile` / `fmt` / `lint` / `browse` / `schema` / `stats` / `peek` / `head` / `tail` / `sample` / `diff` / `convert` / `cat` / `explain` / `doctor` / `version` / `completion` |
 | [`cmd/golars-lsp`](cmd/golars-lsp/)                         | stdio Language Server for `.glr` files                                                                                                                       |
 | [`cmd/golars-mcp`](cmd/golars-mcp/)                         | Model Context Protocol server                                                                                                                                |
+| [`cmd/golars-kernel`](cmd/golars-kernel/)                   | Jupyter kernel for `.glr` notebooks                                                                                                                          |
 | [`cmd/bench`](cmd/bench/)                                   | polars-compare bench harness                                                                                                                                 |
 | [`editors/tree-sitter-golars`](editors/tree-sitter-golars/) | `.glr` grammar (Neovim, Helix)                                                                                                                               |
 | [`editors/vscode-golars`](editors/vscode-golars/)           | VS Code extension (grammar + LSP client)                                                                                                                     |
 | [`editors/nvim-golars`](editors/nvim-golars/)               | Neovim plugin                                                                                                                                                |
 | [`editors/zed-golars`](editors/zed-golars/)                 | Zed extension (grammar + LSP client)                                                                                                                         |
+| [`editors/jupyterlab-golars`](editors/jupyterlab-golars/)   | JupyterLab extension (`.glr` highlighting + LSP wiring)                                                                                                      |
 | [`docs-site/`](docs-site/)                                  | Fumadocs-based website, ships `/llms.txt`, `/llms-full.txt`, and `/docs-md/<slug>` raw-markdown routes for LLM ingestion                                     |
 
 ## Documentation
@@ -368,6 +404,7 @@ method-level status table.
 | [`docs/cookbook.md`](docs/cookbook.md)                                       | End-to-end recipes for every major feature                   |
 | [`docs/scripting.md`](docs/scripting.md)                                     | `.glr` language reference                                    |
 | [`docs/mcp.md`](docs/mcp.md)                                                 | Install `golars-mcp` into Claude Desktop / Cursor / Windsurf |
+| [`docs/jupyter.md`](docs/jupyter.md)                                         | `golars-kernel`, GoNB rendering, notebook mime bundles       |
 | [`docs/api-surface.md`](docs/api-surface.md)                                 | Polars -> golars method-level status table                   |
 | [`docs/api-design.md`](docs/api-design.md)                                   | Naming + type philosophy                                     |
 | [`docs/architecture.md`](docs/architecture.md)                               | Layered component map + data flow                            |
@@ -387,8 +424,8 @@ make test-all       # the full release gate
 make bench          # polars-compare harness
 ```
 
-Every test uses a `testutil.CheckedAllocator` so buffer leaks fail
-the suite.
+Tests that build Arrow buffers use `testutil.NewCheckedAllocator`, so
+buffer leaks fail the suite.
 
 ## Regenerating the GIFs
 
@@ -407,7 +444,8 @@ make -C vhs gif-sql   # one at a time
   behavioural reference. golars mirrors its public API surface and
   parity-tests against a local clone.
 - [arrow-go](https://github.com/apache/arrow-go) (Apache 2.0) - the
-  only runtime dependency in the core packages; every series is an
+  main runtime dependency of the core packages (next to
+  `golang.org/x/sync` and `golang.org/x/sys`); every series is an
   arrow array.
 - [sheets](https://github.com/maaslalani/sheets) by Maas Lalani (MIT) -
   grid layout and modal keybindings for the TUI browser in
@@ -417,8 +455,6 @@ make -C vhs gif-sql   # one at a time
   whole Charm stack powers the REPL, browser, and LSP preview.
 - [VHS](https://github.com/charmbracelet/vhs) (MIT) - tape-driven GIF
   regeneration for every demo above.
-- [BurntSushi/toml](https://github.com/BurntSushi/toml) (MIT) - config
-  loader.
 - Goroutine-pool patterns for the parallel radix and filter kernels
   were informed by DuckDB's and polars's own parallel-radix writeups.
 

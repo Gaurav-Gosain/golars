@@ -9,7 +9,8 @@ and `SKILLS.md` documents the invocable skills.
 
 - **golars**: pure-Go port of polars, built directly on arrow-go. No
   cgo. Single `go build` cross-compiles.
-- 23 Go packages. Tests live alongside source (`*_test.go`).
+- About 45 Go packages (outside `examples/`). Tests live alongside
+  source (`*_test.go`).
 - Public API surface is the sub-packages + the root `golars` package
   which re-exports the most common helpers.
 - Target: match or beat polars 1.39 on the bench suite at
@@ -80,7 +81,7 @@ docs-site/    Fumadocs-based website
 Before declaring work done:
 
 ```
-go test ./...                             # all 23 packages must pass
+go test ./...                             # every package must pass
 GOEXPERIMENT=simd go test ./...           # SIMD build path too
 go test -race ./compute/ ./eval/ ./series/ ./dataframe/ ./lazy/
 go vet ./...
@@ -94,12 +95,23 @@ pre-existing SA6002 sync.Pool findings.
 - **Add an expression function**: implement on `*series.Series` first
   (plus test), then expose a fluent method on `expr.Expr` as a
   `FunctionNode`, then wire a case arm in `eval/eval_func.go`, then
-  add a fluent top-level helper in `golars.go` if appropriate.
+  add a fluent top-level helper in `golars.go` if appropriate. The
+  glr expression language (`script/exprparse`) finds methods on
+  `expr.Expr` and its namespaces by reflection, so a new method is
+  callable from `.glr` as `x.snake_name(...)` with no parser change.
+  Add an entry to `overrides` in `script/exprparse/funcs.go` only for
+  polars-style default arguments, aliases, or a signature that needs a
+  custom builder, and to `freeFuncs` for a new top-level function.
 - **Add a scripting command**: add a `CommandSpec` in
-  `script/spec.go`, add a case in `cmd/golars/main.go` dispatcher,
-  add the command to `cmd/golars/prompt.go` completion list,
-  mirror into `editors/tree-sitter-golars/grammar.js`, and into
-  `docs/scripting.md`.
+  `script/spec.go` (aliases go in its `Aliases` field), register a
+  handler in the `handlers` table in `cmd/golars/dispatch.go` and
+  implement it in the matching `cmd/golars/cmds_<category>.go`. The
+  REPL help and completion, the LSP and the Jupyter kernel read the
+  spec directly. Then run `go test ./script/ ./cmd/golars/`: the drift
+  tests name every other place that still needs the command
+  (`editors/tree-sitter-golars/grammar.js` plus `tree-sitter generate
+  --abi 14`, the VS Code, Vim and JupyterLab keyword lists, and the
+  statement reference in `docs/scripting.md`).
 - **Add a polars-compat kernel**: check behaviour in
   `polars/crates/...` (the upstream polars source is vendored there
   for reference), reproduce semantics in Go, add parity tests.
