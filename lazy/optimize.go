@@ -434,10 +434,14 @@ func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, 
 			}
 		}
 		newChild, changed := p.push(node.Input, childNeeded)
+		f := Filter{Input: newChild, Predicate: node.Predicate}
+		if pruned, ok := pruneFilterOnlyColumns(f, needed); ok {
+			return pruned, true
+		}
 		if !changed {
 			return node, false
 		}
-		return Filter{Input: newChild, Predicate: node.Predicate}, true
+		return f, true
 	case Sort:
 		childNeeded := copyNeeded(needed)
 		if childNeeded != nil {

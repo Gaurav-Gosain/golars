@@ -63,6 +63,10 @@ func TestJoinPushdownMatchesUnoptimized(t *testing.T) {
 			Filter(expr.Col("a").Lt(expr.LitInt64(45))), []string{"predicate=(col(\"a\") < 45)"}},
 		{"stacked filters", L.Join(R, []string{"k"}, dataframe.InnerJoin).
 			Filter(expr.Col("a").Gt(expr.LitInt64(15))).Filter(expr.Col("b").IsNotNull()), nil},
+		{"filter-only columns dropped", L.Filter(expr.Col("x").Eq(expr.LitString("p"))).
+			Join(R, []string{"k"}, dataframe.InnerJoin).
+			Filter(expr.Col("b").Gt(expr.LitInt64(0))).
+			Select(expr.Col("k"), expr.Col("a")), []string{"SCAN df projection=[k a] predicate", "SCAN df projection=[k] predicate"}},
 		{"prune with suffix", L.Join(R, []string{"k"}, dataframe.InnerJoin).
 			Select(expr.Col("k"), expr.Col("x_right")), nil},
 		{"prune left only", L.Join(R, []string{"k"}, dataframe.InnerJoin).

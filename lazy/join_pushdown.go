@@ -158,3 +158,37 @@ func joinChildNeeds(j Join, needed map[string]struct{}) (left, right map[string]
 	}
 	return left, right, true
 }
+
+// pruneFilterOnlyColumns drops, right after f, the columns only its
+// predicate reads. Without it a column such as o_orderdate, needed to
+// filter orders, rode along through every join above. needed is the
+// set the surrounding plan reads (nil means all, and nothing is
+// pruned).
+func pruneFilterOnlyColumns(f Filter, needed map[string]struct{}) (Node, bool) {
+	if needed == nil || referencesAllColumns(f.Predicate) {
+		return nil, false
+	}
+	predOnly := false
+	for _, c := range expr.Columns(f.Predicate) {
+		if _, ok := needed[c]; !ok {
+			predOnly = true
+			break
+		}
+	}
+	if !predOnly {
+		return nil, false
+	}
+	sch, err := f.Input.Schema()
+	if err != nil {
+		return nil, false
+	}
+	keep := orderedIntersect(sch.Names(), needed)
+	if len(keep) == 0 {
+		return nil, false
+	}
+	exprs := make([]expr.Expr, len(keep))
+	for i, c := range keep {
+		exprs[i] = expr.Col(c)
+	}
+	return Projection{Input: f, Exprs: exprs}, true
+}

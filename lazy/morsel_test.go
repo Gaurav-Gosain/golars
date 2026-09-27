@@ -3,6 +3,7 @@ package lazy_test
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/Gaurav-Gosain/golars/compute"
@@ -188,3 +189,17 @@ func assertClose(t *testing.T, got, want *dataframe.DataFrame) {
 }
 
 var _ = compute.SortOptions{}
+
+// A column read only by a filter is dropped right after it.
+func TestFilterOnlyColumnPruned(t *testing.T) {
+	mem := testutil.NewCheckedAllocator(t)
+	df := morselFrame(t, series.WithAllocator(mem), 100)
+	defer df.Release()
+	_, plain := batchedAndPlain(df, 10)
+	lf := plain.Filter(expr.Col("k").Gt(expr.LitInt64(1))).GroupBy("g").Agg(expr.Col("x").Sum().Alias("s"))
+	plan := lf.ExplainString()
+	opt := plan[strings.Index(plan, "Optimized plan"):]
+	if !strings.Contains(opt, "PROJECT [col(\"g\"), col(\"x\")]\n    FILTER") {
+		t.Fatalf("filter-only column k not pruned:\n%s", opt)
+	}
+}
