@@ -328,4 +328,3 @@ func makeAllNull(mem memory.Allocator, dt arrow.DataType, n int) arrow.Array {
 	}
 	return b.NewArray()
 }
-

@@ -134,7 +134,7 @@ func genericGroupIDs(keyCols []*series.Series, height int) ([]int, int) {
 	gids := make([]int, height)
 	table := make(map[string]int)
 	type cursor struct {
-		chunks []arrow.Array
+		chunks  []arrow.Array
 		ci, off int
 	}
 	curs := make([]cursor, len(keyCols))
