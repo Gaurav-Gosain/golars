@@ -22,6 +22,7 @@ PKGS      = ./...
 TESTFLAGS = -count=1
 CMDS     := $(notdir $(wildcard ./cmd/*))
 LDFLAGS  ?= -s -w
+BUILDFLAGS ?= -trimpath
 SIMD_ENV ?= GOEXPERIMENT=simd
 
 .PHONY: all help build build-simd install test test-race test-noasm test-simd test-all bench vet lint fmt examples docs-site docker tidy clean check verify
@@ -35,20 +36,20 @@ build: ## Build every binary under cmd/ into ./bin
 	@mkdir -p $(BIN)
 	@for cmd in $(CMDS); do \
 		echo "  build   $$cmd"; \
-		$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd ./cmd/$$cmd; \
+		$(GO) build $(BUILDFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd ./cmd/$$cmd; \
 	done
 
 build-simd: ## Build every binary with GOEXPERIMENT=simd (amd64 only)
 	@mkdir -p $(BIN)
 	@for cmd in $(CMDS); do \
 		echo "  build-simd  $$cmd"; \
-		$(SIMD_ENV) $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd-simd ./cmd/$$cmd; \
+		$(SIMD_ENV) $(GO) build $(BUILDFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd-simd ./cmd/$$cmd; \
 	done
 
 install: ## go install every command to $GOBIN
 	@for cmd in $(CMDS); do \
 		echo "  install $$cmd"; \
-		$(GO) install -ldflags "$(LDFLAGS)" ./cmd/$$cmd; \
+		$(GO) install $(BUILDFLAGS) -ldflags "$(LDFLAGS)" ./cmd/$$cmd; \
 	done
 
 test: ## Run unit tests across every package

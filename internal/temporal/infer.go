@@ -60,15 +60,18 @@ func datetimePatterns(first string, withZ bool) []string {
 	return out
 }
 
+// compiledGroup compiles its formats on first use. Both the pattern
+// list and the compiled formats are built lazily so importing the
+// package costs nothing at process start.
 type compiledGroup struct {
 	once    sync.Once
-	sources []string
+	sources func() []string
 	formats []*Format
 }
 
 func (g *compiledGroup) get() []*Format {
 	g.once.Do(func() {
-		for _, s := range g.sources {
+		for _, s := range g.sources() {
 			f, err := CompileFormat(s)
 			if err != nil {
 				panic(err)
@@ -81,12 +84,12 @@ func (g *compiledGroup) get() []*Format {
 }
 
 var (
-	grpDateDMY     = &compiledGroup{sources: dateDMY}
-	grpDateYMD     = &compiledGroup{sources: dateYMD}
-	grpTime        = &compiledGroup{sources: timeHMS}
-	grpDatetimeDMY = &compiledGroup{sources: datetimePatterns("d", false)}
-	grpDatetimeYMD = &compiledGroup{sources: datetimePatterns("y", false)}
-	grpDatetimeZ   = &compiledGroup{sources: datetimePatterns("y", true)}
+	grpDateDMY     = &compiledGroup{sources: func() []string { return dateDMY }}
+	grpDateYMD     = &compiledGroup{sources: func() []string { return dateYMD }}
+	grpTime        = &compiledGroup{sources: func() []string { return timeHMS }}
+	grpDatetimeDMY = &compiledGroup{sources: func() []string { return datetimePatterns("d", false) }}
+	grpDatetimeYMD = &compiledGroup{sources: func() []string { return datetimePatterns("y", false) }}
+	grpDatetimeZ   = &compiledGroup{sources: func() []string { return datetimePatterns("y", true) }}
 )
 
 // Formats returns the candidate formats of a pattern family.
@@ -108,10 +111,18 @@ func (p Pattern) Formats() []*Format {
 	return nil
 }
 
+// The inference regexes are compiled on first use: they are only
+// needed when parsing strings without an explicit format.
 var (
-	reDMY = regexp.MustCompile(`^['"]?\d{1,2}[-/\.]([01]?\d)[-/\.]\d{4,}(?:[T ]\d{1,2}:?\d{1,2}(?::?\d{1,2}(?:\.\d{1,9})?)?)?['"]?$`)
-	reYMD = regexp.MustCompile(`^['"]?\d{4,}[-/\.]([01]?\d)[-/\.]\d{1,2}(?:[T ]\d{1,2}:?\d{1,2}(?::?\d{1,2}(?:\.\d{1,9})?)?)?['"]?$`)
-	reYMZ = regexp.MustCompile(`^['"]?\d{4,}[-/\.]([01]?\d)[-/\.]\d{1,2}[T ]\d{2}:?\d{2}(?::?\d{2}(?:\.\d{1,9})?)?(?:[+-]\d{2}(?::?\d{2})?|Z)['"]?$`)
+	reDMY = sync.OnceValue(func() *regexp.Regexp {
+		return regexp.MustCompile(`^['"]?\d{1,2}[-/\.]([01]?\d)[-/\.]\d{4,}(?:[T ]\d{1,2}:?\d{1,2}(?::?\d{1,2}(?:\.\d{1,9})?)?)?['"]?$`)
+	})
+	reYMD = sync.OnceValue(func() *regexp.Regexp {
+		return regexp.MustCompile(`^['"]?\d{4,}[-/\.]([01]?\d)[-/\.]\d{1,2}(?:[T ]\d{1,2}:?\d{1,2}(?::?\d{1,2}(?:\.\d{1,9})?)?)?['"]?$`)
+	})
+	reYMZ = sync.OnceValue(func() *regexp.Regexp {
+		return regexp.MustCompile(`^['"]?\d{4,}[-/\.]([01]?\d)[-/\.]\d{1,2}[T ]\d{2}:?\d{2}(?::?\d{2}(?:\.\d{1,9})?)?(?:[+-]\d{2}(?::?\d{2})?|Z)['"]?$`)
+	})
 )
 
 func monthOK(re *regexp.Regexp, v string) bool {
@@ -128,11 +139,11 @@ func monthOK(re *regexp.Regexp, v string) bool {
 func (p Pattern) IsInferable(v string) bool {
 	switch p {
 	case PatternDatetimeDMY:
-		return monthOK(reDMY, v)
+		return monthOK(reDMY(), v)
 	case PatternDatetimeYMD:
-		return monthOK(reYMD, v)
+		return monthOK(reYMD(), v)
 	case PatternDatetimeYMDZ:
-		return monthOK(reYMZ, v)
+		return monthOK(reYMZ(), v)
 	}
 	return true
 }
