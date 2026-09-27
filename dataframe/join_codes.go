@@ -231,51 +231,40 @@ func joinFloatKeyBits(a arrow.Array) arrow.Array {
 	return newInt64Array(vals, a)
 }
 
-// codesFromEncoders encodes each column with the typed group-by
-// encoders and combines them into out. ok=false means a column type has
-// no typed encoder or the combined key space overflowed.
+// codesFromEncoders encodes each column with a typed encoder and
+// combines them into out. ok=false means a column type has no typed
+// encoder or the combined key space overflowed.
 func codesFromEncoders(cols []arrow.Array, n int, out []int32) (int, bool) {
-	kcs := make([]keyCodes, len(cols))
+	codes := make([][]int32, len(cols))
+	cards := make([]int, len(cols))
 	defer func() {
-		for _, kc := range kcs {
-			int32Scratch.put(kc.codes)
+		for _, c := range codes {
+			int32Scratch.put(c)
 		}
 	}()
 	for i, a := range cols {
 		switch t := a.(type) {
-		case *array.Int64:
-			kcs[i] = encodeInt64Codes(t)
-		case *array.Int32:
-			kcs[i] = encodeInt32Codes(t)
+		case *array.Int64, *array.Int32:
+			codes[i], cards[i], _ = encodeJoinIntCodes(a)
 		case *array.String:
-			kcs[i] = encodeStringCodes(t)
+			kc := encodeStringCodes(t)
+			codes[i], cards[i] = kc.codes, kc.card()
 		case *array.Boolean:
-			kcs[i] = encodeBoolCodes(t)
+			kc := encodeBoolCodes(t)
+			codes[i], cards[i] = kc.codes, kc.card()
 		case *array.Null:
-			codes := int32Scratch.get(n)
-			clear(codes)
-			var first []int32
-			if n > 0 {
-				first = []int32{0}
-			}
-			kcs[i] = keyCodes{codes: codes, firstRows: first}
+			codes[i] = int32Scratch.get(n)
+			clear(codes[i])
+			cards[i] = 1
 		default:
 			return 0, false
 		}
 	}
-	if len(kcs) == 1 {
-		copy(out, kcs[0].codes)
-		return kcs[0].card(), true
+	if len(cols) == 1 {
+		copy(out, codes[0])
+		return cards[0], true
 	}
-	ids, first, ok := assignGroupsFromCodes(kcs, n)
-	if !ok {
-		return 0, false
-	}
-	for i, g := range ids {
-		out[i] = int32(g)
-	}
-	intScratch.put(ids)
-	return len(first), true
+	return combineJoinCodes(codes, cards, n, out)
 }
 
 // codesFromTuples numbers rows by a byte encoding of the whole key

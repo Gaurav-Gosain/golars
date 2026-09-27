@@ -216,7 +216,7 @@ func TestJoinAgainstReference(t *testing.T) {
 	hows := []dataframe.JoinType{dataframe.InnerJoin, dataframe.LeftJoin, dataframe.RightJoin, dataframe.FullJoin, dataframe.SemiJoin, dataframe.AntiJoin}
 	orders := []dataframe.JoinOrder{dataframe.JoinOrderNone, dataframe.JoinOrderLeftRight, dataframe.JoinOrderRightLeft}
 	for _, sz := range sizes {
-		for _, card := range []int{3, 1 << 20} {
+		for _, card := range []int{3, 1 << 20, 1 << 40} {
 			lk := randKeys(r, sz[0], card)
 			rk := randKeys(r, sz[1], card)
 			for _, multi := range []bool{false, true} {

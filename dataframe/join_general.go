@@ -188,36 +188,64 @@ func joinByCodes(c *joinCodes, spec JoinSpec) (lIdx, rIdx []int) {
 // keepProbe emits unmatched probe rows (paired with -1) in place;
 // keepBuild appends the unmatched build rows at the end in build order.
 func probeCodes(probe, build []int32, card int, keepProbe, keepBuild bool) (pIdx, bIdx []int) {
-	// Group build rows by code: start[k]..start[k+1] indexes rows,
-	// which holds build row numbers in ascending order per code.
-	start := int32Scratch.get(card + 1)
-	defer int32Scratch.put(start)
-	clear(start)
-	nb := 0
-	for _, k := range build {
-		if k >= 0 {
-			start[k+1]++
-			nb++
-		}
+	// first[k] is the first build row with code k (-1 for none). When
+	// no code repeats, that is the whole table; otherwise the build rows
+	// are also grouped by code: start[k]..start[k+1] indexes rows, which
+	// holds build row numbers in ascending order per code.
+	first := int32Scratch.get(card)
+	defer int32Scratch.put(first)
+	for i := range first {
+		first[i] = -1
 	}
-	for k := 1; k <= card; k++ {
-		start[k] += start[k-1]
-	}
-	rows := int32Scratch.get(nb)
-	defer int32Scratch.put(rows)
-	cursor := int32Scratch.get(card)
-	defer int32Scratch.put(cursor)
-	copy(cursor, start[:card])
+	dup := false
 	for j, k := range build {
 		if k >= 0 {
-			rows[cursor[k]] = int32(j)
-			cursor[k]++
+			if first[k] < 0 {
+				first[k] = int32(j)
+			} else {
+				dup = true
+			}
+		}
+	}
+	var start, rows []int32
+	if dup {
+		start = int32Scratch.get(card + 1)
+		defer int32Scratch.put(start)
+		clear(start)
+		nb := 0
+		for _, k := range build {
+			if k >= 0 {
+				start[k+1]++
+				nb++
+			}
+		}
+		for k := 1; k <= card; k++ {
+			start[k] += start[k-1]
+		}
+		rows = int32Scratch.get(nb)
+		defer int32Scratch.put(rows)
+		cursor := int32Scratch.get(card)
+		defer int32Scratch.put(cursor)
+		copy(cursor, start[:card])
+		for j, k := range build {
+			if k >= 0 {
+				rows[cursor[k]] = int32(j)
+				cursor[k]++
+			}
 		}
 	}
 
 	np := len(probe)
 	count := func(lo, hi int) int {
 		total := 0
+		if !dup {
+			for _, k := range probe[lo:hi] {
+				if (k >= 0 && first[k] >= 0) || keepProbe {
+					total++
+				}
+			}
+			return total
+		}
 		for _, k := range probe[lo:hi] {
 			m := 0
 			if k >= 0 {
@@ -231,6 +259,21 @@ func probeCodes(probe, build []int32, card int, keepProbe, keepBuild bool) (pIdx
 		return total
 	}
 	fill := func(lo, hi, at int, pOut, bOut []int) {
+		if !dup {
+			for i := lo; i < hi; i++ {
+				k := probe[i]
+				j := int32(-1)
+				if k >= 0 {
+					j = first[k]
+				}
+				if j >= 0 || keepProbe {
+					pOut[at] = i
+					bOut[at] = int(j)
+					at++
+				}
+			}
+			return
+		}
 		for i := lo; i < hi; i++ {
 			k := probe[i]
 			if k >= 0 {
@@ -268,47 +311,16 @@ func probeCodes(probe, build []int32, card int, keepProbe, keepBuild bool) (pIdx
 		}
 	}
 
-	parts := 1
-	if np >= 64*1024 {
-		parts = min(runtime.GOMAXPROCS(0), 8)
-	}
-	bounds := make([]int, parts+1)
-	for p := range bounds {
-		bounds[p] = p * np / parts
-	}
+	parts := joinParts(np)
 	offs := make([]int, parts+1)
-	if parts == 1 {
-		offs[1] = count(0, np)
-	} else {
-		var wg sync.WaitGroup
-		for p := range parts {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				offs[p+1] = count(bounds[p], bounds[p+1])
-			}()
-		}
-		wg.Wait()
-	}
+	forParts(np, parts, func(p, lo, hi int) { offs[p+1] = count(lo, hi) })
 	for p := 1; p <= parts; p++ {
 		offs[p] += offs[p-1]
 	}
 	total := offs[parts] + len(unmatched)
 	pIdx = intScratch.get(total)
 	bIdx = intScratch.get(total)
-	if parts == 1 {
-		fill(0, np, 0, pIdx, bIdx)
-	} else {
-		var wg sync.WaitGroup
-		for p := range parts {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				fill(bounds[p], bounds[p+1], offs[p], pIdx, bIdx)
-			}()
-		}
-		wg.Wait()
-	}
+	forParts(np, parts, func(p, lo, hi int) { fill(lo, hi, offs[p], pIdx, bIdx) })
 	at := offs[parts]
 	for _, j := range unmatched {
 		pIdx[at] = -1
@@ -316,6 +328,32 @@ func probeCodes(probe, build []int32, card int, keepProbe, keepBuild bool) (pIdx
 		at++
 	}
 	return pIdx, bIdx
+}
+
+// joinParts is the number of parallel parts for a pass over n rows.
+func joinParts(n int) int {
+	if n < 64*1024 {
+		return 1
+	}
+	return min(runtime.GOMAXPROCS(0), 8)
+}
+
+// forParts runs fn over parts contiguous ranges of [0, n), in parallel
+// when there is more than one.
+func forParts(n, parts int, fn func(p, lo, hi int)) {
+	if parts == 1 {
+		fn(0, 0, n)
+		return
+	}
+	var wg sync.WaitGroup
+	for p := range parts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fn(p, p*n/parts, (p+1)*n/parts)
+		}()
+	}
+	wg.Wait()
 }
 
 // semiAntiByCodes returns the left rows whose key appears on the right
@@ -328,20 +366,32 @@ func semiAntiByCodes(c *joinCodes, semi bool) []int {
 			present[k] = true
 		}
 	}
-	n := 0
-	for _, k := range c.left {
-		if (k >= 0 && present[k]) == semi {
-			n++
+	keep := func(k int32) bool { return (k >= 0 && present[k]) == semi }
+	n := len(c.left)
+	parts := joinParts(n)
+	offs := make([]int, parts+1)
+	forParts(n, parts, func(p, lo, hi int) {
+		m := 0
+		for _, k := range c.left[lo:hi] {
+			if keep(k) {
+				m++
+			}
 		}
+		offs[p+1] = m
+	})
+	for p := 1; p <= parts; p++ {
+		offs[p] += offs[p-1]
 	}
-	out := intScratch.get(n)
-	at := 0
-	for i, k := range c.left {
-		if (k >= 0 && present[k]) == semi {
-			out[at] = i
-			at++
+	out := intScratch.get(offs[parts])
+	forParts(n, parts, func(p, lo, hi int) {
+		at := offs[p]
+		for i := lo; i < hi; i++ {
+			if keep(c.left[i]) {
+				out[at] = i
+				at++
+			}
 		}
-	}
+	})
 	return out
 }
 
