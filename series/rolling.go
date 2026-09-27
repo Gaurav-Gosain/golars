@@ -450,27 +450,68 @@ func (r *meanReducer) result(count int) float64 {
 	return r.total / float64(count)
 }
 
+// varReducer is polars' rolling variance: a Welford state updated one
+// value at a time (weight, mean and the sum of squared deviations dp).
+// Non-finite values enter as 0 and make the window NaN, and a window
+// with no more values than ddof is null. Following the same update
+// order as polars also reproduces its overflow results (inf, NaN).
 type varReducer struct {
-	sum, sumSq float64
-	ddof       int
+	weight, mean, dp float64
+	nonFinite        int
+	ddof             int
 }
 
-func (r *varReducer) reset() { r.sum, r.sumSq = 0, 0 }
+func (r *varReducer) reset() { *r = varReducer{ddof: r.ddof} }
+
 func (r *varReducer) add(v float64) {
-	r.sum += v
-	r.sumSq += v * v
-}
-func (r *varReducer) remove(v float64) {
-	r.sum -= v
-	r.sumSq -= v * v
-}
-func (r *varReducer) result(count int) float64 {
-	if count < r.ddof+1 {
-		return math.NaN()
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		r.nonFinite++
+		v = 0
 	}
-	mean := r.sum / float64(count)
-	num := r.sumSq - float64(count)*mean*mean
-	return num / float64(count-r.ddof)
+	w := r.weight + 1
+	delta := v - r.mean
+	mean := r.mean + delta/w
+	r.dp += float64((v - mean) * delta) // float64() blocks FMA fusion
+	r.weight, r.mean = w, mean
+	r.clearZeroWeight()
+}
+
+func (r *varReducer) remove(v float64) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		r.nonFinite--
+		v = 0
+	}
+	w := r.weight - 1
+	delta := v - r.mean
+	mean := r.mean - delta/w
+	r.dp -= float64((v - mean) * delta)
+	r.weight, r.mean = w, mean
+	r.clearZeroWeight()
+}
+
+func (r *varReducer) clearZeroWeight() {
+	if r.weight == 0 {
+		r.mean, r.dp = 0, 0
+	}
+}
+
+func (r *varReducer) result(count int) float64 {
+	v, _ := r.resultOK(count)
+	return v
+}
+
+func (r *varReducer) resultOK(int) (float64, bool) {
+	if r.weight <= float64(r.ddof) {
+		return 0, false
+	}
+	v := r.dp / (r.weight - float64(r.ddof))
+	if v < 0 {
+		v = 0
+	}
+	if r.nonFinite > 0 {
+		v = math.NaN()
+	}
+	return v, true
 }
 
 type stdReducer struct{ v varReducer }
@@ -479,11 +520,19 @@ func (r *stdReducer) reset()           { r.v.reset() }
 func (r *stdReducer) add(v float64)    { r.v.add(v) }
 func (r *stdReducer) remove(v float64) { r.v.remove(v) }
 func (r *stdReducer) result(count int) float64 {
-	vv := r.v.result(count)
-	if math.IsNaN(vv) {
-		return vv
-	}
-	return math.Sqrt(vv)
+	v, _ := r.resultOK(count)
+	return v
+}
+
+func (r *stdReducer) resultOK(count int) (float64, bool) {
+	v, ok := r.v.resultOK(count)
+	return math.Sqrt(v), ok
+}
+
+// nullableReducer is a rollingReducer whose result can be null (a
+// variance over no more values than ddof).
+type nullableReducer interface {
+	resultOK(count int) (float64, bool)
 }
 
 func rollingMeanReducer() rollingReducer { return &meanReducer{} }
@@ -531,25 +580,37 @@ func rollingReduceFusedWithReducer(
 	makeReducer func() rollingReducer,
 ) int {
 	r := makeReducer()
+	nr, nullable := r.(nullableReducer)
 	count := 0
 	nulls := 0
 	for i := range n {
-		if v, ok := get(i); ok {
-			r.add(v)
-			count++
-		}
+		// Remove the value leaving the window before adding the new
+		// one, as polars does: the order shows in overflow results.
 		if i >= w {
 			if v, ok := get(i - w); ok {
 				r.remove(v)
 				count--
 			}
 		}
-		if count >= mp {
-			out[i] = r.result(count)
-			setValidBit(validBits, i)
-		} else {
-			nulls++
+		if v, ok := get(i); ok {
+			r.add(v)
+			count++
 		}
+		if count < mp {
+			nulls++
+			continue
+		}
+		if nullable {
+			v, ok := nr.resultOK(count)
+			if !ok {
+				nulls++
+				continue
+			}
+			out[i] = v
+		} else {
+			out[i] = r.result(count)
+		}
+		setValidBit(validBits, i)
 	}
 	return nulls
 }

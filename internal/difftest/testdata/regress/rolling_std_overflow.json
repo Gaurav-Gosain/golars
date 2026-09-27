@@ -1,6 +1,6 @@
 {
   "name": "rolling_std_overflow",
-  "status": "known",
+  "status": "fixed",
   "note": "rolling_std over values near f64 max: golars NaN, polars +Inf (column \"o1\" row 2: golars NaN, polars +Inf)",
   "plan": {
     "seed": 200200,
