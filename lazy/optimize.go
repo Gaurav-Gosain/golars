@@ -639,6 +639,10 @@ func simplifyExpr(e expr.Expr) (expr.Expr, bool) {
 
 func simplifyNode(e expr.Expr) (expr.Expr, bool) {
 	switch n := e.Node().(type) {
+	case expr.FunctionNode:
+		if n.Name == "is_between" {
+			return rewriteIsBetween(n)
+		}
 	case expr.BinaryNode:
 		// Constant folding on two literals.
 		if ll, ok := n.Left.Node().(expr.LitNode); ok {
