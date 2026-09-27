@@ -159,6 +159,18 @@ func rowGroupIDs(cols []*series.Series, n int) (ids []int, first []int) {
 		}
 		return ids, first
 	}
+	for _, c := range cols {
+		if c.NumChunks() > 1 {
+			// Rows index the whole column: make the keys contiguous.
+			one := make([]*series.Series, len(cols))
+			for i, k := range cols {
+				one[i] = k.Rechunk()
+			}
+			defer releaseAll(one)
+			cols = one
+			break
+		}
+	}
 	arrs := make([]arrow.Array, len(cols))
 	fast := true
 	for i, c := range cols {

@@ -94,6 +94,29 @@ func computeGroupLayout(ctx context.Context, ec EvalContext, keyCols []*series.S
 
 // groupIDsFor assigns first-seen group ids to every row.
 func groupIDsFor(keyCols []*series.Series, height int) ([]int, int) {
+	multi := false
+	for _, kc := range keyCols {
+		if kc.NumChunks() > 1 {
+			multi = true
+		}
+	}
+	if multi {
+		// The fast paths index the first chunk by row, so multi-chunk
+		// keys are made contiguous first. Rechunk can leave several
+		// chunks (dictionaries that do not concatenate); those go
+		// through the generic chunk-aware path.
+		one := make([]*series.Series, len(keyCols))
+		for i, k := range keyCols {
+			one[i] = k.Rechunk()
+		}
+		defer releaseAll(one)
+		keyCols = one
+		for _, kc := range keyCols {
+			if kc.NumChunks() > 1 {
+				return genericGroupIDs(keyCols, height)
+			}
+		}
+	}
 	if len(keyCols) == 1 && keyCols[0].NumChunks() == 1 {
 		if ids, n, ok := singleKeyIDs(keyCols[0].Chunk(0), height); ok {
 			return ids, n
@@ -102,24 +125,44 @@ func groupIDsFor(keyCols []*series.Series, height int) ([]int, int) {
 	if dataframe.SupportedKeyTuple(keyCols) {
 		return assignOverGroupsBinary(keyCols, height)
 	}
+	return genericGroupIDs(keyCols, height)
+}
+
+// genericGroupIDs keys rows by their rendered values. It reads every
+// chunk of the key columns.
+func genericGroupIDs(keyCols []*series.Series, height int) ([]int, int) {
 	gids := make([]int, height)
 	table := make(map[string]int)
-	chunks := make([]arrow.Array, len(keyCols))
+	type cursor struct {
+		chunks []arrow.Array
+		ci, off int
+	}
+	curs := make([]cursor, len(keyCols))
 	for i, kc := range keyCols {
-		chunks[i] = kc.Chunk(0)
+		curs[i] = cursor{chunks: kc.Chunks()}
 	}
 	var buf []byte
 	for r := range height {
 		buf = buf[:0]
-		for _, c := range chunks {
-			if c.IsNull(r) {
+		for k := range curs {
+			cu := &curs[k]
+			for cu.ci < len(cu.chunks) && r-cu.off >= cu.chunks[cu.ci].Len() {
+				cu.off += cu.chunks[cu.ci].Len()
+				cu.ci++
+			}
+			if cu.ci >= len(cu.chunks) {
+				buf = append(buf, 0, 0x1f)
+				continue
+			}
+			c, i := cu.chunks[cu.ci], r-cu.off
+			if c.IsNull(i) {
 				buf = append(buf, 0)
 			} else {
 				buf = append(buf, 1)
-				if raw, ok := physicalKeyBytes(c, r); ok {
+				if raw, ok := physicalKeyBytes(c, i); ok {
 					buf = append(buf, raw...)
 				} else {
-					buf = appendFallbackKey(buf, series.ValueAt(c, r))
+					buf = appendFallbackKey(buf, series.ValueAt(c, i))
 				}
 			}
 			buf = append(buf, 0x1f)

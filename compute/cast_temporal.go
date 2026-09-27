@@ -100,6 +100,15 @@ func castToSmallInt(s *series.Series, to dtype.DType, name string, mem memory.Al
 	}
 	vals := make([]int64, n)
 	valid := make([]bool, n)
+	// Integer-backed inputs are widened once, not per row.
+	var pv []int64
+	switch arr.(type) {
+	case *array.Float64, *array.Float32, *array.Boolean, *array.Uint64:
+	default:
+		if pv = physicalValues(arr); pv == nil && n > 0 {
+			return nil, fmt.Errorf("%w: cast %s to %s", ErrUnsupportedDType, s.DType(), to)
+		}
+	}
 	for i := range n {
 		if arr.IsNull(i) {
 			continue
@@ -129,10 +138,6 @@ func castToSmallInt(s *series.Series, to dtype.DType, name string, mem memory.Al
 			}
 			v = int64(u)
 		default:
-			pv := physicalValues(arr)
-			if pv == nil {
-				return nil, fmt.Errorf("%w: cast %s to %s", ErrUnsupportedDType, s.DType(), to)
-			}
 			v = pv[i]
 		}
 		if v < lo || v > hi {

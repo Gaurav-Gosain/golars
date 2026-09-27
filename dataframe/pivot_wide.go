@@ -132,7 +132,15 @@ func (df *DataFrame) Pivot(ctx context.Context, index []string, on string, value
 			defer fill.Release()
 		}
 	}
-	onArr := firstChunk(onCol)
+	// colFirst indexes the whole column, so labels come from a
+	// contiguous copy (a multi-chunk column would read the wrong row
+	// or past the first chunk).
+	onArr, err := onCol.Consolidated()
+	if err != nil {
+		releaseAll(out)
+		return nil, err
+	}
+	defer onArr.Release()
 	cells := make([][]int, len(colFirst))
 	for c := range cells {
 		cells[c] = make([]int, len(rowFirst))
