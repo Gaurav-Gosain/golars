@@ -66,7 +66,32 @@ func (df *DataFrame) JoinWhere(ctx context.Context, right *DataFrame, predicates
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return jw.buildOutput(ctx, li, ri, compute.PoolingMem(cfg.alloc))
+	out, err := jw.buildOutput(ctx, li, ri, compute.PoolingMem(cfg.alloc))
+	intScratch.put(li)
+	intScratch.put(ri)
+	return out, err
+}
+
+// appendPair appends i to l and j to r. Growth doubles through
+// intScratch (power-of-two capacities), so the buffers of a large
+// match set are recycled across calls instead of reallocated at every
+// growth step.
+func appendPair(l, r []int, i, j int) ([]int, []int) {
+	if len(l) == cap(l) || len(r) == cap(r) {
+		l, r = growPair(l), growPair(r)
+	}
+	return append(l, i), append(r, j)
+}
+
+func growPair(s []int) []int {
+	if len(s) < cap(s) {
+		return s
+	}
+	n := max(2*cap(s), 256)
+	g := intScratch.get(n)[:len(s)]
+	copy(g, s)
+	intScratch.put(s)
+	return g
 }
 
 type jwColRef struct {
@@ -411,11 +436,16 @@ func runRowChunks(ctx context.Context, n int, work func(lo, hi int) ([]int, []in
 	for _, p := range parts {
 		total += len(p.l)
 	}
-	li := make([]int, 0, total)
-	ri := make([]int, 0, total)
+	if total == 0 {
+		return nil, nil
+	}
+	li := intScratch.get(total)[:0]
+	ri := intScratch.get(total)[:0]
 	for _, p := range parts {
 		li = append(li, p.l...)
 		ri = append(ri, p.r...)
+		intScratch.put(p.l)
+		intScratch.put(p.r)
 	}
 	return li, ri
 }
@@ -795,8 +825,7 @@ func ieJoin(ctx context.Context, lrows, rrows []int, p1, p2 jwPred, rest residua
 						word &= word - 1
 						i := lrows[cOrder[slot]]
 						if len(rest) == 0 || rest.ok(i, j) {
-							li = append(li, i)
-							ri = append(ri, j)
+							li, ri = appendPair(li, ri, i, j)
 						}
 					}
 				}
