@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime/debug"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -155,7 +157,21 @@ func ReadFile(ctx context.Context, path string, opts ...Option) (*dataframe.Data
 		return nil, fmt.Errorf("parquet: open %q: %w", path, err)
 	}
 	defer m.Close()
-	return ReadBytes(ctx, m.Data, opts...)
+	return readGuarded(ctx, m.Data, opts)
+}
+
+// readGuarded reads a possibly memory mapped file. A memory fault on the
+// calling goroutine (the file shrank while mapped) becomes an error;
+// decode workers and the reader handed to pqarrow guard themselves.
+func readGuarded(ctx context.Context, b []byte, opts []Option) (df *dataframe.DataFrame, err error) {
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	defer func() {
+		if errors.Is(err, mmapfile.ErrFault) && !strings.HasPrefix(err.Error(), "parquet:") {
+			err = fmt.Errorf("parquet: read: %w", err)
+		}
+	}()
+	defer mmapfile.Recover(&err)
+	return ReadBytes(ctx, b, opts...)
 }
 
 // ReadURL fetches parquet from an http(s) URL and reads it into a

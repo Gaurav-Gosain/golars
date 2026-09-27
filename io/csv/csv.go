@@ -9,13 +9,13 @@ package csv
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"runtime/debug"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -131,9 +131,24 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 func readBytes(ctx context.Context, data []byte, cfg config) (*dataframe.DataFrame, error) {
 	df, err := readNative(ctx, data, cfg)
 	if errors.Is(err, errFallback) {
-		return readArrow(ctx, bytes.NewReader(data), cfg)
+		return readArrow(ctx, mmapfile.NewReader(data), cfg)
 	}
 	return df, err
+}
+
+// readGuarded parses data that may be a memory mapping. If the file
+// shrinks while it is read, the resulting memory fault becomes an error
+// instead of crashing the process (parse workers re-raise their faults
+// here).
+func readGuarded(ctx context.Context, data []byte, cfg config) (df *dataframe.DataFrame, err error) {
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	defer func() {
+		if errors.Is(err, mmapfile.ErrFault) {
+			err = fmt.Errorf("csv: read: %w", err)
+		}
+	}()
+	defer mmapfile.Recover(&err)
+	return readBytes(ctx, data, cfg)
 }
 
 // readAll reads r fully, presizing the buffer when the size is known.
@@ -275,7 +290,7 @@ func ReadFile(ctx context.Context, path string, opts ...Option) (*dataframe.Data
 			return nil, fmt.Errorf("csv: open %q: %w", path, err)
 		}
 		defer m.Close()
-		return readBytes(ctx, m.Data, cfg)
+		return readGuarded(ctx, m.Data, cfg)
 	}
 	f, err := os.Open(path)
 	if err != nil {

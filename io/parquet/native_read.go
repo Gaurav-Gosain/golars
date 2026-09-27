@@ -1,7 +1,6 @@
 package parquet
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -26,6 +25,7 @@ import (
 	pqschema "github.com/apache/arrow-go/v18/parquet/schema"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/internal/mmapfile"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -578,13 +578,14 @@ type chunkDecoder struct {
 }
 
 // sliceReader is an in-memory (often memory mapped) input. The native
-// reader decodes pages straight out of b.
+// reader decodes pages straight out of b; everything else (footer,
+// pqarrow columns) reads through the fault-safe mmapfile.Reader.
 type sliceReader struct {
-	*bytes.Reader
+	*mmapfile.Reader
 	b []byte
 }
 
-func newSliceReader(b []byte) *sliceReader { return &sliceReader{Reader: bytes.NewReader(b), b: b} }
+func newSliceReader(b []byte) *sliceReader { return &sliceReader{Reader: mmapfile.NewReader(b), b: b} }
 
 // decoderPool keeps worker scratch buffers warm across reads. Fresh
 // buffers cost a page fault per 16 KiB on first touch, which showed up
@@ -603,14 +604,7 @@ func grow(b []byte, n int) []byte {
 func (d *chunkDecoder) safeDecode(t *colTask) (err error) {
 	if _, ok := d.r.(*sliceReader); ok {
 		defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
-		defer func() {
-			if p := recover(); p != nil {
-				if _, fault := p.(interface{ Addr() uintptr }); !fault {
-					panic(p)
-				}
-				err = fmt.Errorf("parquet: input changed while reading: %v", p)
-			}
-		}()
+		defer mmapfile.Recover(&err)
 	}
 	return d.decode(t)
 }

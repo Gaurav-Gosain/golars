@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"unicode/utf8"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/dtype"
+	"github.com/Gaurav-Gosain/golars/internal/mmapfile"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -311,9 +313,21 @@ func parallelFor(n int, f func(i int)) {
 	}
 	var next atomic.Int64
 	var wg sync.WaitGroup
+	var fault atomic.Pointer[error]
 	for range workers {
 		wg.Go(func() {
-			for {
+			// The input may be a memory mapping. A fault (the file
+			// shrank) is recovered here and re-raised in the caller,
+			// whose guard turns it into an error.
+			var err error
+			defer func() {
+				if err != nil {
+					fault.CompareAndSwap(nil, &err)
+				}
+			}()
+			defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+			defer mmapfile.Recover(&err)
+			for fault.Load() == nil {
 				i := int(next.Add(1)) - 1
 				if i >= n {
 					return
@@ -323,7 +337,18 @@ func parallelFor(n int, f func(i int)) {
 		})
 	}
 	wg.Wait()
+	if err := fault.Load(); err != nil {
+		panic(faultPanic{*err})
+	}
 }
+
+// faultPanic carries a memory fault from a worker to the goroutine that
+// started it. It satisfies mmapfile.IsFault.
+type faultPanic struct{ err error }
+
+func (f faultPanic) Error() string { return f.err.Error() }
+func (f faultPanic) Unwrap() error { return f.err }
+func (f faultPanic) Addr() uintptr { return 0 }
 
 // fixedBuffers holds the per-column fixed-width output buffers shared by
 // all parse tasks (each task writes its own row range).
