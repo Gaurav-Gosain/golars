@@ -498,11 +498,13 @@ func commandItems(word string) []Item {
 				continue
 			}
 			snippet := syntax.Snippet(&spec)
+			detail := spec.Signature
 			if n != spec.Name {
 				snippet = n + strings.TrimPrefix(snippet, spec.Name)
+				detail = "alias of " + spec.Name + ": " + spec.Signature
 			}
 			out = append(out, Item{
-				Label: n, Kind: ItemCommand, Detail: spec.Signature, Doc: spec.Markdown(),
+				Label: n, Kind: ItemCommand, Detail: detail, Doc: spec.Markdown(),
 				Insert: snippet, Snippet: strings.Contains(snippet, "$"),
 			})
 		}

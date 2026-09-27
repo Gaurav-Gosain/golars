@@ -2,658 +2,28 @@ package main
 
 import (
 	"encoding/json"
-	"net/url"
-	"os"
-	"path/filepath"
-	"runtime"
+	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 
-	"github.com/Gaurav-Gosain/golars/script"
-	"github.com/Gaurav-Gosain/golars/script/exprparse"
+	"github.com/Gaurav-Gosain/golars/script/analysis"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
-// --------------------------------------------------------------------
-// Position / range types + document slicing helpers
-// --------------------------------------------------------------------
-
-type position struct {
-	Line      uint32 `json:"line"`
-	Character uint32 `json:"character"`
-}
-
-type lspRange struct {
-	Start position `json:"start"`
-	End   position `json:"end"`
-}
-
-// lineAt returns the document's i-th logical line (UTF-8 bytes), or
-// "" if out of range. Callers should normalise the position's
-// Character via byteCol first.
-func (d *document) lineAt(i int) string {
-	if i < 0 || i >= len(d.lines) {
-		return ""
-	}
-	return d.lines[i]
-}
-
-// byteCol converts a UTF-16-code-unit column (LSP's default) to a
-// UTF-8 byte column within `line`. For ASCII content these are
-// identical; we do the conversion anyway because script identifiers
-// may include UTF-8 (e.g. column names set by the host).
-func byteCol(line string, utf16Col int) int {
-	if utf16Col <= 0 {
-		return 0
-	}
-	col := 0
-	for i, r := range line {
-		if col >= utf16Col {
-			return i
-		}
-		if r <= 0xFFFF {
-			col++
-		} else {
-			col += 2 // surrogate pair
-		}
-	}
-	return len(line)
-}
-
-// --------------------------------------------------------------------
-// Document analysis: one pass over the lines
-// --------------------------------------------------------------------
-
-type analysis struct {
-	// frames lists every NAME declared via `load PATH as NAME` up to
-	// (and including) the current line. Populated in lexical order.
-	frames []string
-	// diagnostics holds unknown commands / missing-arg findings.
-	diagnostics []diagnostic
-}
-
-func analyze(d *document) analysis {
-	out := analysis{}
-	for li, raw := range d.lines {
-		stmt := script.Normalize(raw)
-		if stmt == "" {
-			continue
-		}
-		parts := strings.Fields(stmt)
-		cmdTok := parts[0] // has leading '.'
-		cmdName := strings.TrimPrefix(cmdTok, ".")
-		spec := script.FindCommand(cmdName)
-		if spec == nil {
-			// Unknown command. Point the diagnostic at the command token.
-			startCol := indexOfToken(raw, cmdName)
-			out.diagnostics = append(out.diagnostics, diagnostic{
-				Range: lspRange{
-					Start: position{Line: uint32(li), Character: uint32(startCol)},
-					End:   position{Line: uint32(li), Character: uint32(startCol + len(cmdName))},
-				},
-				Severity: diagnosticSeverityError,
-				Source:   "golars",
-				Message:  script.UnknownCommand(cmdName).Error(),
-			})
-			continue
-		}
-		// Track `load PATH as NAME` and try to resolve the path; if
-		// it can't be found the user gets a hint in the sign column.
-		if spec.Name == "load" && len(parts) >= 2 {
-			if len(parts) >= 4 && strings.EqualFold(parts[2], "as") {
-				out.frames = append(out.frames, parts[3])
-			}
-			path := parts[1]
-			if !filepath.IsAbs(path) {
-				resolved := resolvePath(path, docDir(d))
-				if _, err := os.Stat(resolved); err != nil {
-					startCol := indexOfToken(raw, path)
-					out.diagnostics = append(out.diagnostics, diagnostic{
-						Range: lspRange{
-							Start: position{Line: uint32(li), Character: uint32(startCol)},
-							End:   position{Line: uint32(li), Character: uint32(startCol + len(path))},
-						},
-						Severity: diagnosticSeverityWarning,
-						Source:   "golars",
-						Message:  "file not found relative to script: " + path,
-					})
-				}
-			}
-		}
-		// Very light arity check: commands whose signature has a <>
-		// required arg must have at least one positional argument.
-		if hasRequiredArg(spec.Signature) && len(parts) < 2 {
-			startCol := indexOfToken(raw, cmdName)
-			out.diagnostics = append(out.diagnostics, diagnostic{
-				Range: lspRange{
-					Start: position{Line: uint32(li), Character: uint32(startCol)},
-					End:   position{Line: uint32(li), Character: uint32(startCol + len(cmdName))},
-				},
-				Severity: diagnosticSeverityWarning,
-				Source:   "golars",
-				Message:  "missing argument for " + spec.Name + ": " + spec.Signature,
-			})
-		}
-	}
-	return out
-}
-
-// indexOfToken finds the start of the first occurrence of `tok` in
-// `line`, or 0 if not found. Used to anchor diagnostics on the
-// command token rather than the leading whitespace.
-func indexOfToken(line, tok string) int {
-	if tok == "" {
-		return 0
-	}
-	if i := strings.Index(line, tok); i >= 0 {
-		return i
-	}
-	return 0
-}
-
-// hasRequiredArg returns true if the signature contains a <required>
-// placeholder past the command name.
-func hasRequiredArg(sig string) bool {
-	rest := sig
-	if sp := strings.IndexByte(rest, ' '); sp >= 0 {
-		rest = rest[sp+1:]
-	} else {
-		return false
-	}
-	return strings.ContainsRune(rest, '<')
-}
-
-// --------------------------------------------------------------------
-// publishDiagnostics
-// --------------------------------------------------------------------
-
-const (
-	diagnosticSeverityError   = 1
-	diagnosticSeverityWarning = 2
-)
-
-type diagnostic struct {
-	Range    lspRange `json:"range"`
-	Severity int      `json:"severity"`
-	Source   string   `json:"source,omitempty"`
-	Message  string   `json:"message"`
-}
-
-type publishDiagnosticsParams struct {
-	URI         string       `json:"uri"`
-	Diagnostics []diagnostic `json:"diagnostics"`
-}
-
-func (s *server) publishDiagnostics(d *document) {
-	a := analyze(d)
-	if a.diagnostics == nil {
-		a.diagnostics = []diagnostic{}
-	}
-	s.notify("textDocument/publishDiagnostics", publishDiagnosticsParams{
-		URI:         d.uri,
-		Diagnostics: a.diagnostics,
-	})
-}
-
-// --------------------------------------------------------------------
-// textDocument/completion
-// --------------------------------------------------------------------
-
-type completionParams struct {
-	TextDocument textDocumentIdentifier `json:"textDocument"`
-	Position     position               `json:"position"`
-}
+// -----------------------------------------------------------------
+// completion
+// -----------------------------------------------------------------
 
 type completionItem struct {
-	Label         string  `json:"label"`
-	Kind          int     `json:"kind,omitempty"` // LSP CompletionItemKind
-	Detail        string  `json:"detail,omitempty"`
-	Documentation *markup `json:"documentation,omitempty"`
-	InsertText    string  `json:"insertText,omitempty"`
-	SortText      string  `json:"sortText,omitempty"`
-	FilterText    string  `json:"filterText,omitempty"`
-}
-
-type markup struct {
-	Kind  string `json:"kind"` // "markdown" or "plaintext"
-	Value string `json:"value"`
-}
-
-// LSP CompletionItemKind values we reference. Keyword is the kind
-// clients use for language keywords: Neovim treats it as plain-text
-// insertion, whereas Function triggers paren auto-insertion. Variable
-// is the right choice for column names and staged frame names.
-const (
-	ciKindText     = 1
-	ciKindFunction = 3
-	ciKindModule   = 9
-	ciKindVariable = 6
-	ciKindKeyword  = 14
-	ciKindFile     = 17
-	ciKindFolder   = 19
-)
-
-func (s *server) handleCompletion(msg *rawMessage) {
-	var p completionParams
-	if err := json.Unmarshal(msg.Params, &p); err != nil {
-		s.reply(msg, []completionItem{})
-		return
-	}
-	doc := s.docs.get(p.TextDocument.URI)
-	if doc == nil {
-		s.reply(msg, []completionItem{})
-		return
-	}
-
-	line := doc.lineAt(int(p.Position.Line))
-	col := byteCol(line, int(p.Position.Character))
-	prefix := line[:col]
-
-	items := s.completionsFor(doc, prefix, int(p.Position.Line))
-	s.reply(msg, items)
-}
-
-// completionsFor picks the right completion set based on what's
-// already typed on the current line before the caret. cursorLine is
-// the zero-based line index, used to resolve the focused frame at
-// that cursor position (so `use NAME` statements above the cursor
-// affect which columns we suggest).
-func (s *server) completionsFor(doc *document, prefix string, cursorLine int) []completionItem {
-	trimmed := strings.TrimLeft(prefix, " \t")
-	// Cursor at the start of a command (no space yet).
-	if !strings.ContainsAny(trimmed, " \t") {
-		return commandCompletions(trimmed)
-	}
-	parts := strings.Fields(trimmed)
-	cmd := strings.TrimPrefix(parts[0], ".")
-	spec := script.FindCommand(cmd)
-	if spec == nil {
-		return nil
-	}
-	endsInSpace := strings.HasSuffix(prefix, " ") || strings.HasSuffix(prefix, "\t")
-	var current string
-	if !endsInSpace {
-		current = parts[len(parts)-1]
-	}
-	// argIdx is the 1-based index of the argument the cursor is on.
-	// parts[0] is the command itself; parts[1..] are args. When the
-	// line ends in whitespace we're starting a fresh arg after the
-	// last token.
-	argIdx := len(parts) - 1
-	if endsInSpace {
-		argIdx++
-	}
-	return argCompletionsAt(spec, spec.Name, parts, argIdx, current, doc, cursorLine)
-}
-
-// argCompletionsAt dispatches on (command, argIdx) so that each
-// positional slot gets exactly the right completion kind. Treating
-// every arg uniformly via ArgKind is too coarse for commands like
-// `join NAME on KEY TYPE` or `load PATH as NAME` where different
-// positions expect different vocabularies.
-func argCompletionsAt(spec *script.CommandSpec, cmd string, _ []string, argIdx int, current string, doc *document, cursorLine int) []completionItem {
-	switch cmd {
-	case "with", "filter", "select", "groupby":
-		if items, isExpr := expressionCompletions(current); isExpr {
-			if items == nil {
-				items = append(freeFunctionCompletions(exprWordTail(current)), columnCompletions(doc, cmd, current, cursorLine)...)
-			}
-			return items
-		}
-	}
-	switch cmd {
-	case "load":
-		// load PATH [as NAME]
-		switch argIdx {
-		case 1:
-			return pathCompletions(current, doc)
-		case 2:
-			return []completionItem{{Label: "as", Kind: ciKindKeyword, Detail: "stage frame under a name"}}
-		}
-	case "save", "source":
-		if argIdx == 1 {
-			return pathCompletions(current, doc)
-		}
-	case "use", "drop_frame":
-		if argIdx == 1 {
-			return frameCompletions(current, doc)
-		}
-	case "sort":
-		// sort <col> [asc|desc]
-		switch argIdx {
-		case 1:
-			return columnCompletions(doc, cmd, current, cursorLine)
-		case 2:
-			return []completionItem{
-				{Label: "asc", Kind: ciKindKeyword, Detail: "ascending (default)"},
-				{Label: "desc", Kind: ciKindKeyword, Detail: "descending"},
-			}
-		}
-	case "join":
-		// join <path|NAME> on <key> [inner|left|cross]
-		switch argIdx {
-		case 1:
-			// Target frame first. Include staged frames and file paths
-			// so both forms of join work.
-			out := frameCompletions(current, doc)
-			out = append(out, pathCompletions(current, doc)...)
-			return out
-		case 2:
-			return []completionItem{{Label: "on", Kind: ciKindKeyword, Detail: "on <key>"}}
-		case 3:
-			// The key is usually a column name common to both sides.
-			// Offering the focused frame's columns is the best we can
-			// do without running the join.
-			return columnCompletions(doc, cmd, current, cursorLine)
-		case 4:
-			return []completionItem{
-				{Label: "inner", Kind: ciKindKeyword, Detail: "inner join (default)"},
-				{Label: "left", Kind: ciKindKeyword, Detail: "left outer join"},
-				{Label: "cross", Kind: ciKindKeyword, Detail: "cartesian cross join"},
-			}
-		}
-	case "select", "drop":
-		// Comma-separated column list; always offer columns.
-		return columnCompletions(doc, cmd, current, cursorLine)
-	case "filter":
-		// filter <col> <op> <value> [and|or ...]
-		// We can't reliably tell "col" from "value" position without a
-		// real parser; offering columns everywhere is fine: the user
-		// mostly types values freely, and the column list is still a
-		// handy reference.
-		return columnCompletions(doc, cmd, current, cursorLine)
-	case "groupby":
-		// groupby <keys> <col:op[:alias]>...
-		return columnCompletions(doc, cmd, current, cursorLine)
-	case "limit", "head", "tail", "show", "sample", "glimpse":
-		// numeric arg: no useful suggestions
-		return nil
-	}
-	// Fall back to the spec's ArgKind for commands we haven't
-	// special-cased above.
-	switch spec.ArgKind {
-	case "path":
-		return pathCompletions(current, doc)
-	case "frame":
-		return frameCompletions(current, doc)
-	case "column":
-		return columnCompletions(doc, cmd, current, cursorLine)
-	}
-	return nil
-}
-
-func commandCompletions(partial string) []completionItem {
-	// Accept `.xxx` or bare `xxx`; the label keeps the user's dot.
-	hasDot := strings.HasPrefix(partial, ".")
-	out := make([]completionItem, 0, len(script.Commands))
-	for _, name := range script.CompleteCommand(partial) {
-		c := script.FindCommand(name)
-		label := name
-		if hasDot {
-			label = "." + name
-		}
-		detail := c.Signature
-		if name != c.Name {
-			detail = "alias of " + c.Name + ": " + c.Signature
-		}
-		// Kind=Keyword (not Function) so clients don't auto-insert
-		// parens or treat the label as a callable identifier.
-		out = append(out, completionItem{
-			Label:         label,
-			Kind:          ciKindKeyword,
-			Detail:        detail,
-			Documentation: &markup{Kind: "markdown", Value: c.Markdown()},
-			InsertText:    name,
-			SortText:      c.Category + name,
-		})
-	}
-	return out
-}
-
-func pathCompletions(current string, doc *document) []completionItem {
-	dir, base := filepath.Split(current)
-	root := dir
-	if root == "" {
-		// Resolve relative paths against the directory of the open
-		// document. This matches how the REPL's `.source` and `.load`
-		// commands behave when invoked via `-run`.
-		if docDir := docDir(doc); docDir != "" {
-			root = docDir
-		} else {
-			root = "."
-		}
-	} else if !filepath.IsAbs(root) {
-		if docDir := docDir(doc); docDir != "" {
-			root = filepath.Join(docDir, root)
-		}
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil
-	}
-	out := make([]completionItem, 0, len(entries))
-	for _, e := range entries {
-		name := e.Name()
-		if base != "" && !strings.HasPrefix(name, base) {
-			continue
-		}
-		kind := ciKindFile
-		label := name
-		if e.IsDir() {
-			kind = ciKindFolder
-			label = name + "/"
-		}
-		out = append(out, completionItem{Label: label, Kind: kind, InsertText: label})
-	}
-	return out
-}
-
-// exprWordTail returns the identifier-and-dot run that ends current,
-// the part of an expression the cursor is completing.
-func exprWordTail(current string) string {
-	i := len(current)
-	for i > 0 {
-		c := current[i-1]
-		if c == '.' || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
-			i--
-			continue
-		}
-		break
-	}
-	return current[i:]
-}
-
-// expressionCompletions completes inside the expression language.
-// After `dt.` or `x.dt.` it offers the namespace's functions; after
-// `x.` the expression methods plus namespaces. isExpr is false when
-// the token is not part of an expression (for example a groupby
-// `col:op` spec); a nil list with isExpr true asks for the default
-// set of columns and free functions.
-func expressionCompletions(current string) (items []completionItem, isExpr bool) {
-	if strings.Contains(current, ":") && !strings.ContainsAny(current, "(=") {
-		return nil, false
-	}
-	tail := exprWordTail(current)
-	dot := strings.LastIndex(tail, ".")
-	if dot < 0 {
-		return nil, true
-	}
-	head := tail[:dot]
-	if i := strings.LastIndex(head, "."); i >= 0 {
-		head = head[i+1:]
-	}
-	partial := tail[dot+1:]
-	fns := exprparse.Functions()
-	ns := ""
-	if _, isNS := fns[head]; isNS && head != "free" && head != "" {
-		ns = head
-	}
-	for _, name := range fns[ns] {
-		if !strings.HasPrefix(name, partial) {
-			continue
-		}
-		detail := "expression method"
-		if ns != "" {
-			detail = ns + " namespace"
-		}
-		items = append(items, completionItem{Label: name, Kind: ciKindFunction, Detail: detail})
-	}
-	if ns == "" {
-		for name := range fns {
-			if name != "" && name != "free" && strings.HasPrefix(name, partial) {
-				items = append(items, completionItem{Label: name, Kind: ciKindModule, Detail: "namespace", SortText: "0" + name})
-			}
-		}
-	}
-	return items, true
-}
-
-// freeFunctionCompletions lists the top-level functions and
-// namespaces that start with prefix.
-func freeFunctionCompletions(prefix string) []completionItem {
-	if prefix == "" {
-		return nil
-	}
-	fns := exprparse.Functions()
-	var items []completionItem
-	for _, name := range fns["free"] {
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		items = append(items, completionItem{Label: name, Kind: ciKindFunction, Detail: "function", SortText: "z" + name})
-	}
-	for name := range fns {
-		if name != "" && name != "free" && strings.HasPrefix(name, prefix) {
-			items = append(items, completionItem{Label: name, Kind: ciKindModule, Detail: "namespace", SortText: "z" + name})
-		}
-	}
-	return items
-}
-
-// columnCompletions offers real column names drawn from the focused
-// frame's source file at the cursor position. For `groupby`, each
-// column is surfaced both as a bare name and as a `col:op` starter
-// so the user can finish the agg spec without retyping the column.
-func columnCompletions(doc *document, cmd, current string, cursorLine int) []completionItem {
-	state := framesAtLine(doc, cursorLine)
-	// Strip comma prefix so `a,b,c` + typing completes the last item.
-	partial := current
-	if i := strings.LastIndexAny(partial, ", \t"); i >= 0 {
-		partial = partial[i+1:]
-	}
-
-	out := make([]completionItem, 0, len(state.focus.cols))
-	for _, col := range state.focus.cols {
-		if partial != "" && !strings.HasPrefix(col, partial) {
-			continue
-		}
-		detail := "column"
-		if state.focusName != "" {
-			detail = "column of `" + state.focusName + "`"
-		}
-		out = append(out, completionItem{
-			Label:      col,
-			Kind:       ciKindVariable,
-			Detail:     detail,
-			InsertText: col,
-		})
-	}
-
-	// For groupby, also expose `col:sum`, `col:mean`, `col:count`
-	// starters per column so the aggregation spec rolls off the
-	// tongue. The user still needs to finish `:alias` by hand.
-	if cmd == "groupby" && len(state.focus.cols) > 0 {
-		ops := []string{"sum", "mean", "min", "max", "count", "null_count", "first", "last"}
-		for _, col := range state.focus.cols {
-			if partial != "" && !strings.HasPrefix(col, partial) {
-				continue
-			}
-			for _, op := range ops {
-				out = append(out, completionItem{
-					Label:      col + ":" + op,
-					Kind:       ciKindText,
-					Detail:     "aggregation",
-					InsertText: col + ":" + op,
-					SortText:   "z" + col + op, // after bare column entries
-				})
-			}
-		}
-		// No columns detected → fall back to a format hint so the user
-		// at least sees the col:op:alias shape.
-		if len(state.focus.cols) == 0 {
-			out = append(out, completionItem{
-				Label:  "col:op:alias",
-				Kind:   ciKindText,
-				Detail: "aggregation spec",
-				Documentation: &markup{Kind: "markdown",
-					Value: "`col:op[:alias]`: ops: `sum`, `mean`, `min`, `max`, `count`, `null_count`, `first`, `last`."},
-			})
-		}
-	}
-	return out
-}
-
-// frameCompletions returns names declared via `load PATH as NAME` in
-// the same document up to the current cursor. We don't cross-reference
-// `use NAME` statements since they consume from the registry.
-func frameCompletions(current string, doc *document) []completionItem {
-	a := analyze(doc)
-	out := make([]completionItem, 0, len(a.frames))
-	seen := make(map[string]bool, len(a.frames))
-	for _, n := range a.frames {
-		if seen[n] {
-			continue
-		}
-		seen[n] = true
-		if current != "" && !strings.HasPrefix(n, current) {
-			continue
-		}
-		out = append(out, completionItem{
-			Label:      n,
-			Kind:       ciKindVariable,
-			Detail:     "staged frame",
-			InsertText: n,
-		})
-	}
-	return out
-}
-
-// docDir parses a `file://…` URI into a local directory path; returns
-// "" if the URI is non-file or unparseable. Windows file URIs follow
-// the `file:///C:/...` shape where url.URL.Path keeps the leading
-// slash; strip it so filepath.Dir returns a native drive-prefixed
-// path rather than `/C:/...`.
-func docDir(d *document) string {
-	u, err := url.Parse(d.uri)
-	if err != nil || u.Scheme != "file" {
-		return ""
-	}
-	p := u.Path
-	if runtime.GOOS == "windows" && len(p) >= 3 && p[0] == '/' && p[2] == ':' {
-		p = p[1:]
-	}
-	return filepath.Dir(p)
-}
-
-// --------------------------------------------------------------------
-// textDocument/inlayHint
-//
-// We surface the "shape" of each frame the script brings into
-// existence: row × col counts at end of `load` lines, and a column
-// count at end of `use` lines. Row counts are capped at 8 MiB of
-// source so a script referencing a 2 GiB CSV doesn't stall the LSP.
-// --------------------------------------------------------------------
-
-type inlayHintParams struct {
-	TextDocument textDocumentIdentifier `json:"textDocument"`
-	Range        lspRange               `json:"range"`
-}
-
-type inlayHint struct {
-	Position     position       `json:"position"`
-	Label        string         `json:"label"`
-	Kind         int            `json:"kind,omitempty"` // 1 = Type, 2 = Parameter
-	PaddingLeft  bool           `json:"paddingLeft,omitempty"`
-	PaddingRight bool           `json:"paddingRight,omitempty"`
-	Tooltip      *markupContent `json:"tooltip,omitempty"`
+	Label            string         `json:"label"`
+	Kind             int            `json:"kind,omitempty"`
+	Detail           string         `json:"detail,omitempty"`
+	Documentation    *markupContent `json:"documentation,omitempty"`
+	TextEdit         *textEdit      `json:"textEdit,omitempty"`
+	InsertTextFormat int            `json:"insertTextFormat,omitempty"`
+	SortText         string         `json:"sortText,omitempty"`
+	FilterText       string         `json:"filterText,omitempty"`
 }
 
 type markupContent struct {
@@ -661,315 +31,644 @@ type markupContent struct {
 	Value string `json:"value"`
 }
 
-const inlayHintKindType = 1
-
-func (s *server) handleInlayHint(msg *rawMessage) {
-	var p inlayHintParams
-	if err := json.Unmarshal(msg.Params, &p); err != nil {
-		s.reply(msg, []inlayHint{})
-		return
-	}
-	doc := s.docs.get(p.TextDocument.URI)
-	if doc == nil {
-		s.reply(msg, []inlayHint{})
-		return
-	}
-	hints := collectInlayHints(doc, p.Range)
-	if hints == nil {
-		hints = []inlayHint{}
-	}
-	s.reply(msg, hints)
+type textEdit struct {
+	Range   lspRange `json:"range"`
+	NewText string   `json:"newText"`
 }
 
-// collectInlayHints walks the document and emits one hint per
-// shape-transforming statement within the requested range. Hints are
-// anchored at the end-of-line column so they render as trailing
-// annotations. Side-effect commands (show / schema / describe /
-// save / frames / ...) are skipped because they don't change the
-// focused frame's shape.
-//
-// Additionally, a comment line ending in `^?` (Twoslash-style) emits
-// a richer probe hint listing the focused frame's columns in full -
-// a cheap way for the user to peek at the schema without running
-// `.schema` in the REPL.
-func collectInlayHints(d *document, rng lspRange) []inlayHint {
-	if uint64(rng.Start.Line) >= uint64(len(d.lines)) || rng.Start.Line > rng.End.Line ||
-		(rng.Start.Line == rng.End.Line && rng.Start.Character > rng.End.Character) {
-		return nil
-	}
-	lo := int(rng.Start.Line)
-	hi := int(rng.End.Line)
-	if lo < 0 {
-		lo = 0
-	}
-	if hi >= len(d.lines) {
-		hi = len(d.lines) - 1
-	}
-	dir := docDir(d)
-
-	// Walk from the top so state is correct even when the range
-	// starts mid-document. State-updating is decoupled from hint
-	// emission: we only emit for lines inside [lo, hi].
-	state := frameState{staged: make(map[string]frameShape)}
-	hints := make([]inlayHint, 0, hi-lo+1)
-
-	for li := 0; li <= hi && li < len(d.lines); li++ {
-		raw := d.lines[li]
-		stmt := script.Normalize(raw)
-		if stmt == "" {
-			// Blank or comment-only: check for the ^? probe.
-			if li >= lo && isProbeDirective(raw) {
-				if label := probeLabel(&state); label != "" {
-					col := strings.Index(raw, "^?")
-					if col < 0 {
-						col = len(raw)
-					}
-					hint := inlayHint{
-						Position:    position{Line: uint32(li), Character: uint32(col + len("^?"))},
-						Label:       label,
-						Kind:        inlayHintKindType,
-						PaddingLeft: true,
-
-						Tooltip: &markupContent{Kind: "plaintext", Value: label}}
-					hints = append(hints, hint)
-				}
-			}
-			continue
-		}
-
-		// Apply the statement to the running state machine.
-		applyStmt(&state, dir, stmt)
-
-		parts := strings.Fields(stmt)
-		cmd := canonicalCommand(parts[0])
-		if !isShapeStatement(cmd) {
-			continue
-		}
-		// For `load PATH as NAME` the focus is unchanged: the
-		// relevant shape is the newly-staged frame. Surface that
-		// instead so the hint describes what the statement actually
-		// produced.
-		shape := state.focus
-		if (cmd == "load" || strings.HasPrefix(cmd, "scan_")) && len(parts) >= 4 && strings.EqualFold(parts[2], "as") {
-			if staged, ok := state.staged[parts[3]]; ok {
-				shape = staged
-			}
-		}
-		if len(shape.cols) == 0 && shape.rows == rowsUnknown {
-			continue
-		}
-		if li < lo {
-			continue
-		}
-		hints = append(hints, inlayHint{
-			Position:    position{Line: uint32(li), Character: uint32(len(raw))},
-			Label:       formatShape(shape.rows, len(shape.cols)),
-			Kind:        inlayHintKindType,
-			PaddingLeft: true,
-		})
-	}
-	return hints
+// LSP CompletionItemKind values.
+var itemKinds = map[analysis.ItemKind]int{
+	analysis.ItemCommand:   14, // Keyword
+	analysis.ItemKeyword:   14,
+	analysis.ItemColumn:    5, // Field
+	analysis.ItemFrame:     7, // Class
+	analysis.ItemFile:      17,
+	analysis.ItemFolder:    19,
+	analysis.ItemFunction:  3,
+	analysis.ItemMethod:    2,
+	analysis.ItemNamespace: 9, // Module
+	analysis.ItemParam:     6, // Variable
+	analysis.ItemValue:     12,
 }
 
-// isShapeStatement returns true for commands that produce or
-// transform the focused frame's shape. cmd is a canonical name.
-func isShapeStatement(cmd string) bool {
-	switch cmd {
-	case "load", "use", "filter", "sort", "limit", "select", "drop",
-		"groupby", "join", "with", "unique", "drop_null", "sample",
-		"top_k", "bottom_k", "unpivot", "rename", "with_row_index",
-		"scan_csv", "scan_parquet", "scan_ipc", "scan_json",
-		"scan_ndjson", "scan_auto":
-		return true
+// sortRank orders completion kinds: columns first inside expressions.
+var sortRank = map[analysis.ItemKind]string{
+	analysis.ItemColumn: "0", analysis.ItemParam: "0", analysis.ItemFrame: "1", analysis.ItemCommand: "1",
+	analysis.ItemKeyword: "2", analysis.ItemFolder: "1", analysis.ItemFile: "1", analysis.ItemValue: "2",
+	analysis.ItemMethod: "3", analysis.ItemFunction: "3", analysis.ItemNamespace: "4",
+}
+
+func (s *server) completion(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	c := d.analysis().Complete(line, col)
+	items := make([]completionItem, 0, len(c.Items))
+	rg := d.rng(line, c.From, line, col)
+	for i, it := range c.Items {
+		ci := completionItem{
+			Label: it.Label, Kind: itemKinds[it.Kind], Detail: it.Detail,
+			SortText: sortRank[it.Kind] + fmt.Sprintf("%04d", i),
+		}
+		if it.Doc != "" {
+			ci.Documentation = &markupContent{Kind: "markdown", Value: it.Doc}
+		}
+		insert := it.Insert
+		if insert == "" {
+			insert = it.Label
+		}
+		ci.TextEdit = &textEdit{Range: rg, NewText: insert}
+		if it.Snippet {
+			ci.InsertTextFormat = 2
+		}
+		items = append(items, ci)
+	}
+	return map[string]any{"isIncomplete": false, "items": items}, nil
+}
+
+// -----------------------------------------------------------------
+// hover and signature help
+// -----------------------------------------------------------------
+
+func (s *server) hover(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	r := d.analysis()
+	md := r.Hover(line, col)
+	if md == "" {
+		if c := r.File.CommentAt(line); c != nil && isProbe(c.Text) {
+			md = probeText(r, line)
+		}
+	}
+	if md == "" {
+		return nil, nil
+	}
+	return map[string]any{"contents": markupContent{Kind: "markdown", Value: md}}, nil
+}
+
+func (s *server) signatureHelp(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	sig, found := d.analysis().SignatureAt(line, col)
+	if !found {
+		return nil, nil
+	}
+	label := sig.Info.Label()
+	var ps []map[string]any
+	pos := strings.IndexByte(label, '(') + 1
+	for _, p := range sig.Params {
+		i := strings.Index(label[pos:], p)
+		if i < 0 {
+			continue
+		}
+		start := pos + i
+		ps = append(ps, map[string]any{"label": []int{utf16Len(label[:start]), utf16Len(label[:start+len(p)])}})
+		pos = start + len(p)
+	}
+	info := map[string]any{"label": label, "parameters": ps}
+	if sig.Info.Doc != "" {
+		info["documentation"] = markupContent{Kind: "markdown", Value: sig.Info.Doc}
+	}
+	out := map[string]any{"signatures": []any{info}, "activeSignature": 0}
+	if sig.Active >= 0 {
+		out["activeParameter"] = sig.Active
+	}
+	return out, nil
+}
+
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		n++
+		if r >= 0x10000 {
+			n++
+		}
+	}
+	return n
+}
+
+// -----------------------------------------------------------------
+// navigation: definition, references, highlights, rename
+// -----------------------------------------------------------------
+
+// symbolAt returns the symbol under the position.
+func symbolAt(r *analysis.Result, line, col int) *analysis.Symbol {
+	for i := range r.Symbols {
+		s := &r.Symbols[i]
+		if s.Line == line && col >= s.Col && col <= s.EndCol {
+			return s
+		}
+	}
+	return nil
+}
+
+// defOf returns the definition location a symbol belongs to.
+func defOf(s *analysis.Symbol) *analysis.Loc {
+	if s.Def {
+		return &s.Loc
+	}
+	return s.Target
+}
+
+// related returns every symbol that shares sym's definition.
+func related(r *analysis.Result, sym *analysis.Symbol) []analysis.Symbol {
+	def := defOf(sym)
+	var out []analysis.Symbol
+	for _, s := range r.Symbols {
+		if s.Kind != sym.Kind || s.Name != sym.Name {
+			continue
+		}
+		if d := defOf(&s); (def == nil && d == nil) || (def != nil && d != nil && *d == *def) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (s *server) definition(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	sym := symbolAt(d.analysis(), line, col)
+	if sym == nil || defOf(sym) == nil {
+		return nil, nil
+	}
+	l := defOf(sym)
+	return location{URI: d.uri, Range: d.rng(l.Line, l.Col, l.Line, l.EndCol)}, nil
+}
+
+func (s *server) references(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	var p struct {
+		Context struct {
+			IncludeDeclaration bool `json:"includeDeclaration"`
+		} `json:"context"`
+	}
+	_ = json.Unmarshal(params, &p)
+	r := d.analysis()
+	sym := symbolAt(r, line, col)
+	if sym == nil {
+		return []location{}, nil
+	}
+	out := []location{}
+	for _, rs := range related(r, sym) {
+		if rs.Def && !p.Context.IncludeDeclaration {
+			continue
+		}
+		out = append(out, location{URI: d.uri, Range: d.rng(rs.Line, rs.Col, rs.Line, rs.EndCol)})
+	}
+	return out, nil
+}
+
+func (s *server) documentHighlight(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	r := d.analysis()
+	sym := symbolAt(r, line, col)
+	if sym == nil {
+		return []any{}, nil
+	}
+	var out []map[string]any
+	for _, rs := range related(r, sym) {
+		kind := 2 // Read
+		if rs.Def {
+			kind = 3 // Write
+		}
+		out = append(out, map[string]any{"range": d.rng(rs.Line, rs.Col, rs.Line, rs.EndCol), "kind": kind})
+	}
+	return out, nil
+}
+
+// renamable reports whether sym can be renamed: frames always, and
+// columns the script defines (not columns read from a file).
+func renamable(r *analysis.Result, sym *analysis.Symbol) bool {
+	if sym.Kind == analysis.SymFrame {
+		return defOf(sym) != nil
+	}
+	def := defOf(sym)
+	if def == nil {
+		return false
+	}
+	for _, s := range r.Symbols {
+		if s.Def && s.Loc == *def && s.Name == sym.Name {
+			return true
+		}
 	}
 	return false
 }
 
-// isProbeDirective recognises a comment-only line ending in `^?`
-// (trailing whitespace tolerated). Matches the Twoslash / Quokka
-// convention that turns `// ^?` into "reveal the thing above".
-func isProbeDirective(raw string) bool {
-	trimmed := strings.TrimSpace(raw)
-	if !strings.HasPrefix(trimmed, "#") {
+func (s *server) prepareRename(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	r := d.analysis()
+	sym := symbolAt(r, line, col)
+	if sym == nil || !renamable(r, sym) {
+		return nil, errors.New("only frames and columns defined in this script can be renamed")
+	}
+	return map[string]any{"range": d.rng(sym.Line, sym.Col, sym.Line, sym.EndCol), "placeholder": sym.Name}, nil
+}
+
+func (s *server) rename(params json.RawMessage) (any, error) {
+	d, line, col, err := s.at(params)
+	if err != nil {
+		return nil, err
+	}
+	var p struct {
+		NewName string `json:"newName"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+	if !validName(p.NewName) {
+		return nil, fmt.Errorf("%q is not a valid name: use letters, digits and _", p.NewName)
+	}
+	r := d.analysis()
+	sym := symbolAt(r, line, col)
+	if sym == nil || !renamable(r, sym) {
+		return nil, errors.New("only frames and columns defined in this script can be renamed")
+	}
+	var edits []textEdit
+	for _, rs := range related(r, sym) {
+		edits = append(edits, textEdit{Range: d.rng(rs.Line, rs.Col, rs.Line, rs.EndCol), NewText: p.NewName})
+	}
+	return map[string]any{"changes": map[string][]textEdit{d.uri: edits}}, nil
+}
+
+func validName(s string) bool {
+	if s == "" || s[0] >= '0' && s[0] <= '9' {
 		return false
 	}
-	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
-	trimmed = strings.TrimRightFunc(trimmed, func(r rune) bool {
-		return r == ' ' || r == '\t'
-	})
-	return strings.HasSuffix(trimmed, "^?")
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '_' && !(c >= '0' && c <= '9') && !(c|0x20 >= 'a' && c|0x20 <= 'z') && c < 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
-// probeLabel returns a verbose schema summary for the currently-
-// focused frame. Rendered when the user places a `# ^?` comment -
-// shows the full column list and row estimate inline so they get a
-// schema peek without switching to the REPL.
-func probeLabel(st *frameState) string {
-	if len(st.focus.cols) == 0 {
-		return ""
-	}
-	cols := strings.Join(st.focus.cols, ", ")
-	rows := formatShapeRows(st.focus.rows)
-	return "cols(" + cols + ") " + rows
+// -----------------------------------------------------------------
+// document symbols and folding
+// -----------------------------------------------------------------
+
+type documentSymbol struct {
+	Name           string           `json:"name"`
+	Detail         string           `json:"detail,omitempty"`
+	Kind           int              `json:"kind"`
+	Range          lspRange         `json:"range"`
+	SelectionRange lspRange         `json:"selectionRange"`
+	Children       []documentSymbol `json:"children,omitempty"`
 }
 
-// formatShapeRows returns just the "N rows" portion used by probe
-// labels. Pulled out so the regular shape hint and the probe hint
-// share the same row-count vocabulary.
-func formatShapeRows(rows int) string {
-	if rows < 0 {
-		return "· ? rows"
+func (s *server) documentSymbol(params json.RawMessage) (any, error) {
+	d, err := s.doc(params)
+	if err != nil {
+		return nil, err
 	}
-	if rows == 1 {
-		return "· 1 row"
+	r := d.analysis()
+	out := []documentSymbol{}
+	var section *documentSymbol
+	flush := func() {
+		if section != nil {
+			out = append(out, *section)
+			section = nil
+		}
 	}
-	return "· " + fmtInt(rows) + " rows"
+	for _, step := range r.Steps {
+		st := step.Stmt
+		full := d.rng(st.Line, 0, st.EndLine, len(d.line(st.EndLine)))
+		name := st.Name()
+		startsSection := (name == "load" || strings.HasPrefix(name, "scan_")) && stagedTarget(st) == "" || name == "use"
+		if startsSection {
+			flush()
+			title := strings.TrimSpace(st.Text)
+			section = &documentSymbol{Name: title, Detail: step.After.Shape(), Kind: 2, Range: full,
+				SelectionRange: d.rng(st.Line, st.Cmd.Off, st.Line, st.Cmd.End)}
+			continue
+		}
+		for _, p := range st.Parts {
+			var sym documentSymbol
+			switch p.Kind {
+			case syntax.PartNewFrame:
+				sym = documentSymbol{Name: p.Value, Detail: name, Kind: 5}
+			case syntax.PartNewColumn:
+				sym = documentSymbol{Name: p.Value, Detail: step.After.DType(p.Value), Kind: 8}
+			default:
+				continue
+			}
+			l, c := st.Position(p.Off)
+			_, ec := st.Position(p.End)
+			sym.Range = full
+			sym.SelectionRange = d.rng(l, c, l, ec)
+			if p.Kind == syntax.PartNewFrame {
+				flush()
+				out = append(out, sym)
+				continue
+			}
+			if section != nil {
+				section.Range.End = full.End
+				section.Children = append(section.Children, sym)
+			} else {
+				out = append(out, sym)
+			}
+		}
+		if section != nil {
+			section.Range.End = full.End
+		}
+	}
+	flush()
+	return out, nil
 }
 
-// formatShape renders "→ N rows × M cols" (or "→ ? rows × M cols"
-// when the row count is unknown). Kept short so the hint doesn't
-// crowd the editor gutter.
-func formatShape(rows, cols int) string {
-	var rowStr string
-	if rows < 0 {
-		rowStr = "? rows"
-	} else if rows == 1 {
-		rowStr = "1 row"
-	} else {
-		rowStr = fmtInt(rows) + " rows"
+func stagedTarget(st *syntax.Stmt) string {
+	for _, p := range st.Parts {
+		if p.Kind == syntax.PartNewFrame {
+			return p.Value
+		}
 	}
-	return "→ " + rowStr + " × " + fmtInt(cols) + " cols"
+	return ""
 }
 
-// fmtInt is a minimal base-10 formatter. Sits in the inlay-hint hot
-// path so we stay off fmt.Sprintf (not a measurable win for this
-// server, but keeps allocations predictable).
+func (s *server) foldingRange(params json.RawMessage) (any, error) {
+	d, err := s.doc(params)
+	if err != nil {
+		return nil, err
+	}
+	r := d.analysis()
+	out := []map[string]any{}
+	add := func(start, end int, kind string) {
+		if end > start {
+			m := map[string]any{"startLine": start, "endLine": end}
+			if kind != "" {
+				m["kind"] = kind
+			}
+			out = append(out, m)
+		}
+	}
+	// Runs of whole-line comments.
+	for i := 0; i < len(r.File.Comments); {
+		j := i
+		for j+1 < len(r.File.Comments) && r.File.Comments[j+1].Own && r.File.Comments[j+1].Line == r.File.Comments[j].Line+1 {
+			j++
+		}
+		if r.File.Comments[i].Own {
+			add(r.File.Comments[i].Line, r.File.Comments[j].Line, "comment")
+		}
+		i = j + 1
+	}
+	// Continued statements, and sections from each load or use to
+	// the statement before the next one.
+	start := -1
+	last := -1
+	for _, st := range r.File.Stmts {
+		add(st.Line, st.EndLine, "")
+		name := st.Name()
+		if (name == "load" || strings.HasPrefix(name, "scan_")) && stagedTarget(st) == "" || name == "use" {
+			if start >= 0 {
+				add(start, last, "region")
+			}
+			start = st.Line
+		}
+		last = st.EndLine
+	}
+	if start >= 0 {
+		add(start, last, "region")
+	}
+	return out, nil
+}
+
+// -----------------------------------------------------------------
+// formatting and code actions
+// -----------------------------------------------------------------
+
+func (s *server) formatting(params json.RawMessage) (any, error) {
+	d, err := s.doc(params)
+	if err != nil {
+		return nil, err
+	}
+	out := syntax.Format(d.content)
+	if out == d.content {
+		return []textEdit{}, nil
+	}
+	end := len(d.lines) - 1
+	return []textEdit{{Range: d.rng(0, 0, end, len(d.line(end))), NewText: strings.TrimSuffix(out, "\n") + trailingNL(d.content)}}, nil
+}
+
+// trailingNL keeps the document's final newline state for the edit,
+// which replaces everything up to the end of the last line.
+func trailingNL(content string) string {
+	if strings.HasSuffix(content, "\n") {
+		return "\n"
+	}
+	return ""
+}
+
+func (s *server) codeAction(params json.RawMessage) (any, error) {
+	var p struct {
+		TextDocument textDocumentIdentifier `json:"textDocument"`
+		Range        lspRange               `json:"range"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+	d := s.docs.get(p.TextDocument.URI)
+	if d == nil {
+		return nil, errNoDocument
+	}
+	out := []map[string]any{}
+	for _, dg := range d.analysis().Diags {
+		if dg.Fix == nil || dg.EndLine < p.Range.Start.Line || dg.Line > p.Range.End.Line {
+			continue
+		}
+		var edit textEdit
+		if dg.Fix.Insert {
+			edit = textEdit{Range: d.rng(dg.Fix.Line, 0, dg.Fix.Line, 0), NewText: dg.Fix.Text + "\n"}
+		} else {
+			edit = textEdit{Range: d.rng(dg.Line, dg.Col, dg.EndLine, dg.EndCol), NewText: dg.Fix.Text}
+		}
+		out = append(out, map[string]any{
+			"title":       dg.Fix.Title,
+			"kind":        "quickfix",
+			"diagnostics": []diagnostic{toDiagnostic(d, dg)},
+			"isPreferred": true,
+			"edit":        map[string]any{"changes": map[string][]textEdit{d.uri: {edit}}},
+		})
+	}
+	return out, nil
+}
+
+// -----------------------------------------------------------------
+// inlay hints
+// -----------------------------------------------------------------
+
+type inlayHint struct {
+	Position    position       `json:"position"`
+	Label       string         `json:"label"`
+	Kind        int            `json:"kind,omitempty"`
+	PaddingLeft bool           `json:"paddingLeft,omitempty"`
+	Tooltip     *markupContent `json:"tooltip,omitempty"`
+}
+
+func (s *server) inlayHint(params json.RawMessage) (any, error) {
+	var p struct {
+		TextDocument textDocumentIdentifier `json:"textDocument"`
+		Range        lspRange               `json:"range"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+	d := s.docs.get(p.TextDocument.URI)
+	if d == nil {
+		return nil, errNoDocument
+	}
+	return collectInlayHints(d, p.Range), nil
+}
+
+func collectInlayHints(d *document, rg lspRange) []inlayHint {
+	out := []inlayHint{}
+	if rg.End.Line < rg.Start.Line {
+		return out
+	}
+	r := d.analysis()
+	inRange := func(line int) bool { return line >= rg.Start.Line && line <= rg.End.Line && line < len(d.lines) }
+	for _, step := range r.Steps {
+		st := step.Stmt
+		if !step.Changes || st.Spec == nil || !inRange(st.EndLine) || len(st.Diags) > 0 {
+			continue
+		}
+		if st.Spec.Category == "inspect" || st.Spec.Category == "aggregate" || stagedTarget(st) != "" {
+			continue
+		}
+		end, _ := syntaxLineEnd(d, st.EndLine)
+		h := inlayHint{Position: d.pos(st.EndLine, end), Label: shapeLabel(step.After), Kind: 1, PaddingLeft: true}
+		if step.After.Known() {
+			h.Tooltip = &markupContent{Kind: "markdown", Value: frameTable(step.After)}
+		}
+		out = append(out, h)
+	}
+	for _, c := range r.File.Comments {
+		if !isProbe(c.Text) || !inRange(c.Line) {
+			continue
+		}
+		label := probeLabel(r, c.Line)
+		out = append(out, inlayHint{Position: d.pos(c.Line, len(d.line(c.Line))), Label: label, PaddingLeft: true,
+			Tooltip: &markupContent{Kind: "plaintext", Value: label}})
+	}
+	return out
+}
+
+// syntaxLineEnd returns the byte column where code ends on a line
+// (before a trailing comment and whitespace).
+func syntaxLineEnd(d *document, line int) (int, bool) {
+	s := d.line(line)
+	code := s
+	inQuote := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && i+1 < len(s):
+			i++
+		case c == inQuote:
+			inQuote = 0
+		case (c == '"' || c == '\'') && inQuote == 0:
+			inQuote = c
+		case c == '#' && inQuote == 0:
+			code = s[:i]
+			i = len(s)
+		}
+	}
+	return len(strings.TrimRight(code, " \t\\")), len(code) != len(s)
+}
+
+func isProbe(comment string) bool {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(comment), "#")) == "^?"
+}
+
+// shapeLabel renders "→ 5 rows × 3 cols", with "≤" for upper bounds
+// and "?" for unknown parts.
+func shapeLabel(f analysis.Frame) string {
+	rows := "? rows"
+	switch {
+	case f.Rows == 1 && f.Exact:
+		rows = "1 row"
+	case f.Rows >= 0:
+		rows = fmtInt(f.Rows) + " rows"
+		if !f.Exact {
+			rows = "≤" + rows
+		}
+	}
+	cols := "? cols"
+	if f.Known() {
+		cols = fmtInt(f.Schema.Len()) + " cols"
+	}
+	return "→ " + rows + " × " + cols
+}
+
+func probeLabel(r *analysis.Result, line int) string {
+	f, has, _ := r.StateAt(line)
+	if !has {
+		return "no frame loaded"
+	}
+	cols := "?"
+	if f.Known() {
+		var parts []string
+		for _, fl := range f.Schema.Fields() {
+			parts = append(parts, fl.Name+": "+fl.DType.String())
+		}
+		cols = strings.Join(parts, ", ")
+	}
+	return "cols(" + cols + ") " + strings.TrimPrefix(shapeLabel(f), "→ ")
+}
+
+func probeText(r *analysis.Result, line int) string {
+	f, has, _ := r.StateAt(line)
+	if !has {
+		return "No frame is loaded here."
+	}
+	return "**Frame here**: " + strings.TrimPrefix(shapeLabel(f), "→ ") + "\n\n" + frameTable(f)
+}
+
+func frameTable(f analysis.Frame) string {
+	if !f.Known() {
+		return "columns unknown until it runs"
+	}
+	var b strings.Builder
+	b.WriteString("| column | dtype |\n|---|---|\n")
+	for _, fl := range f.Schema.Fields() {
+		fmt.Fprintf(&b, "| %s | %s |\n", fl.Name, fl.DType)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// fmtInt formats n with thousands separators.
 func fmtInt(n int) string {
-	if n == 0 {
-		return "0"
+	s := strconv.Itoa(n)
+	if n < 1000 {
+		return s
 	}
-	neg := n < 0
-	if neg {
-		n = -n
+	var b strings.Builder
+	pre := len(s) % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
 	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}
-
-// --------------------------------------------------------------------
-// textDocument/hover
-// --------------------------------------------------------------------
-
-type hoverParams struct {
-	TextDocument textDocumentIdentifier `json:"textDocument"`
-	Position     position               `json:"position"`
-}
-
-type hoverResult struct {
-	Contents markup    `json:"contents"`
-	Range    *lspRange `json:"range,omitempty"`
-}
-
-func (s *server) handleHover(msg *rawMessage) {
-	var p hoverParams
-	if err := json.Unmarshal(msg.Params, &p); err != nil {
-		s.reply(msg, nil)
-		return
-	}
-	doc := s.docs.get(p.TextDocument.URI)
-	if doc == nil {
-		s.reply(msg, nil)
-		return
-	}
-	line := doc.lineAt(int(p.Position.Line))
-	if line == "" {
-		s.reply(msg, nil)
-		return
-	}
-	if isProbeDirective(line) {
-		if body := renderProbeTooltip(doc, int(p.Position.Line)); body != "" {
-			s.reply(msg, hoverResult{
-				Contents: markup{Kind: "plaintext", Value: body},
-				Range: &lspRange{
-					Start: position{Line: p.Position.Line, Character: 0},
-					End:   position{Line: p.Position.Line, Character: uint32(len(line))},
-				},
-			})
-			return
+	for i := pre; i < len(s); i += 3 {
+		if b.Len() > 0 {
+			b.WriteByte(',')
 		}
+		b.WriteString(s[i : i+3])
 	}
-	col := byteCol(line, int(p.Position.Character))
-	tok, start, end := tokenAt(line, col)
-	if tok == "" {
-		s.reply(msg, nil)
-		return
-	}
-	// Only the first token of a statement is a command; a column that
-	// happens to be called `count` or `min` should get column hover.
-	var spec *script.CommandSpec
-	if start == len(line)-len(strings.TrimLeft(line, " \t")) {
-		spec = script.FindCommand(tok)
-	}
-	if spec == nil {
-		// Not a command: maybe a column name with known schema.
-		if info := columnHoverInfo(doc, tok, int(p.Position.Line)); info != "" {
-			s.reply(msg, hoverResult{
-				Contents: markup{Kind: "markdown", Value: info},
-				Range: &lspRange{
-					Start: position{Line: p.Position.Line, Character: uint32(start)},
-					End:   position{Line: p.Position.Line, Character: uint32(end)},
-				},
-			})
-			return
-		}
-		s.reply(msg, nil)
-		return
-	}
-	body := spec.Markdown()
-	s.reply(msg, hoverResult{
-		Contents: markup{Kind: "markdown", Value: body},
-		Range: &lspRange{
-			Start: position{Line: p.Position.Line, Character: uint32(start)},
-			End:   position{Line: p.Position.Line, Character: uint32(end)},
-		},
-	})
-}
-
-// tokenAt returns the whitespace-delimited token containing byte
-// index col, plus its start and end byte offsets in the line.
-func tokenAt(line string, col int) (tok string, start, end int) {
-	if col > len(line) {
-		col = len(line)
-	}
-	start = col
-	for start > 0 && !isSpace(line[start-1]) {
-		start--
-	}
-	end = col
-	for end < len(line) && !isSpace(line[end]) {
-		end++
-	}
-	tok = line[start:end]
-	// Strip leading '.' so hover works whether the user typed it or not.
-	return strings.TrimPrefix(tok, "."), start, end
-}
-
-func isSpace(b byte) bool { return b == ' ' || b == '\t' }
-
-func renderProbeTooltip(d *document, probeLine int) string {
-	if d == nil || probeLine < 0 || probeLine >= len(d.lines) {
-		return ""
-	}
-	state := framesAtLine(d, probeLine)
-	return probeLabel(&state)
+	return b.String()
 }
