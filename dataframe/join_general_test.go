@@ -88,10 +88,16 @@ func TestJoinCategoricalWithEmptyChunk(t *testing.T) {
 	rk, _ := series.FromInt64("k", []int64{2}, nil)
 	right, _ := dataframe.New(rk)
 	defer right.Release()
-	for _, how := range []dataframe.JoinType{dataframe.InnerJoin, dataframe.FullJoin, dataframe.SemiJoin} {
+	for _, how := range []dataframe.JoinType{dataframe.InnerJoin, dataframe.LeftJoin, dataframe.FullJoin, dataframe.SemiJoin} {
 		out, err := left.Join(ctx, right, []string{"k"}, how)
 		if err != nil {
 			t.Fatalf("%s: %v", how, err)
+		}
+		out.Release()
+		// The categorical on the right side is null-extended.
+		out, err = right.Join(ctx, left, []string{"k"}, how)
+		if err != nil {
+			t.Fatalf("%s swapped: %v", how, err)
 		}
 		out.Release()
 	}

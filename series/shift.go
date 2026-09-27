@@ -78,7 +78,7 @@ func (s *Series) Shift(periods int, opts ...Option) (*Series, error) {
 // Series. For a single-chunk Series this is a cheap retain of the
 // existing chunk; for multi-chunk it concatenates via arrow.
 func extractSingleChunk(s *Series, mem memory.Allocator) (arrow.Array, error) {
-	chunks := s.Chunks()
+	chunks := nonEmptyChunks(s.Chunks())
 	switch len(chunks) {
 	case 0:
 		return array.MakeArrayOfNull(mem, s.data.DataType(), 0), nil

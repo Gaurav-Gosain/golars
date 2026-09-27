@@ -97,20 +97,24 @@ func Shrink(c *Case, v Verdict, dir string, o *Oracle) *Case {
 			cur, progress = next, true
 		}
 		// Chunking.
-		for _, f := range []*Frame{cur.Left, cur.Right} {
-			if f == nil {
+		// The side is tracked by flag: cur (and so its frames) changes
+		// whenever a candidate is accepted.
+		for _, right := range []bool{false, true} {
+			side := func(c *Case) *Frame {
+				if right {
+					return c.Right
+				}
+				return c.Left
+			}
+			if side(cur) == nil {
 				continue
 			}
-			for i := range f.Cols {
-				if len(f.Cols[i].Chunks) == 0 {
+			for i := 0; i < len(side(cur).Cols); i++ {
+				if len(side(cur).Cols[i].Chunks) == 0 {
 					continue
 				}
 				cand := cur.Clone()
-				tf := cand.Left
-				if f == cur.Right {
-					tf = cand.Right
-				}
-				tf.Cols[i].Chunks = nil
+				side(cand).Cols[i].Chunks = nil
 				if try(cand) {
 					cur, progress = cand, true
 				}

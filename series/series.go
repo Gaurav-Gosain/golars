@@ -323,6 +323,26 @@ func (s *Series) Rechunk() *Series {
 	return clone
 }
 
+// nonEmptyChunks drops zero-length chunks from a multi-chunk list,
+// keeping one when all are empty so the dtype survives. arrow's
+// Concatenate fails on some empty chunks (an empty dictionary chunk
+// panics), and they add nothing.
+func nonEmptyChunks(chunks []arrow.Array) []arrow.Array {
+	if len(chunks) < 2 {
+		return chunks
+	}
+	kept := make([]arrow.Array, 0, len(chunks))
+	for _, c := range chunks {
+		if c.Len() > 0 {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == 0 {
+		return chunks[:1]
+	}
+	return kept
+}
+
 // Consolidated returns an arrow.Array that holds every row of this
 // Series in a single contiguous chunk. When the Series already has one
 // chunk the call is a retain-only no-op; with multiple chunks it
@@ -335,22 +355,7 @@ func (s *Series) Rechunk() *Series {
 // already does this internally, so compute kernels don't need to call
 // this - it's for external consumers and tests.
 func (s *Series) Consolidated() (arrow.Array, error) {
-	chunks := s.data.Chunks()
-	if len(chunks) > 1 {
-		// arrow's Concatenate fails on some empty chunks (an empty
-		// dictionary chunk panics), and they add nothing.
-		kept := make([]arrow.Array, 0, len(chunks))
-		for _, c := range chunks {
-			if c.Len() > 0 {
-				kept = append(kept, c)
-			}
-		}
-		if len(kept) > 0 {
-			chunks = kept
-		} else {
-			chunks = chunks[:1]
-		}
-	}
+	chunks := nonEmptyChunks(s.data.Chunks())
 	switch len(chunks) {
 	case 0:
 		return array.MakeArrayOfNull(memory.DefaultAllocator, s.data.DataType(), 0), nil
