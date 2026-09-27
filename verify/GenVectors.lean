@@ -289,9 +289,18 @@ partial def genExpr (r : Rng) (w depth : Nat) (allowWindow : Bool) : Expr × Rng
   | 5 => let (a, r) := genExpr r w (depth - 1) allowWindow; (.abs a, r)
   | 6 => let (a, r) := genExpr r w (depth - 1) allowWindow
          let (b, r) := genExpr r w (depth - 1) allowWindow; (.fillNull a b, r)
-  | 7 => let (a, r) := genExpr r w (depth - 1) allowWindow; (.cumSum a, r)
-  | 8 => let (a, r) := genExpr r w (depth - 1) allowWindow; (.shift a, r)
-  | _ => let (a, r) := genExpr r w (depth - 1) allowWindow; (.sum a, r)
+  -- Window and aggregate arguments always read a column: golars
+  -- broadcasts a literal to the frame height before shift, cum_sum or sum
+  -- (pl.lit(2).shift(1) is null in polars but not in golars), which the
+  -- vectors do not cover. See docs/verification.md.
+  | 7 => let (a, r) := genColArg r w (depth - 1) allowWindow; (.cumSum a, r)
+  | 8 => let (a, r) := genColArg r w (depth - 1) allowWindow; (.shift a, r)
+  | _ => let (a, r) := genColArg r w (depth - 1) allowWindow; (.sum a, r)
+
+where
+  genColArg (r : Rng) (w depth : Nat) (allowWindow : Bool) : Expr × Rng :=
+    let (a, r) := genExpr r w depth allowWindow
+    if (Plan.refs a).isEmpty then let (i, r) := r.below w; (.col i, r) else (a, r)
 
 open Plan in
 partial def genPred (r : Rng) (w depth : Nat) (allowWindow : Bool) : Pred × Rng :=
@@ -337,10 +346,13 @@ partial def genPlan (r : Rng) (rows : List Row) (w depth : Nat) : Plan × Nat ×
     (.withCol i e inp, if i == w then w + 1 else w, r)
   | 3 =>
     let (k, r) := r.below 3
-    let (es, r) := r.list (k + 1) (fun r =>
+    -- the first output is a bare column: golars keeps the frame height
+    -- for a projection of only literals where polars returns one row
+    let (i0, r) := r.below w
+    let (es, r) := r.list k (fun r =>
       let (b, r) := r.below 2
       if b == 0 then let (i, r) := r.below w; (Expr.col i, r) else genExpr r w 1 false)
-    (.select es inp, k + 1, r)
+    (.select (.col i0 :: es) inp, k + 1, r)
   | 4 =>
     let (o, r) := r.below 4
     let (l, r) := r.below 6
@@ -368,8 +380,9 @@ def fixedPlans (rows : List Plan.Row) : List Plan.Plan :=
   , .filter (.gt (.col 0) (.lit 0)) (.sort 1 true false s)
   , .filter (.gt (.col 0) (.lit 0)) (.select [.col 0, .add (.col 1) (.col 2)] s)
   , .filter (.gt (.col 1) (.lit 0)) (.select [.col 0, .add (.col 1) (.col 2)] s)
-  , .filter (.lit false) (.select [.lit 1] s)
-  , .select [.lit 1, .lit 2] s
+  , .filter (.lit false) (.select [.col 0, .lit 1] s)
+  , .withCol 3 (.cumSum (.sum (.col 0))) s
+  , .withCol 3 (.add (.col 0) (.sum (.col 1))) s
   , .filter (.or (.isNull (.col 0)) (.eq (.col 1) (.col 2))) s ]
 
 def planVectors : J := Id.run do

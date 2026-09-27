@@ -76,27 +76,71 @@ def sumVals (l : List Val) : Int := l.foldl (fun s v => s + v.getD 0) 0
 
 def getCol (r : Row) (i : Nat) : Val := r.getD i none
 
-def evalCol : Expr → List Row → List Val
-  | .col i, rs => rs.map (getCol · i)
-  | .lit v, rs => rs.map (fun _ => some v)
-  | .add a b, rs => List.zipWith (lift2 (· + ·)) (evalCol a rs) (evalCol b rs)
-  | .mul a b, rs => List.zipWith (lift2 (· * ·)) (evalCol a rs) (evalCol b rs)
-  | .neg a, rs => (evalCol a rs).map (Option.map (fun x => -x))
-  | .abs a, rs => (evalCol a rs).map (Option.map (fun x => (Int.natAbs x : Int)))
-  | .fillNull a b, rs => List.zipWith (fun x y => x.or y) (evalCol a rs) (evalCol b rs)
-  | .cumSum a, rs => cumSumAux 0 (evalCol a rs)
-  | .shift a, rs => shift1 (evalCol a rs)
-  | .sum a, rs => rs.map (fun _ => some (sumVals (evalCol a rs)))
+/-- A column value: a unit (scalar) result such as a literal or an
+aggregation, or a full column. Units broadcast when combined with a full
+column and when a projection materialises them (polars semantics). -/
+inductive Colv (γ : Type) where
+  | unit (v : γ)
+  | full (vs : List γ)
+  deriving Repr, DecidableEq
 
-def evalPred : Pred → List Row → List KBool
-  | .gt a b, rs => List.zipWith (cmp2 (fun x y => decide (x > y))) (evalCol a rs) (evalCol b rs)
-  | .lt a b, rs => List.zipWith (cmp2 (fun x y => decide (x < y))) (evalCol a rs) (evalCol b rs)
-  | .eq a b, rs => List.zipWith (cmp2 (fun x y => decide (x = y))) (evalCol a rs) (evalCol b rs)
-  | .and p q, rs => List.zipWith kand (evalPred p rs) (evalPred q rs)
-  | .or p q, rs => List.zipWith kor (evalPred p rs) (evalPred q rs)
-  | .not p, rs => (evalPred p rs).map knot
-  | .isNull a, rs => (evalCol a rs).map (fun v => some v.isNone)
-  | .lit b, rs => rs.map (fun _ => some b)
+def Colv.isUnit {γ : Type} : Colv γ → Bool
+  | .unit _ => true
+  | .full _ => false
+
+def Colv.head {γ : Type} (d : γ) : Colv γ → γ
+  | .unit v => v
+  | .full vs => vs.headD d
+
+def bcast {γ : Type} (n : Nat) : Colv γ → List γ
+  | .unit v => List.replicate n v
+  | .full vs => vs
+
+def umap {γ δ : Type} (f : γ → δ) : Colv γ → Colv δ
+  | .unit v => .unit (f v)
+  | .full vs => .full (vs.map f)
+
+def bin {γ δ ε : Type} (n : Nat) (f : γ → δ → ε) : Colv γ → Colv δ → Colv ε
+  | .unit x, .unit y => .unit (f x y)
+  | a, b => .full (List.zipWith f (bcast n a) (bcast n b))
+
+def evalCol : Expr → List Row → Colv Val
+  | .col i, rs => .full (rs.map (getCol · i))
+  | .lit v, _ => .unit (some v)
+  | .add a b, rs => bin rs.length (lift2 (· + ·)) (evalCol a rs) (evalCol b rs)
+  | .mul a b, rs => bin rs.length (lift2 (· * ·)) (evalCol a rs) (evalCol b rs)
+  | .neg a, rs => umap (Option.map (fun x => -x)) (evalCol a rs)
+  | .abs a, rs => umap (Option.map (fun x => (Int.natAbs x : Int))) (evalCol a rs)
+  | .fillNull a b, rs => bin rs.length (fun x y => x.or y) (evalCol a rs) (evalCol b rs)
+  | .cumSum a, rs =>
+    match evalCol a rs with
+    | .unit v => .unit v
+    | .full vs => .full (cumSumAux 0 vs)
+  | .shift a, rs =>
+    match evalCol a rs with
+    | .unit _ => .unit none
+    | .full vs => .full (shift1 vs)
+  | .sum a, rs =>
+    match evalCol a rs with
+    | .unit v => .unit (some (v.getD 0))
+    | .full vs => .unit (some (sumVals vs))
+
+def evalPred : Pred → List Row → Colv KBool
+  | .gt a b, rs => bin rs.length (cmp2 (fun x y => decide (x > y))) (evalCol a rs) (evalCol b rs)
+  | .lt a b, rs => bin rs.length (cmp2 (fun x y => decide (x < y))) (evalCol a rs) (evalCol b rs)
+  | .eq a b, rs => bin rs.length (cmp2 (fun x y => decide (x = y))) (evalCol a rs) (evalCol b rs)
+  | .and p q, rs => bin rs.length kand (evalPred p rs) (evalPred q rs)
+  | .or p q, rs => bin rs.length kor (evalPred p rs) (evalPred q rs)
+  | .not p, rs => umap knot (evalPred p rs)
+  | .isNull a, rs => umap (fun v => some v.isNone) (evalCol a rs)
+  | .lit b, _ => .unit (some b)
+
+/-- Static shape: whether an expression evaluates to a unit. -/
+def unitE : Expr → Bool
+  | .col _ => false
+  | .lit _ | .sum _ => true
+  | .add a b | .mul a b | .fillNull a b => unitE a && unitE b
+  | .neg a | .abs a | .cumSum a | .shift a => unitE a
 
 /-- Row-wise evaluation, meaningful for elementwise expressions. -/
 def evalRow : Expr → Row → Val
@@ -176,9 +220,14 @@ def sortLE (i : Nat) (desc nullsLast : Bool) (a b : Row) : Bool :=
 
 def eval : Plan → List Row
   | .scan rows => rows
-  | .filter p P => maskFilter (eval P) (evalPred p (eval P))
-  | .withCol i e P => List.zipWith (fun r v => setCol r i v) (eval P) (evalCol e (eval P))
-  | .select es P => colsToRows (eval P).length (es.map (evalCol · (eval P)))
+  | .filter p P => maskFilter (eval P) (bcast (eval P).length (evalPred p (eval P)))
+  | .withCol i e P =>
+    List.zipWith (fun r v => setCol r i v) (eval P) (bcast (eval P).length (evalCol e (eval P)))
+  | .select es P =>
+    let cs := es.map (evalCol · (eval P))
+    -- polars: a projection of only unit results has one row
+    if es ≠ [] ∧ cs.all Colv.isUnit then [cs.map (Colv.head none)]
+    else colsToRows (eval P).length (cs.map (bcast (eval P).length))
   | .slice off len P => ((eval P).drop off).take len
   | .sort i desc nl P => (eval P).mergeSort (sortLE i desc nl)
 
@@ -189,47 +238,76 @@ theorem zipWith_map_map {α β γ δ : Type} (f : β → γ → δ) (g : α → 
   | [] => rfl
   | x :: l => by simp [zipWith_map_map f g h l]
 
+theorem bcast_umap {γ δ : Type} (n : Nat) (f : γ → δ) (c : Colv γ) :
+    bcast n (umap f c) = (bcast n c).map f := by
+  cases c <;> simp [umap, bcast, List.map_replicate]
+
+theorem zipWith_replicate' {γ δ ε : Type} (f : γ → δ → ε) (x : γ) (y : δ) :
+    ∀ n, List.zipWith f (List.replicate n x) (List.replicate n y) = List.replicate n (f x y)
+  | 0 => rfl
+  | n + 1 => by simp [List.replicate_succ, zipWith_replicate' f x y n]
+
+theorem bcast_bin {γ δ ε : Type} (n : Nat) (f : γ → δ → ε) (a : Colv γ) (b : Colv δ) :
+    bcast n (bin n f a b) = List.zipWith f (bcast n a) (bcast n b) := by
+  cases a <;> cases b <;> simp [bin, bcast, zipWith_replicate']
+
+theorem map_const_eq_replicate {γ δ : Type} (l : List γ) (v : δ) :
+    l.map (fun _ => v) = List.replicate l.length v := by
+  induction l <;> simp_all [List.replicate_succ]
+
 theorem evalCol_elem : ∀ (e : Expr) (rs : List Row), isElem e = true →
-    evalCol e rs = rs.map (evalRow e)
+    bcast rs.length (evalCol e rs) = rs.map (evalRow e)
   | .col _, _, _ => rfl
-  | .lit _, _, _ => rfl
+  | .lit v, rs, _ => by simp [evalCol, bcast, evalRow, map_const_eq_replicate]
   | .add a b, rs, h => by
     simp only [isElem, Bool.and_eq_true] at h
-    simp only [evalCol, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
+    simp only [evalCol, bcast_bin, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
   | .mul a b, rs, h => by
     simp only [isElem, Bool.and_eq_true] at h
-    simp only [evalCol, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
+    simp only [evalCol, bcast_bin, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
   | .fillNull a b, rs, h => by
     simp only [isElem, Bool.and_eq_true] at h
-    simp only [evalCol, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
+    simp only [evalCol, bcast_bin, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
   | .neg a, rs, h => by
     simp only [isElem] at h
-    simp only [evalCol, evalCol_elem a rs h, List.map_map]; rfl
+    simp only [evalCol, bcast_umap, evalCol_elem a rs h, List.map_map]; rfl
   | .abs a, rs, h => by
     simp only [isElem] at h
-    simp only [evalCol, evalCol_elem a rs h, List.map_map]; rfl
+    simp only [evalCol, bcast_umap, evalCol_elem a rs h, List.map_map]; rfl
   | .cumSum _, _, h => by simp [isElem] at h
   | .shift _, _, h => by simp [isElem] at h
   | .sum _, _, h => by simp [isElem] at h
 
 theorem evalPred_elem : ∀ (p : Pred) (rs : List Row), isElemP p = true →
-    evalPred p rs = rs.map (predRow p)
+    bcast rs.length (evalPred p rs) = rs.map (predRow p)
   | .gt a b, rs, h | .lt a b, rs, h | .eq a b, rs, h => by
     simp only [isElemP, Bool.and_eq_true] at h
-    simp only [evalPred, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
+    simp only [evalPred, bcast_bin, evalCol_elem a rs h.1, evalCol_elem b rs h.2, zipWith_map_map]; rfl
   | .and p q, rs, h => by
     simp only [isElemP, Bool.and_eq_true] at h
-    simp only [evalPred, evalPred_elem p rs h.1, evalPred_elem q rs h.2, zipWith_map_map]; rfl
+    simp only [evalPred, bcast_bin, evalPred_elem p rs h.1, evalPred_elem q rs h.2, zipWith_map_map]; rfl
   | .or p q, rs, h => by
     simp only [isElemP, Bool.and_eq_true] at h
-    simp only [evalPred, evalPred_elem p rs h.1, evalPred_elem q rs h.2, zipWith_map_map]; rfl
+    simp only [evalPred, bcast_bin, evalPred_elem p rs h.1, evalPred_elem q rs h.2, zipWith_map_map]; rfl
   | .not p, rs, h => by
     simp only [isElemP] at h
-    simp only [evalPred, evalPred_elem p rs h, List.map_map]; rfl
+    simp only [evalPred, bcast_umap, evalPred_elem p rs h, List.map_map]; rfl
   | .isNull a, rs, h => by
     simp only [isElemP] at h
-    simp only [evalPred, evalCol_elem a rs h, List.map_map]; rfl
-  | .lit _, _, _ => rfl
+    simp only [evalPred, bcast_umap, evalCol_elem a rs h, List.map_map]; rfl
+  | .lit b, rs, _ => by simp [evalPred, bcast, predRow, map_const_eq_replicate]
+
+theorem evalCol_isUnit : ∀ (e : Expr) (rs : List Row), (evalCol e rs).isUnit = unitE e
+  | .col _, _ => rfl
+  | .lit _, _ => rfl
+  | .add a b, rs | .mul a b, rs | .fillNull a b, rs => by
+    simp only [evalCol, unitE, ← evalCol_isUnit a rs, ← evalCol_isUnit b rs]
+    cases evalCol a rs <;> cases evalCol b rs <;> rfl
+  | .neg a, rs | .abs a, rs => by
+    simp only [evalCol, unitE, ← evalCol_isUnit a rs]; cases evalCol a rs <;> rfl
+  | .cumSum a, rs | .shift a, rs => by
+    simp only [evalCol, unitE, ← evalCol_isUnit a rs]; cases evalCol a rs <;> rfl
+  | .sum a, rs => by simp only [evalCol, unitE]; cases evalCol a rs <;> rfl
 
 theorem maskFilter_map (rs : List Row) (f : Row → KBool) :
     maskFilter rs (rs.map f) = rs.filter (fun r => keep (f r)) := by
@@ -254,10 +332,19 @@ theorem colsToRows_map (es : List Expr) :
     · have := colsToRows_map es rs
       rw [← this]; congr 1
 
-theorem select_elem (es : List Expr) (P : Plan) (h : ∀ e ∈ es, isElem e = true) :
+theorem select_elem (es : List Expr) (P : Plan) (h : ∀ e ∈ es, isElem e = true)
+    (hn : es.any (fun e => !unitE e) = true) :
     eval (.select es P) = (eval P).map (fun r => es.map (evalRow · r)) := by
   simp only [eval]
-  have : es.map (evalCol · (eval P)) = es.map (fun e => (eval P).map (evalRow e)) :=
+  have hu : ¬ (es ≠ [] ∧ (es.map (evalCol · (eval P))).all Colv.isUnit = true) := by
+    intro ⟨_, ha⟩
+    simp only [List.all_map, List.all_eq_true, Function.comp, evalCol_isUnit] at ha
+    simp only [List.any_eq_true, Bool.not_eq_true'] at hn
+    obtain ⟨e, he, hu⟩ := hn
+    have := ha e he; simp_all
+  rw [if_neg hu, List.map_map]
+  have : es.map (bcast (eval P).length ∘ (evalCol · (eval P))) =
+      es.map (fun e => (eval P).map (evalRow e)) :=
     List.map_congr_left (fun e he => evalCol_elem e _ (h e he))
   rw [this, colsToRows_map]
 
@@ -459,9 +546,10 @@ theorem predRow_select (es : List Expr) (p : Pred) (r : Row)
 `PredicatePushdownPass`): sound when every projection expression is
 elementwise and the predicate only reads passthrough columns. -/
 theorem filter_select_pushdown (p : Pred) (es : List Expr) (P : Plan)
-    (hp : isElemP p = true) (he : ∀ e ∈ es, isElem e = true) (ht : passesThrough es p = true) :
+    (hp : isElemP p = true) (he : ∀ e ∈ es, isElem e = true) (ht : passesThrough es p = true)
+    (hn : es.any (fun e => !unitE e) = true) :
     eval (.filter p (.select es P)) = eval (.select es (.filter p P)) := by
-  rw [filter_elem p _ hp, select_elem es _ he, select_elem es _ he, filter_elem p _ hp,
+  rw [filter_elem p _ hp, select_elem es _ he hn, select_elem es _ he hn, filter_elem p _ hp,
     List.filter_map]
   congr 1
   apply List.filter_congr; intro r _
@@ -489,8 +577,7 @@ theorem filter_sort (p : Pred) (i : Nat) (desc nl : Bool) (P : Plan) (hp : isEle
     eval (.filter p (.sort i desc nl P)) = eval (.sort i desc nl (.filter p P)) := by
   rw [filter_elem p _ hp]
   simp only [eval]
-  rw [← maskFilter_map, ← evalPred_elem p _ hp]
-  rw [evalPred_elem p _ hp, maskFilter_map, evalPred_elem p _ hp, maskFilter_map]
+  rw [evalPred_elem p _ hp, maskFilter_map]
   exact Golars.Sort.filter_mergeSort (sortLE_preorder i desc nl) _ _
 
 /-- **Slice pushdown through elementwise `with_columns`**
@@ -517,17 +604,15 @@ theorem evalCol_prune (S : List Nat) : ∀ (e : Expr) (rs : List Row), (∀ j �
     evalCol e (rs.map (prune S)) = evalCol e rs
   | .col j, rs, h => by
     simp only [evalCol, List.map_map]
+    congr 1
     apply List.map_congr_left; intro r _
     exact getCol_prune S r j (h j (by simp [refs]))
   | .lit _, rs, _ => by simp [evalCol]
   | .add a b, rs, h | .mul a b, rs, h | .fillNull a b, rs, h => by
-    simp only [evalCol, evalCol_prune S a rs (fun j hj => h j (by simp [refs, hj])),
+    simp only [evalCol, List.length_map, evalCol_prune S a rs (fun j hj => h j (by simp [refs, hj])),
       evalCol_prune S b rs (fun j hj => h j (by simp [refs, hj]))]
-  | .neg a, rs, h | .abs a, rs, h | .cumSum a, rs, h | .shift a, rs, h =>
+  | .neg a, rs, h | .abs a, rs, h | .cumSum a, rs, h | .shift a, rs, h | .sum a, rs, h =>
     by simp only [evalCol, evalCol_prune S a rs (fun j hj => h j (by simp [refs, hj]))]
-  | .sum a, rs, h => by
-    simp only [evalCol, evalCol_prune S a rs (fun j hj => h j (by simp [refs, hj])), List.map_map]
-    rfl
 
 /-- **Projection pruning is sound**: a projection only sees the columns
 it reads, so reading the input restricted to those columns gives the
@@ -535,10 +620,9 @@ same result. -/
 theorem select_prune (S : List Nat) (es : List Expr) (P : Plan)
     (h : ∀ e ∈ es, ∀ j ∈ refs e, j ∈ S) :
     eval (.select es (.scan ((eval P).map (prune S)))) = eval (.select es P) := by
-  simp only [eval, List.length_map]
-  congr 1
-  apply List.map_congr_left; intro e he
-  exact evalCol_prune S e _ (h e he)
+  have hc : es.map (evalCol · ((eval P).map (prune S))) = es.map (evalCol · (eval P)) :=
+    List.map_congr_left (fun e he => evalCol_prune S e _ (h e he))
+  simp only [eval, List.length_map, hc]
 
 /-! ## Counterexamples: rewrites that are not sound -/
 
@@ -590,7 +674,8 @@ def pushStep : Plan → Plan
     if isElemP p && isElem e && !(refsP p).contains i then .withCol i e (.filter p P)
     else .filter p (.withCol i e P)
   | .filter p (.select es P) =>
-    if isElemP p && es.all isElem && passesThrough es p then .select es (.filter p P)
+    if isElemP p && es.all isElem && passesThrough es p && es.any (fun e => !unitE e) then
+      .select es (.filter p P)
     else .filter p (.select es P)
   | .filter p (.sort i d n P) =>
     if isElemP p then .sort i d n (.filter p P) else .filter p (.sort i d n P)
@@ -615,7 +700,7 @@ theorem pushStep_sound (P : Plan) : eval (pushStep P) = eval P := by
     split
     · rename_i h
       simp only [Bool.and_eq_true, List.all_eq_true] at h
-      exact (filter_select_pushdown p es P h.1.1 h.1.2 h.2).symm
+      exact (filter_select_pushdown p es P h.1.1.1 h.1.1.2 h.1.2 h.2).symm
     · rfl
   · rename_i p i d n P
     split
