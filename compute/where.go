@@ -131,6 +131,11 @@ func Where(ctx context.Context, cond, ifTrue, ifFalse *series.Series, opts ...Op
 	n := condBool.Len()
 	pick := func(i int) bool { return condBool.IsValid(i) && condBool.Value(i) }
 
+	if n == 0 {
+		// Empty inputs may carry nil value buffers, which the fused
+		// kernels would dereference.
+		return series.Empty(name, ifTrue.DType()), nil
+	}
 	par := inferParallelism(cfg, n)
 	switch a := aArr.(type) {
 	case *array.Int64:

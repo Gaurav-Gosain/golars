@@ -122,7 +122,12 @@ func takeArrow(src arrow.Array, idx []int, mem memory.Allocator) (arrow.Array, e
 	if fw, ok := dt.(arrow.FixedWidthDataType); ok && fw.BitWidth()%8 == 0 {
 		width := fw.BitWidth() / 8
 		d := src.Data()
-		raw := d.Buffers()[1].Bytes()[d.Offset()*width:]
+		var raw []byte
+		// An empty source may have a nil value buffer; idx is then empty
+		// or all out of range, which the caller maps to nulls.
+		if b := d.Buffers()[1]; b != nil {
+			raw = b.Bytes()[d.Offset()*width:]
+		}
 		buf := memory.NewResizableBuffer(mem)
 		buf.Resize(n * width)
 		dst := buf.Bytes()
