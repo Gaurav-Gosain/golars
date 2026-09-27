@@ -305,7 +305,7 @@ func gatherSlices(arr arrow.Array, indices []int, mem memory.Allocator) (arrow.A
 			for k < len(indices) && indices[k] < 0 {
 				k++
 			}
-			parts = append(parts, array.MakeArrayOfNull(mem, arr.DataType(), k-j))
+			parts = append(parts, nullArray(mem, arr.DataType(), k-j))
 		} else {
 			for k < len(indices) && indices[k] == start+(k-j) {
 				k++

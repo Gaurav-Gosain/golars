@@ -336,6 +336,21 @@ func (s *Series) Rechunk() *Series {
 // this - it's for external consumers and tests.
 func (s *Series) Consolidated() (arrow.Array, error) {
 	chunks := s.data.Chunks()
+	if len(chunks) > 1 {
+		// arrow's Concatenate fails on some empty chunks (an empty
+		// dictionary chunk panics), and they add nothing.
+		kept := make([]arrow.Array, 0, len(chunks))
+		for _, c := range chunks {
+			if c.Len() > 0 {
+				kept = append(kept, c)
+			}
+		}
+		if len(kept) > 0 {
+			chunks = kept
+		} else {
+			chunks = chunks[:1]
+		}
+	}
 	switch len(chunks) {
 	case 0:
 		return array.MakeArrayOfNull(memory.DefaultAllocator, s.data.DataType(), 0), nil
