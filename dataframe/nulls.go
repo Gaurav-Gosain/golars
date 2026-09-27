@@ -231,8 +231,12 @@ func uniqueFastSingle(df *DataFrame) (*DataFrame, bool, error) {
 		// generic GroupBy path which already handles it correctly.
 		return nil, false, nil
 	}
+	if col.NumChunks() != 1 {
+		// The kernels below read one contiguous chunk; the group-by
+		// fallback consolidates multi-chunk columns first.
+		return nil, false, nil
+	}
 	chunk := col.Chunk(0)
-	n := chunk.Len()
 	switch a := chunk.(type) {
 	case *array.Int64:
 		vals := a.Int64Values()
@@ -242,7 +246,7 @@ func uniqueFastSingle(df *DataFrame) (*DataFrame, bool, error) {
 		// gives us back when the caller only wants the distinct-key
 		// list (no aggregation follows). Benchmarked: parallel 6 ms,
 		// serial 2 ms on this input shape.
-		_, uniq := serialAssignInt64(vals, n)
+		uniq := serialUniqueInt64(vals)
 		s, err := series.FromInt64(col.Name(), uniq, nil)
 		if err != nil {
 			return nil, true, err

@@ -202,6 +202,31 @@ func TestEncodeStringCodesPartitionedMatchesSerial(t *testing.T) {
 	}
 }
 
+func TestUniqueInt64MultiChunk(t *testing.T) {
+	ctx := context.Background()
+	mem := testutil.NewCheckedAllocator(t)
+	a, _ := series.FromInt64("x", []int64{3, 1, 3, 2}, nil, series.WithAllocator(mem))
+	b, _ := series.FromInt64("x", []int64{5, 1, 4, 5}, nil, series.WithAllocator(mem))
+	fa, _ := New(a)
+	fb, _ := New(b)
+	df, err := Concat(fa, fb)
+	fa.Release()
+	fb.Release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer df.Release()
+	out, err := df.Unique(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Release()
+	got := out.cols[0].Chunk(0).(*array.Int64).Int64Values()
+	if want := []int64{3, 1, 2, 5, 4}; !slices.Equal(got, want) {
+		t.Fatalf("chunks=%d got %v want %v", df.cols[0].NumChunks(), got, want)
+	}
+}
+
 func TestEstimateDistinct(t *testing.T) {
 	for _, card := range []int{1, 1000, 100_000, 262_144, 500_000} {
 		n := max(card*2, 1000)

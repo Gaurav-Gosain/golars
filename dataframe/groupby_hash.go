@@ -245,6 +245,22 @@ func assignGroupsInt64(arr *array.Int64, name string, mem memory.Allocator) ([]i
 // serialAssignInt64 is the single-threaded equivalent of parallelAssignInt64.
 // One intmap, one pass - produces (groupIDs, uniqueKeys) in first-seen order.
 // Preferred at medium sizes where goroutine startup dominates.
+// serialUniqueInt64 returns the distinct values of vals in first-seen
+// order: serialAssignInt64 without the per-row group ids, which Unique
+// does not need.
+func serialUniqueInt64(vals []int64) []int64 {
+	hint := max(len(vals)/4, 16)
+	m := intmap.New(hint)
+	defer m.Release()
+	uniques := make([]int64, 0, hint)
+	for _, v := range vals {
+		if _, inserted := m.InsertOrGet(v, int32(len(uniques))); inserted {
+			uniques = append(uniques, v)
+		}
+	}
+	return uniques
+}
+
 func serialAssignInt64(vals []int64, n int) ([]int, []int64) {
 	// Pre-size to n/4. This function is only called from Unique (see
 	// uniqueFastSingle) - GroupBy goes through parallelAssignInt64
