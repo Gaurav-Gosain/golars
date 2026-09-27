@@ -12,6 +12,7 @@ import (
 	"github.com/Gaurav-Gosain/golars/script"
 	"github.com/Gaurav-Gosain/golars/script/exprparse"
 	"github.com/Gaurav-Gosain/golars/script/predparse"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
 // Pipeline commands add a lazy step to the focused pipeline. Nothing
@@ -21,7 +22,7 @@ import (
 // spaces) and `select a, total = x + y, dt.year(ts)` (comma-separated
 // expressions, optionally named).
 func cmdSelect(s *state, c *call) error {
-	items, err := selectItems(c.rest)
+	items, err := selectItems(c.stmt, c.rest)
 	if err != nil {
 		return err
 	}
@@ -45,11 +46,25 @@ type selectItem struct {
 	label string
 }
 
-// selectItems parses the select list. Text without parentheses, `=`
-// or quotes is a plain column list, so names such as `my-col` keep
-// working; anything else is a comma-separated expression list.
-func selectItems(rest string) ([]selectItem, error) {
-	if !strings.ContainsAny(rest, "(=\"'") {
+// selectItems parses the select list. Text without parentheses, `=`,
+// quotes or operators is a plain column list, so names such as
+// `my-col` keep working; anything else is a comma-separated
+// expression list.
+func selectItems(st *syntax.Stmt, rest string) ([]selectItem, error) {
+	if st != nil {
+		if len(syntaxParts(st, syntax.PartExpr)) > 0 {
+			items, err := namedItems(st)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]selectItem, len(items))
+			for i, it := range items {
+				out[i] = selectItem{it.e, it.label}
+			}
+			return out, nil
+		}
+	}
+	if syntax.SelectIsPlain(rest) {
 		cols := columnList(strings.Fields(rest))
 		out := make([]selectItem, len(cols))
 		for i, name := range cols {
@@ -186,16 +201,15 @@ func cmdLimit(s *state, c *call) error {
 // cmdGroupBy handles `groupby KEYS AGG...` where each AGG is
 // `col:op[:alias]` or `name=EXPR`.
 func cmdGroupBy(s *state, c *call) error {
-	args := script.SplitTopLevel(c.rest, ' ')
-	if len(args) < 2 {
+	keys := columnList(c.args[:min(len(c.args), 1)])
+	aggs, err := aggregations(c.stmt)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 || len(aggs) == 0 {
 		return c.usage()
 	}
 	if err := s.requireFocus(); err != nil {
-		return err
-	}
-	keys := columnList(args[:1])
-	aggs, err := parseAggSpecs(args[1:])
-	if err != nil {
 		return err
 	}
 	s.pushLazy(s.currentLazy().GroupBy(keys...).Agg(aggs...),
@@ -313,12 +327,12 @@ options:
 	if opts.Every == "" {
 		return fmt.Errorf("missing `every DURATION`, as in `group_by_dynamic ts every 1h amount:sum`")
 	}
-	if len(rest) == 0 {
-		return c.usage()
-	}
-	aggList, err := parseAggSpecs(rest)
+	aggList, err := aggregations(c.stmt)
 	if err != nil {
 		return err
+	}
+	if len(aggList) == 0 {
+		return c.usage()
 	}
 	s.pushLazy(s.currentLazy().GroupByDynamic(index, opts).Agg(aggList...),
 		"added GROUP BY DYNAMIC %s every %s with %d aggregations", index, opts.Every, len(aggList))
@@ -433,23 +447,97 @@ func cmdJoinAsof(s *state, c *call) error {
 	return nil
 }
 
-// cmdWith handles `with NAME = EXPR`, appending a derived column. The
-// expression grammar lives in script/exprparse.
+// cmdWith handles `with NAME = EXPR[, NAME = EXPR...]`, adding
+// derived columns. The expression grammar lives in script/exprparse.
 func cmdWith(s *state, c *call) error {
-	name, exprText, isAssign := splitAssignment(c.rest)
-	if !isAssign {
+	items, err := namedItems(c.stmt)
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
 		return c.usage()
 	}
 	if err := s.requireFocus(); err != nil {
 		return err
 	}
-	e, err := exprparse.Parse(exprText)
-	if err != nil {
-		return fmt.Errorf("%s: %w", name, err)
+	exprs := make([]expr.Expr, len(items))
+	labels := make([]string, len(items))
+	for i, it := range items {
+		exprs[i] = it.e
+		labels[i] = cmdStyle.Render(it.name) + " = " + dimStyle.Render(it.text)
 	}
-	s.pushLazy(s.currentLazy().WithColumns(e.Alias(name)),
-		"with %s = %s", cmdStyle.Render(name), dimStyle.Render(exprText))
+	s.pushLazy(s.currentLazy().WithColumns(exprs...), "with %s", strings.Join(labels, ", "))
 	return nil
+}
+
+// namedItem is one `name = expr` or bare expression of a statement.
+type namedItem struct {
+	name, text, label string
+	e                 expr.Expr
+}
+
+// namedItems compiles the expression parts of a parsed statement,
+// aliasing each `name = expr` item.
+func namedItems(st *syntax.Stmt) ([]namedItem, error) {
+	var out []namedItem
+	for i := 0; i < len(st.Parts); i++ {
+		p := st.Parts[i]
+		var name string
+		if p.Kind == syntax.PartNewColumn && i+2 < len(st.Parts) && st.Parts[i+2].Kind == syntax.PartExpr {
+			name = p.Value
+			i += 2
+			p = st.Parts[i]
+		} else if p.Kind != syntax.PartExpr {
+			continue
+		}
+		e, err := exprparse.Compile(p.Expr, p.Text)
+		if err != nil {
+			return nil, err
+		}
+		label := p.Text
+		if name != "" {
+			e = e.Alias(name)
+			label = name + " = " + p.Text
+		}
+		out = append(out, namedItem{name: name, text: p.Text, label: label, e: e})
+	}
+	return out, nil
+}
+
+func syntaxParts(st *syntax.Stmt, kind syntax.PartKind) []syntax.Part {
+	var out []syntax.Part
+	for _, p := range st.Parts {
+		if p.Kind == kind {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// aggregations compiles the col:op[:alias] and name = expr items of a
+// groupby statement in source order.
+func aggregations(st *syntax.Stmt) ([]expr.Expr, error) {
+	var out []expr.Expr
+	for i := 0; i < len(st.Parts); i++ {
+		p := st.Parts[i]
+		switch {
+		case p.Kind == syntax.PartAgg:
+			e, err := parseAggSpec(p.Text)
+			if err != nil {
+				return nil, fmt.Errorf("aggregation %q: %w", p.Text, err)
+			}
+			out = append(out, e)
+		case p.Kind == syntax.PartNewColumn && i+2 < len(st.Parts) && st.Parts[i+2].Kind == syntax.PartExpr:
+			x := st.Parts[i+2]
+			e, err := exprparse.Compile(x.Expr, x.Text)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, e.Alias(p.Value))
+			i += 2
+		}
+	}
+	return out, nil
 }
 
 // splitAssignment splits `NAME = EXPR` at the first `=` that is not

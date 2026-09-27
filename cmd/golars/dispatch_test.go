@@ -162,16 +162,16 @@ func TestAliasesDispatch(t *testing.T) {
 func TestDispatchErrors(t *testing.T) {
 	s, _ := scriptState(t)
 	cases := map[string]string{
-		"filtet age > 1":              `unknown command "filtet" (did you mean "filter"?)`,
-		"sort age sideways":           `sort: unknown column "sideways" (want a column, asc or desc)`,
-		"sort desc":                   `sort: direction "desc" must follow a column`,
-		"head -3":                     `head: invalid row count "-3": want a non-negative integer`,
-		"cast age i128":               `cast: unknown dtype "i128"`,
-		"pivot name dept age median":  `pivot: unknown aggregation "median"`,
-		"join":                        "usage: join <path|NAME> on <key> [inner|left|cross]",
-		"load a b c d":                "usage: load <path> [as NAME]",
+		"filtet age > 1":              "unknown command \"filtet\"\n    filtet age > 1\n    ^^^^^^\n  hint: did you mean \"filter\"?",
+		"sort age sideways":           `unknown column "sideways"`,
+		"sort desc":                   `direction "desc" must follow a column`,
+		"head -3":                     `expected a non-negative integer, got "-3"`,
+		"cast age i128":               `unknown dtype "i128"`,
+		"pivot name dept age median":  `unknown pivot option "median"`,
+		"join":                        "join needs a frame name or file path",
+		"load a b c d":                `unexpected argument "b"`,
 		"use nope":                    `use: no frame named "nope"`,
-		"groupby dept age:frobnicate": `groupby: aggregation "age:frobnicate": unknown op "frobnicate"`,
+		"groupby dept age:frobnicate": `unknown aggregation "frobnicate"`,
 		"load missing.txt":            `load: unsupported file extension ".txt"`,
 		".":                           `unknown command ""`,
 	}

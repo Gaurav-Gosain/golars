@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Gaurav-Gosain/golars/script"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
 // call is one parsed statement handed to a command handler.
@@ -17,6 +18,9 @@ type call struct {
 	// rest is the raw text after the command, for handlers with their
 	// own grammar (filter, with).
 	rest string
+	// stmt is the parsed statement: its parts carry the argument
+	// roles and expression trees that script/syntax found.
+	stmt *syntax.Stmt
 }
 
 // usage returns the standard error for a malformed statement. The
@@ -159,28 +163,56 @@ func (s *state) handle(line string) error {
 		return nil
 	}
 	s.evalCount++
-	fields := strings.Fields(line)
-	verb := strings.TrimPrefix(fields[0], ".")
-	spec := script.FindCommand(verb)
+	f := syntax.Parse(line)
+	if len(f.Stmts) == 0 {
+		return nil
+	}
+	st := f.Stmts[0]
+	spec := st.Spec
 	if spec == nil {
-		return script.UnknownCommand(verb)
+		err := script.UnknownCommand(st.Cmd.Text)
+		if serr := syntax.FirstError(st); serr != nil {
+			return &unknownCommandError{err: err, shown: serr}
+		}
+		return err
+	}
+	// Reject malformed statements before running anything, with the
+	// same diagnostics golars lint and the language server report.
+	if err := syntax.FirstError(st); err != nil {
+		return err
 	}
 	h, found := handlers[spec.Name]
 	if !found {
 		return fmt.Errorf("%s: no handler registered", spec.Name)
 	}
+	if err := s.checkColumns(st); err != nil {
+		return err
+	}
+	rest, _ := st.Rest()
 	c := &call{
 		spec: spec,
-		args: fields[1:],
-		rest: strings.TrimSpace(strings.TrimPrefix(line, fields[0])),
+		args: syntax.SplitArgs(rest),
+		rest: rest,
+		stmt: st,
 	}
-	err := h(s, c)
+	err := syntax.Locate(st, h(s, c))
 	var ue *usageError
-	if err == nil || errors.As(err, &ue) || errors.Is(err, errExit) || errors.Is(err, errNoFrame) {
+	var se *syntax.StmtError
+	if err == nil || errors.As(err, &ue) || errors.As(err, &se) || errors.Is(err, errExit) || errors.Is(err, errNoFrame) {
 		return err
 	}
 	return fmt.Errorf("%s: %w", spec.Name, err)
 }
+
+// unknownCommandError keeps errors.Is(err, script.ErrUnknownCommand)
+// working while printing the caret form.
+type unknownCommandError struct {
+	err   error
+	shown error
+}
+
+func (e *unknownCommandError) Error() string { return e.shown.Error() }
+func (e *unknownCommandError) Unwrap() error { return e.err }
 
 // parseNat parses a non-negative decimal integer. Signs, spaces and
 // values that overflow int are rejected.

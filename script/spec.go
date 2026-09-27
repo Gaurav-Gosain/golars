@@ -223,7 +223,7 @@ var Commands = []CommandSpec{
 	{Name: "timing", Signature: "timing", Grammar: "", Summary: "Toggle per-statement timing output.", Category: "session"},
 	{Name: "info", Signature: "info", Grammar: "", Summary: "Runtime info: Go version, heap, uptime.", Category: "session"},
 	{Name: "clear", Signature: "clear", Grammar: "", Summary: "Clear the screen.", Category: "session"},
-	{Name: "help", Aliases: []string{"h", "?"}, Signature: "help", Grammar: "", Summary: "Print the command reference.", Category: "session"},
+	{Name: "help", Aliases: []string{"h", "?"}, Signature: "help", Grammar: "[word]", Summary: "Print the command reference.", Category: "session"},
 	{Name: "exit", Aliases: []string{"quit", "q"}, Signature: "exit", Grammar: "", Summary: "Quit the REPL. In a script, stop running further statements.", Category: "session"},
 	{Name: "reverse", Signature: "reverse", Grammar: "", Summary: "Reverse the row order of the focus (lazy).", Category: "pipeline"},
 	{
@@ -583,7 +583,7 @@ var Commands = []CommandSpec{
 		Category: "aggregate", ArgKind: "column",
 	},
 	{
-		Name: "pivot", Signature: "pivot <index_cols> <on_col> <values_col> [agg]", Grammar: "collist col col [first|sum|mean|min|max|count]",
+		Name: "pivot", Signature: "pivot <index_cols> <on_col> <values_col> [agg]", Grammar: "collist col col [first|sum|mean|avg|min|max|count]",
 		Summary:  "Long-to-wide pivot. agg: first/sum/mean/min/max/count (default first).",
 		LongDoc:  "INDEX_COLS may be a comma-separated list.",
 		Category: "reshape", ArgKind: "column",
