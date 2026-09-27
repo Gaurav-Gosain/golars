@@ -15,6 +15,8 @@ use std::time::Instant;
 mod extra;
 mod mem;
 use extra::add_extra_workloads;
+mod joins_extra;
+use joins_extra::add_join_workloads;
 
 #[global_allocator]
 static GLOBAL: mem::Counting = mem::Counting;
@@ -1154,6 +1156,7 @@ fn main() {
 
     // Workloads beyond the original numeric suite (strings, IO, lazy).
     add_extra_workloads(&mut out, &only);
+    add_join_workloads(&mut out, &only);
 
     // Every Result comes from exactly one time_ns call, so the memory
     // log lines up with out by position. If it ever does not, the

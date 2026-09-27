@@ -24,6 +24,7 @@ polars = { version = "0.53", features = [
     "rank",
     "csv",
     "parquet",
+    "semi_anti_join",
 ] }
 polars-core = "0.53"
 polars-ops = "0.53"

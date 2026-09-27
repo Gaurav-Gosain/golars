@@ -1051,6 +1051,80 @@ def add_extra_workloads(add) -> None:
 
 
 
+# Join workloads beyond inner and left joins. cmd/bench/joins_extra.go and
+# bench/polars-rust/src/joins_extra.rs build the same frames.
+
+
+def _join_perm(n: int) -> np.ndarray:
+    return (np.arange(n, dtype=np.int64) * 7919) % n
+
+
+def _run_join(name: str, n: int, bytes_in: int, left, right, on, how: str) -> Result:
+    def run():
+        _ = left.join(right, on=on, how=how)
+
+    t = time_ns(run)
+    return Result(name, n, t, bytes_in / t * 1000.0)
+
+
+def bench_full_join(n: int) -> Result:
+    rng = np.random.default_rng(42)
+    left = pl.DataFrame({
+        "id": np.arange(n, dtype=np.int64),
+        "lv": rng.integers(0, 1 << 20, size=n, dtype=np.int64),
+    })
+    right = pl.DataFrame({
+        "id": _join_perm(n) + n // 2,
+        "rv": rng.integers(0, 1 << 20, size=n, dtype=np.int64),
+    })
+    return _run_join("FullJoin", n, n * 32, left, right, "id", "full")
+
+
+def _semi_anti_frames(n: int):
+    rng = np.random.default_rng(44)
+    left = pl.DataFrame({
+        "id": rng.integers(0, 2 * n, size=n, dtype=np.int64),
+        "lv": rng.integers(0, 1 << 20, size=n, dtype=np.int64),
+    })
+    right = pl.DataFrame({"id": rng.integers(0, n, size=n, dtype=np.int64)})
+    return left, right
+
+
+def bench_semi_join(n: int) -> Result:
+    left, right = _semi_anti_frames(n)
+    return _run_join("SemiJoin", n, n * 24, left, right, "id", "semi")
+
+
+def bench_anti_join(n: int) -> Result:
+    left, right = _semi_anti_frames(n)
+    return _run_join("AntiJoin", n, n * 24, left, right, "id", "anti")
+
+
+def bench_inner_join_2key(n: int) -> Result:
+    rng = np.random.default_rng(42)
+    i = np.arange(n, dtype=np.int64)
+    p = _join_perm(n)
+    left = pl.DataFrame({
+        "a": i % 1024,
+        "b": i // 1024,
+        "lv": rng.integers(0, 1 << 20, size=n, dtype=np.int64),
+    })
+    right = pl.DataFrame({
+        "a": p % 1024,
+        "b": p // 1024,
+        "rv": rng.integers(0, 1 << 20, size=n, dtype=np.int64),
+    })
+    return _run_join("InnerJoin2Key", n, n * 48, left, right, ["a", "b"], "inner")
+
+
+def add_join_workloads(add) -> None:
+    n = EXTRA_ROWS
+    add("FullJoin", lambda: bench_full_join(n))
+    add("SemiJoin", lambda: bench_semi_join(n))
+    add("AntiJoin", lambda: bench_anti_join(n))
+    add("InnerJoin2Key", lambda: bench_inner_join_2key(n))
+
+
 def main() -> int:
     import argparse
     import re
@@ -1142,6 +1216,7 @@ def main() -> int:
 
     # Workloads beyond the original numeric suite (strings, IO, lazy).
     add_extra_workloads(add)
+    add_join_workloads(add)
 
     for r in string_benches():
         out.append(vars(r))

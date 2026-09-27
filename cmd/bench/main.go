@@ -1121,6 +1121,7 @@ func main() {
 	addAll([]string{"Cut(10 bins)", "QCut(10)", "ReplaceStrict(500 keys)", "FilterSumPerGroup(groups=64)"}, func() []result { return coreExprBenches(ctx) })
 	// Workloads beyond the original numeric suite live in extra.go.
 	addExtraWorkloads(ctx, add)
+	addJoinWorkloads(ctx, add)
 
 	out := map[string]any{
 		"engine":  "golars",
