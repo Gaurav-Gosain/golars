@@ -200,7 +200,14 @@ func WriteFile(ctx context.Context, path string, df *dataframe.DataFrame, opts .
 // concatChunks flattens a Series to a single arrow.Array. The caller owns one
 // reference and must Release.
 func concatChunks(s *series.Series, mem memory.Allocator) (arrow.Array, error) {
-	chunks := s.Chunks()
+	// Skip empty chunks: arrow's Concatenate panics on an empty
+	// dictionary chunk whose dictionary has no value buffer.
+	var chunks []arrow.Array
+	for _, c := range s.Chunks() {
+		if c.Len() > 0 {
+			chunks = append(chunks, c)
+		}
+	}
 	switch len(chunks) {
 	case 0:
 		return array.MakeArrayOfNull(mem, s.DType().Arrow(), 0), nil
