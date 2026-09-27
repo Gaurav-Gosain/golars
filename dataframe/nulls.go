@@ -145,6 +145,13 @@ func dropNullsFastSingle(ctx context.Context, df *DataFrame, name string) (*Data
 	if col.NullCount() == 0 {
 		return df.Clone(), true, nil
 	}
+	// The fused kernels below filter only this column, from its first
+	// chunk. That is the whole frame only for a single-column,
+	// single-chunk frame; otherwise the other columns were dropped
+	// from the result (found by internal/difftest).
+	if df.Width() != 1 || col.NumChunks() != 1 {
+		return nil, false, nil
+	}
 	chunk := col.Chunk(0)
 	data := chunk.Data()
 	if data.Offset() != 0 || len(data.Buffers()) < 1 || data.Buffers()[0] == nil {
