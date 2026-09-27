@@ -30,8 +30,10 @@ func joinFrames(ctx context.Context, left, right *DataFrame, spec JoinSpec, cfg 
 	lkeys := make([]*series.Series, len(spec.LeftOn))
 	rkeys := make([]*series.Series, len(spec.RightOn))
 	for i := range spec.LeftOn {
-		lkeys[i], _ = left.Column(spec.LeftOn[i])
-		rkeys[i], _ = right.Column(spec.RightOn[i])
+		// checkJoinKeys found both names.
+		li, _ := left.Schema().Index(spec.LeftOn[i])
+		ri, _ := right.Schema().Index(spec.RightOn[i])
+		lkeys[i], rkeys[i] = left.ColumnAt(li), right.ColumnAt(ri)
 	}
 
 	var lIdx, rIdx []int
@@ -60,14 +62,17 @@ func joinFrames(ctx context.Context, left, right *DataFrame, spec JoinSpec, cfg 
 		if err != nil {
 			return nil, err
 		}
-		if err := validateJoinCodes(&codes, spec); err != nil {
+		// polars returns early from a multi-key inner join with an empty
+		// side, before validating.
+		skipValidate := spec.How == InnerJoin && len(lkeys) > 1 && (left.Height() == 0 || right.Height() == 0)
+		if err := validateJoinCodes(&codes, spec); err != nil && !skipValidate {
 			codes.release()
 			return nil, err
 		}
 		lIdx, rIdx = joinByCodes(&codes, spec)
 		codes.release()
 	}
-	out, err := buildJoinFrame(ctx, left, right, lIdx, rIdx, layout, spec.RightOn, cfg)
+	out, err := buildJoinFrame(ctx, left, right, lIdx, rIdx, layout, cfg)
 	// The index arrays are only read by the gathers; recycle them.
 	intScratch.put(lIdx)
 	intScratch.put(rIdx)
@@ -343,7 +348,7 @@ func semiAntiByCodes(c *joinCodes, semi bool) []int {
 // buildJoinFrame gathers the output columns listed in layout. lIdx and
 // rIdx pair up output rows with source rows (-1 for none); rIdx is nil
 // for semi and anti joins.
-func buildJoinFrame(ctx context.Context, left, right *DataFrame, lIdx, rIdx []int, layout []joinOutCol, rightOn []string, cfg joinConfig) (*DataFrame, error) {
+func buildJoinFrame(ctx context.Context, left, right *DataFrame, lIdx, rIdx []int, layout []joinOutCol, cfg joinConfig) (*DataFrame, error) {
 	// Repeated joins (a benchmark loop or a streaming pipeline) recycle
 	// the output buffers through the pool.
 	cfg.alloc = compute.PoolingMem(cfg.alloc)
@@ -363,22 +368,21 @@ func buildJoinFrame(ctx context.Context, left, right *DataFrame, lIdx, rIdx []in
 		)
 		switch c.src {
 		case joinFromLeft:
-			src, _ := left.Column(c.col)
+			src := left.ColumnAt(c.idx)
 			if leftIdentity {
 				out = src.Clone()
 			} else {
 				out, err = gatherWithNulls(ctx, src, lIdx, n, cfg.alloc)
 			}
 		case joinFromRight:
-			src, _ := right.Column(c.col)
+			src := right.ColumnAt(c.idx)
 			if rightIdentity {
 				out = src.Clone()
 			} else {
 				out, err = gatherWithNulls(ctx, src, rIdx, n, cfg.alloc)
 			}
 		case joinFromBoth:
-			lk, _ := left.Column(c.col)
-			rk, _ := right.Column(rightOn[c.key])
+			lk, rk := left.ColumnAt(c.idx), right.ColumnAt(c.ridx)
 			out, err = coalesceJoinKey(ctx, lk, rk, lIdx, rIdx, c.dtype, cfg.alloc)
 		}
 		if err != nil {

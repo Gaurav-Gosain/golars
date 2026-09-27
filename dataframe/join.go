@@ -1448,7 +1448,7 @@ func crossJoin(ctx context.Context, left, right *DataFrame, layout []joinOutCol,
 			at++
 		}
 	}
-	out, err := buildJoinFrame(ctx, left, right, leftIdx, rightIdx, layout, nil, cfg)
+	out, err := buildJoinFrame(ctx, left, right, leftIdx, rightIdx, layout, cfg)
 	intScratch.put(leftIdx)
 	intScratch.put(rightIdx)
 	return out, err

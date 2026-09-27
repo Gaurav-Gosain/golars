@@ -27,7 +27,9 @@ type joinOutCol struct {
 	name  string
 	src   joinColSource
 	col   string // source column name on its side
+	idx   int    // source column position on its side
 	key   int    // key pair index for joinFromBoth
+	ridx  int    // right key column position for joinFromBoth
 	dtype dtype.DType
 }
 
@@ -212,35 +214,36 @@ func joinableKey(t dtype.DType) bool {
 // polars rules for coalescing and suffixes.
 func joinLayout(ls, rs *schema.Schema, spec JoinSpec) ([]joinOutCol, error) {
 	var out []joinOutCol
-	leftField := func(f schema.Field) joinOutCol {
-		return joinOutCol{name: f.Name, src: joinFromLeft, col: f.Name, dtype: f.DType}
+	leftField := func(i int, f schema.Field) joinOutCol {
+		return joinOutCol{name: f.Name, src: joinFromLeft, col: f.Name, idx: i, dtype: f.DType}
 	}
 	var dropRight []string
 	switch spec.How {
 	case SemiJoin, AntiJoin:
-		for _, f := range ls.Fields() {
-			out = append(out, leftField(f))
+		for i, f := range ls.Fields() {
+			out = append(out, leftField(i, f))
 		}
 		return out, nil
 	case CrossJoin:
-		for _, f := range ls.Fields() {
-			out = append(out, leftField(f))
+		for i, f := range ls.Fields() {
+			out = append(out, leftField(i, f))
 		}
 	case RightJoin:
-		for _, f := range ls.Fields() {
+		for i, f := range ls.Fields() {
 			if spec.Coalesce && slices.Contains(spec.LeftOn, f.Name) {
 				continue
 			}
-			out = append(out, leftField(f))
+			out = append(out, leftField(i, f))
 		}
 	default:
-		for _, f := range ls.Fields() {
-			c := leftField(f)
+		for i, f := range ls.Fields() {
+			c := leftField(i, f)
 			if spec.How == FullJoin && spec.Coalesce {
 				if k := slices.Index(spec.LeftOn, f.Name); k >= 0 {
 					rf, _ := rs.FieldByName(spec.RightOn[k])
+					ri, _ := rs.Index(spec.RightOn[k])
 					t, _ := joinKeySupertype(f.DType, rf.DType)
-					c = joinOutCol{name: f.Name, src: joinFromBoth, col: f.Name, key: k, dtype: t}
+					c = joinOutCol{name: f.Name, src: joinFromBoth, col: f.Name, idx: i, key: k, ridx: ri, dtype: t}
 				}
 			}
 			out = append(out, c)
@@ -250,7 +253,7 @@ func joinLayout(ls, rs *schema.Schema, spec JoinSpec) ([]joinOutCol, error) {
 		}
 	}
 	nLeft := len(out)
-	for _, f := range rs.Fields() {
+	for i, f := range rs.Fields() {
 		if slices.Contains(dropRight, f.Name) {
 			continue
 		}
@@ -258,7 +261,7 @@ func joinLayout(ls, rs *schema.Schema, spec JoinSpec) ([]joinOutCol, error) {
 		if slices.ContainsFunc(out[:nLeft], func(c joinOutCol) bool { return c.name == name }) {
 			name += spec.Suffix
 		}
-		out = append(out, joinOutCol{name: name, src: joinFromRight, col: f.Name, dtype: f.DType})
+		out = append(out, joinOutCol{name: name, src: joinFromRight, col: f.Name, idx: i, dtype: f.DType})
 	}
 	seen := make(map[string]struct{}, len(out))
 	for _, c := range out {

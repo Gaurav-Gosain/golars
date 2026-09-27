@@ -114,6 +114,14 @@ FRAMES = {
         ("k", "i64", [2, 1]),
         ("v", "i64", [5, 6]),
     ],
+    "dupmk": [
+        ("x", "i64", [1, 1, 2]),
+        ("y", "str", ["a", "a", None]),
+    ],
+    "emptymk": [
+        ("x", "i64", []),
+        ("y", "str", []),
+    ],
     "lu": [
         ("k", "i64", [1, 2, 3, None, None]),
         ("a", "i64", [1, 2, 3, 4, 5]),
@@ -308,6 +316,13 @@ for how, v, ne in itertools.product(HOWS, ["1:1", "1:m", "m:1", "m:m"], [False, 
     for pair in [("lu", "ru"), ("ru", "lu"), ("l4", "l4"), ("lu", "lu")]:
         add(f"validate_{how}_{v}_ne{ne}_{pair[0]}_{pair[1]}", pair[0], pair[1], how, ["k"] if pair[0] != "l4" else ["a"],
             validate=v, nulls_equal=ne or None, maintain_order="left_right" if how not in ("right",) else "right_left")
+
+# polars skips validation of a multi-key inner join with an empty side.
+for how, v in itertools.product(HOWS, ["1:1", "1:m", "m:1"]):
+    order = "left_right" if how != "right" else "right_left"
+    add(f"validate_mk_emptyR_{how}_{v}", "dupmk", "emptymk", how, ["x", "y"], validate=v, maintain_order=order)
+    add(f"validate_mk_emptyL_{how}_{v}", "emptymk", "dupmk", how, ["x", "y"], validate=v, maintain_order=order)
+    add(f"validate_mk_{how}_{v}", "dupmk", "dupmk", how, ["x", "y"], validate=v, maintain_order=order)
 
 # Key errors.
 add("err_dtype", "ls", "l1", "inner", left_on=["s"], right_on=["k"])
