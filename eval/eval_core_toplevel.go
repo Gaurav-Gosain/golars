@@ -193,7 +193,13 @@ func evalHorizontal(ctx context.Context, ec EvalContext, n expr.FunctionNode, df
 				valid[i] = true
 			}
 		}
-		return series.FromFloat64(name, sum, validOrNil(valid), seriesAlloc(ec))
+		out, err := series.FromFloat64(name, sum, validOrNil(valid), seriesAlloc(ec))
+		if err != nil || target.ID() != arrow.FLOAT32 {
+			return out, err
+		}
+		// polars keeps f32 when every input fits in f32.
+		defer out.Release()
+		return castSeriesTo(ctx, ec, out, target)
 	case "sum_horizontal":
 		if isFloat {
 			s, err := series.FromFloat64(name, sum, nil, seriesAlloc(ec))

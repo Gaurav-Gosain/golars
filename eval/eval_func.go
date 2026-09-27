@@ -628,11 +628,24 @@ func evalScalarAgg(n expr.FunctionNode, s *series.Series) (*series.Series, error
 		}
 		return series.FromBool(s.Name(), []bool{v}, nil)
 	case "product":
-		// polars: integer products are i64, f32 stays f32.
+		// polars: integer and bool products are i64 (u64 stays u64),
+		// f32 stays f32.
+		if s.DType().IsBool() {
+			wide, err := compute.Cast(context.Background(), s, dtype.Int64())
+			if err != nil {
+				return nil, err
+			}
+			// The deferred release above still frees the input.
+			defer wide.Release()
+			s = wide
+		}
 		if s.DType().IsInteger() {
 			v, err := s.ProductInt64()
 			if err != nil {
 				return nil, err
+			}
+			if s.DType().Equal(dtype.Uint64()) {
+				return series.FromUint64(s.Name(), []uint64{uint64(v)}, nil)
 			}
 			return series.FromInt64(s.Name(), []int64{v}, nil)
 		}

@@ -712,6 +712,28 @@ func simplifyNode(e expr.Expr) (expr.Expr, bool) {
 			}
 		}
 	case expr.UnaryNode:
+		if n.Op == expr.OpNeg {
+			// -lit folds to a literal of the same kind (an untyped
+			// literal stays untyped: -lit(2) next to an i8 is i8).
+			if lit, ok := n.Arg.Node().(expr.LitNode); ok {
+				switch v := lit.Value.(type) {
+				case int64:
+					if lit.Dyn {
+						return expr.LitInt(-v), true
+					}
+					if lit.DType.Equal(dtype.Int64()) {
+						return expr.LitInt64(-v), true
+					}
+				case float64:
+					if lit.Dyn {
+						return expr.LitFloat(-v), true
+					}
+					if lit.DType.Equal(dtype.Float64()) {
+						return expr.LitFloat64(-v), true
+					}
+				}
+			}
+		}
 		if n.Op == expr.OpNot {
 			// not(not(x)) → x
 			if inner, ok := n.Arg.Node().(expr.UnaryNode); ok && inner.Op == expr.OpNot {

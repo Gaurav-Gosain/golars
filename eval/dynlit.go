@@ -14,13 +14,33 @@ import (
 // dynLit returns the untyped numeric literal e is (possibly under an
 // alias), if any.
 func dynLit(e expr.Expr) (expr.LitNode, bool) {
+	neg := false
 	for {
 		switch n := e.Node().(type) {
 		case expr.AliasNode:
 			e = n.Inner
 			continue
+		case expr.UnaryNode:
+			// -lit(2) is still an untyped literal in polars.
+			if n.Op != expr.OpNeg {
+				return expr.LitNode{}, false
+			}
+			neg = !neg
+			e = n.Arg
+			continue
 		case expr.LitNode:
-			return n, n.Dyn && n.Value != nil
+			if !n.Dyn || n.Value == nil {
+				return expr.LitNode{}, false
+			}
+			if neg {
+				switch v := n.Value.(type) {
+				case int64:
+					return expr.LitInt(-v).Node().(expr.LitNode), true
+				case float64:
+					return expr.LitFloat(-v).Node().(expr.LitNode), true
+				}
+			}
+			return n, true
 		}
 		return expr.LitNode{}, false
 	}

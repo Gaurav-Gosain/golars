@@ -201,7 +201,7 @@ func registerElementwise() {
 	registerCore("truediv", binaryCore(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
 		return a.TrueDiv(b, seriesAlloc(ec))
 	}))
-	registerCore("pow_expr", binaryCore(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
+	registerCore("pow_expr", binaryCoreAdopt(func(a, b *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
 		return a.PowSeries(b, seriesAlloc(ec))
 	}))
 	registerCore("log_base", unaryCore(func(s *series.Series, n expr.FunctionNode, ec EvalContext) (*series.Series, error) {
@@ -371,13 +371,8 @@ func superType(a, b arrow.DataType) arrow.DataType {
 	case arrow.TypeEqual(a, b):
 		return a
 	}
-	aNum := arrow.IsInteger(a.ID()) || arrow.IsFloating(a.ID())
-	bNum := arrow.IsInteger(b.ID()) || arrow.IsFloating(b.ID())
-	if aNum && bNum {
-		if arrow.IsFloating(a.ID()) || arrow.IsFloating(b.ID()) {
-			return arrow.PrimitiveTypes.Float64
-		}
-		return arrow.PrimitiveTypes.Int64
+	if st, ok := dtype.NumericSupertype(dtype.FromArrow(a), dtype.FromArrow(b)); ok {
+		return st.Arrow()
 	}
 	if a.ID() == arrow.STRING || b.ID() == arrow.STRING {
 		return arrow.BinaryTypes.String
