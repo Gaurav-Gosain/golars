@@ -548,7 +548,9 @@ func dummyLabel(a arrow.Array, r int) string {
 	val := cellValue(a, r)
 	switch x := val.(type) {
 	case string:
-		return x
+		// The label becomes a column name that outlives a: copy it out
+		// of the arrow buffer, which may be recycled once a is released.
+		return strings.Clone(x)
 	case time.Time:
 		return x.Format("2006-01-02 15:04:05.999999999")
 	}
