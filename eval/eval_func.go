@@ -234,8 +234,10 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 			return nil, err
 		}
 		defer fillArg.Release()
-		if fillArg.Len() > 1 && fillArg.Len() == arg0.Len() {
-			// A column-valued fill (fill_null(col("b"))) fills row by row.
+		// A column-valued fill (fill_null(col("b"))) fills row by row. On
+		// an empty or one-row frame the column has no usable first value
+		// (it is empty or null), so it also takes the row-wise path.
+		if fillArg.Len() == arg0.Len() && (fillArg.Len() != 1 || fillArg.NullCount() == 1) {
 			releaseOnErr = nil
 			defer arg0.Release()
 			return fillNullFrom(ctx, ec, arg0, fillArg)
