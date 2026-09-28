@@ -145,6 +145,11 @@ type frameState struct {
 	focusName string                // "" = anonymous
 	focus     frameShape            // shape of the focus
 	staged    map[string]frameShape // NAME → shape
+	// unknown is set when the focus depends on state the LSP can't see
+	// (notebook cells run in a shared kernel; the LSP gets one virtual
+	// document per cell). Inlay-hint emission honours this and skips
+	// downstream hints rather than printing wrong shapes.
+	unknown bool
 }
 
 // framesAtLine walks the document up to (but not including) stopLine
@@ -203,6 +208,14 @@ func applyStmt(st *frameState, dir, stmt string) {
 		name := parts[1]
 		staged, ok := st.staged[name]
 		if !ok {
+			// Frame may have been staged in a prior notebook cell that
+			// the LSP can't see (one virtual document per cell). Mark
+			// the focus as unknown so the inlay-hint emitter suppresses
+			// the misleading "0 rows × 0 cols" annotation - both for
+			// this line and every downstream pipeline statement.
+			st.focusName = name
+			st.focus = frameShape{rows: rowsUnknown}
+			st.unknown = true
 			return
 		}
 		st.focusName = name

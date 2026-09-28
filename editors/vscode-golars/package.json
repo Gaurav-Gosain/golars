@@ -13,20 +13,21 @@
     "vscode": "^1.84.0"
   },
   "categories": ["Programming Languages", "Data Science"],
-  "activationEvents": ["onLanguage:glr"],
+  "activationEvents": ["onLanguage:golars"],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
       {
-        "id": "glr",
-        "aliases": ["golars", "GLR"],
+        "id": "golars",
+        "aliases": ["golars", "GLR", "glr"],
         "extensions": [".glr"],
+        "mimetypes": ["text/x-glr", "text/x-golars"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "glr",
+        "language": "golars",
         "scopeName": "source.glr",
         "path": "./syntaxes/glr.tmLanguage.json"
       }
@@ -54,6 +55,11 @@
           "type": "string",
           "default": "golars",
           "description": "Path to the golars CLI (used for preview + explain commands)."
+        },
+        "golars.logFile": {
+          "type": "string",
+          "default": "",
+          "description": "If non-empty, golars-lsp duplicates its stderr to this file (for debugging)."
         }
       }
     }

@@ -587,7 +587,7 @@ func (s *server) handleInlayHint(msg *rawMessage) {
 		s.reply(msg, []inlayHint{})
 		return
 	}
-	hints := collectInlayHints(doc, p.Range)
+	hints := collectInlayHints(doc, p.Range, s.docs.priorCells(p.TextDocument.URI))
 	if hints == nil {
 		hints = []inlayHint{}
 	}
@@ -605,7 +605,7 @@ func (s *server) handleInlayHint(msg *rawMessage) {
 // a richer probe hint listing the focused frame's columns in full -
 // a cheap way for the user to peek at the schema without running
 // `.schema` in the REPL.
-func collectInlayHints(d *document, rng lspRange) []inlayHint {
+func collectInlayHints(d *document, rng lspRange, priorCells []string) []inlayHint {
 	lo := int(rng.Start.Line)
 	hi := int(rng.End.Line)
 	if lo < 0 {
@@ -620,6 +620,19 @@ func collectInlayHints(d *document, rng lspRange) []inlayHint {
 	// starts mid-document. State-updating is decoupled from hint
 	// emission: we only emit for lines inside [lo, hi].
 	state := frameState{staged: make(map[string]frameShape)}
+	// Replay prior notebook cells so `use NAME` and other references
+	// to frames staged earlier produce the right shape inferences.
+	// Cells are joined in didOpen order, which matches notebook visual
+	// order on first load.
+	for _, cell := range priorCells {
+		for _, raw := range strings.Split(cell, "\n") {
+			stmt := script.Normalize(raw)
+			if stmt == "" {
+				continue
+			}
+			applyStmt(&state, dir, stmt)
+		}
+	}
 	hints := make([]inlayHint, 0, hi-lo+1)
 
 	for li := 0; li <= hi && li < len(d.lines); li++ {
@@ -661,6 +674,13 @@ func collectInlayHints(d *document, rng lspRange) []inlayHint {
 		parts := strings.Fields(stmt)
 		cmd := strings.TrimPrefix(parts[0], ".")
 		if !isShapeStatement(cmd) {
+			continue
+		}
+		// Notebook cells run against a shared kernel; the LSP only sees
+		// the current cell's text. When `use NAME` references a frame
+		// staged in a prior cell, downstream shape inference is blind
+		// and would print wrong numbers. Skip silently in that case.
+		if state.unknown {
 			continue
 		}
 		// For `load PATH as NAME` the focus is unchanged: the

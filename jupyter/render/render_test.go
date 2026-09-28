@@ -35,9 +35,13 @@ func TestHTMLRoundtrip(t *testing.T) {
 			t.Errorf("HTML missing %q\n%s", want, out)
 		}
 	}
-	// Inline style means notebooks pick up styling without external CSS.
-	if !strings.Contains(out, "border-collapse") {
-		t.Errorf("HTML missing inline styling")
+	// Class-based styling: leans on JupyterLab's built-in .dataframe CSS
+	// so light/dark themes work without us hardcoding palettes.
+	if !strings.Contains(out, `class="dataframe"`) {
+		t.Errorf("HTML missing dataframe class hook")
+	}
+	if !strings.Contains(out, "shape: (3, 3)") {
+		t.Errorf("HTML missing shape caption")
 	}
 }
 

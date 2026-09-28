@@ -47,42 +47,44 @@ func HTML(df *dataframe.DataFrame) string { return HTMLWith(df, DefaultLimits())
 
 // HTMLWith is HTML with caller-supplied limits.
 //
-// Styling: borders use currentColor at 25% opacity, headers use
-// currentColor at 100%, dtypes + nulls at 60% / 40%. No filled
-// backgrounds. This way the table inherits the surrounding text
-// colour and reads on light or dark JupyterLab themes without
-// hardcoding either palette.
+// Mirrors the polars-py shape: <table class="dataframe"> + a thead
+// with two rows (column names as <th>, dtypes as <td>). JupyterLab,
+// classic Notebook, nbviewer, Quarto, and VSCode all ship default
+// .dataframe CSS that handles borders/colors per theme - so we add
+// only a small style block for the dtype row + null/ellipsis classes
+// rather than fighting the theme with inline rgba colors.
 func HTMLWith(df *dataframe.DataFrame, lim Limits) string {
 	if df == nil {
 		return `<pre>&lt;nil dataframe&gt;</pre>`
 	}
 	h, w := df.Shape()
 	if w == 0 || h == 0 {
-		return fmt.Sprintf(`<div class="golars-df"><small style="opacity:0.6">shape: (%d, %d) - empty</small></div>`, h, w)
+		return fmt.Sprintf(`<div class="golars-df"><small>shape: (%d, %d) - empty</small></div>`, h, w)
 	}
 	colIdx, colEllipsis := pickCols(w, lim.MaxCols)
 	rowIdx, rowEllipsisAt := pickRows(h, lim.MaxRows)
 
 	var b strings.Builder
-	b.WriteString(`<div class="golars-df" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:inherit">`)
-	fmt.Fprintf(&b, `<small style="opacity:0.6">shape: (%d, %d)</small>`, h, w)
-	b.WriteString(`<table style="border-collapse:collapse;margin-top:4px;border:1px solid;border-color:currentColor;border-color:rgba(128,128,128,0.4)">`)
+	b.WriteString(`<div class="golars-df">`)
+	b.WriteString(golarsDFStyle)
+	fmt.Fprintf(&b, `<small>shape: (%d, %d)</small>`, h, w)
+	b.WriteString(`<table border="1" class="dataframe">`)
 
 	b.WriteString(`<thead><tr>`)
 	for _, ci := range colIdx {
-		if ci < 0 {
-			b.WriteString(thHTML("…"))
-			continue
+		name := "…"
+		if ci >= 0 {
+			name = df.ColumnAt(ci).Name()
 		}
-		b.WriteString(thHTML(df.ColumnAt(ci).Name()))
+		fmt.Fprintf(&b, `<th>%s</th>`, html.EscapeString(name))
 	}
 	b.WriteString(`</tr><tr>`)
 	for _, ci := range colIdx {
-		if ci < 0 {
-			b.WriteString(dtypeHTML("…"))
-			continue
+		dt := "…"
+		if ci >= 0 {
+			dt = df.ColumnAt(ci).DType().String()
 		}
-		b.WriteString(dtypeHTML(df.ColumnAt(ci).DType().String()))
+		fmt.Fprintf(&b, `<td>%s</td>`, html.EscapeString(dt))
 	}
 	b.WriteString(`</tr></thead><tbody>`)
 
@@ -90,22 +92,44 @@ func HTMLWith(df *dataframe.DataFrame, lim Limits) string {
 		b.WriteString(`<tr>`)
 		for _, ci := range colIdx {
 			if ci < 0 || ri == rowEllipsisAt {
-				b.WriteString(tdHTML("…", false))
+				b.WriteString(`<td class="gell">…</td>`)
 				continue
 			}
 			cell, isNull := cellString(df.ColumnAt(ci), rowPos, lim.MaxCellRune)
-			b.WriteString(tdHTML(cell, isNull))
+			cls := ""
+			if isNull {
+				cls = ` class="gnull"`
+			}
+			fmt.Fprintf(&b, `<td%s>%s</td>`, cls, html.EscapeString(cell))
 		}
 		b.WriteString(`</tr>`)
 	}
 
 	b.WriteString(`</tbody></table>`)
 	if colEllipsis {
-		fmt.Fprintf(&b, `<small style="opacity:0.6">(showing %d of %d columns)</small>`, len(colIdx), w)
+		fmt.Fprintf(&b, `<small>(showing %d of %d columns)</small>`, len(colIdx), w)
 	}
 	b.WriteString(`</div>`)
 	return b.String()
 }
+
+// golarsDFStyle: scoped style for the rendered table. We lean on the
+// host's `.dataframe` stylesheet (jupyter, vscode-notebook, nbviewer,
+// quarto all ship one) for layout, but force colors to inherit from
+// the surrounding cell so dark themes work. VSCode notebook + classic
+// jupyter both hardcode `background: white` on `.dataframe`, which
+// blows out on rosé-pine / tokyo-night / catppuccin etc.
+const golarsDFStyle = `<style>
+.golars-df { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: inherit; color: inherit; }
+.golars-df > small { opacity: 0.6; }
+.golars-df .dataframe { margin-top: 4px; border-collapse: collapse; background: transparent !important; color: inherit !important; }
+.golars-df .dataframe th, .golars-df .dataframe td { background: transparent !important; color: inherit !important; border-color: rgba(128,128,128,0.35) !important; padding: 2px 8px; }
+.golars-df .dataframe thead th { text-align: left; font-weight: 600; }
+.golars-df .dataframe thead td { font-weight: 400; opacity: 0.6; font-size: 0.85em; }
+.golars-df .dataframe tbody tr:hover td { background: rgba(128,128,128,0.08) !important; }
+.golars-df .gnull { opacity: 0.45; font-style: italic; }
+.golars-df .gell { opacity: 0.6; }
+</style>`
 
 // Markdown renders df as a GFM pipe-table. Useful when the consumer
 // only renders markdown (e.g. some chat UIs) or when copy-pasting into
@@ -176,34 +200,6 @@ func MimeBundle(df *dataframe.DataFrame) map[string]string {
 }
 
 // --- helpers ----------------------------------------------------
-
-// cellBorder is the rgba border every <th>/<td> uses. currentColor
-// would track text colour but breaks on themes that paint dark text on
-// dark backgrounds (charm-ish notebooks); a fixed translucent grey
-// reads cleanly on white, light grey, or near-black backgrounds.
-const cellBorder = "border:1px solid rgba(128,128,128,0.35)"
-
-func thHTML(s string) string {
-	return fmt.Sprintf(
-		`<th style="%s;padding:2px 6px;text-align:left;font-weight:600">%s</th>`,
-		cellBorder, html.EscapeString(s),
-	)
-}
-
-func dtypeHTML(s string) string {
-	return fmt.Sprintf(
-		`<th style="%s;padding:2px 6px;opacity:0.6;text-align:left;font-weight:400;font-size:11px">%s</th>`,
-		cellBorder, html.EscapeString(s),
-	)
-}
-
-func tdHTML(s string, isNull bool) string {
-	style := cellBorder + ";padding:2px 6px"
-	if isNull {
-		style += ";opacity:0.45;font-style:italic"
-	}
-	return fmt.Sprintf(`<td style="%s">%s</td>`, style, html.EscapeString(s))
-}
 
 // mdEscape escapes pipes + newlines so a cell value can't break the
 // GFM table grid.

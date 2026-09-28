@@ -9,9 +9,15 @@ import (
 // docStore is an in-memory registry of open documents keyed by LSP
 // URI. Content is kept verbatim (full text sync) so we don't have to
 // deal with incremental-edit bookkeeping for this tiny language.
+//
+// notebooks tracks cell ordering for VSCode-style notebook URIs
+// (`vscode-notebook-cell:/path/to/foo.ipynb#cellID`). Each notebook
+// path maps to its cell URIs in didOpen order so inlay-hint and
+// schema inference can replay prior cells before the current one.
 type docStore struct {
-	mu sync.RWMutex
-	m  map[string]*document
+	mu        sync.RWMutex
+	m         map[string]*document
+	notebooks map[string][]string
 }
 
 type document struct {
@@ -22,7 +28,10 @@ type document struct {
 }
 
 func newDocStore() *docStore {
-	return &docStore{m: make(map[string]*document)}
+	return &docStore{
+		m:         make(map[string]*document),
+		notebooks: make(map[string][]string),
+	}
 }
 
 func (s *docStore) set(uri, content string, version int32) *document {
@@ -33,6 +42,11 @@ func (s *docStore) set(uri, content string, version int32) *document {
 		version: version,
 	}
 	s.mu.Lock()
+	if _, existed := s.m[uri]; !existed {
+		if nb := notebookOf(uri); nb != "" {
+			s.notebooks[nb] = append(s.notebooks[nb], uri)
+		}
+	}
 	s.m[uri] = doc
 	s.mu.Unlock()
 	return doc
@@ -47,7 +61,52 @@ func (s *docStore) get(uri string) *document {
 func (s *docStore) drop(uri string) {
 	s.mu.Lock()
 	delete(s.m, uri)
+	if nb := notebookOf(uri); nb != "" {
+		cells := s.notebooks[nb]
+		for i, c := range cells {
+			if c == uri {
+				s.notebooks[nb] = append(cells[:i], cells[i+1:]...)
+				break
+			}
+		}
+		if len(s.notebooks[nb]) == 0 {
+			delete(s.notebooks, nb)
+		}
+	}
 	s.mu.Unlock()
+}
+
+// priorCells returns the contents of every cell in the same notebook
+// that was opened before uri, in didOpen order. Empty when uri is not
+// a notebook cell or when uri is the first cell.
+func (s *docStore) priorCells(uri string) []string {
+	nb := notebookOf(uri)
+	if nb == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.notebooks[nb]))
+	for _, cellURI := range s.notebooks[nb] {
+		if cellURI == uri {
+			break
+		}
+		if d := s.m[cellURI]; d != nil {
+			out = append(out, d.content)
+		}
+	}
+	return out
+}
+
+// notebookOf returns the notebook path for a `vscode-notebook-cell:`
+// URI, or "" for plain file URIs. The fragment (cell id) is stripped
+// so all cells of the same notebook share a key.
+func notebookOf(uri string) string {
+	if !strings.HasPrefix(uri, "vscode-notebook-cell:") {
+		return ""
+	}
+	base, _, _ := strings.Cut(uri, "#")
+	return base
 }
 
 // --------------------------------------------------------------------

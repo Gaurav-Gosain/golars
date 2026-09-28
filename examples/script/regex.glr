@@ -11,6 +11,7 @@ with first_two  = name.str.head(2)
 # Filter with the SQL-flavoured Like keyword (%: any, _: one, \ escape).
 filter name like "a%"
 show
+# ^?
 
 reset
 
@@ -18,6 +19,7 @@ reset
 load examples/script/data/people.csv
 filter name contains "a"
 show
+# ^?
 
 reset
 
@@ -29,3 +31,4 @@ with matches_vowel = name.str.contains_regex("[aeiou]")
 # avoiding a literal comparison between the column and `true`.
 filter matches_vowel
 show
+# ^?
