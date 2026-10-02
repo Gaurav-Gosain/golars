@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
@@ -79,20 +77,13 @@ func relStr(name string, v []string) *series.Series {
 	return s
 }
 
-// cpuTime returns the user plus system CPU time of the process so far.
-func cpuTime() time.Duration {
-	var ru syscall.Rusage
-	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
-	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
-}
-
 // relRun runs fn as a sub-benchmark. Besides wall time it reports the
 // process CPU time per operation (cpu-ns/op), which stays comparable
 // when other processes compete for cores.
 func relRun(b *testing.B, name string, fn func() (*dataframe.DataFrame, error)) {
 	b.Run(name, func(b *testing.B) {
 		b.ReportAllocs()
-		start := cpuTime()
+		done := reportCPU(b)
 		for b.Loop() {
 			out, err := fn()
 			if err != nil {
@@ -100,7 +91,7 @@ func relRun(b *testing.B, name string, fn func() (*dataframe.DataFrame, error)) 
 			}
 			out.Release()
 		}
-		b.ReportMetric(float64(cpuTime()-start)/float64(b.N), "cpu-ns/op")
+		done()
 	})
 }
 
