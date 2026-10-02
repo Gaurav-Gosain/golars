@@ -18,13 +18,20 @@ export async function activate(context: vscode.ExtensionContext) {
   const serverPath = config.get<string>("serverPath", "golars-lsp");
   const cliPath = config.get<string>("cliPath", "golars");
 
-  // Start the LSP client.
+  // Start the LSP client. GOLARS_LSP_LOG is honoured by the server
+  // (writes a duplicate of stderr there); set golars.logFile in
+  // settings.json to enable.
+  const logFile = config.get<string>("logFile", "");
+  const env = logFile ? { ...process.env, GOLARS_LSP_LOG: logFile } : process.env;
   const serverOptions: ServerOptions = {
-    run: { command: serverPath, transport: TransportKind.stdio },
-    debug: { command: serverPath, transport: TransportKind.stdio },
+    run: { command: serverPath, transport: TransportKind.stdio, options: { env } },
+    debug: { command: serverPath, transport: TransportKind.stdio, options: { env } },
   };
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "glr" }],
+    documentSelector: [
+      { scheme: "file", language: "golars" },
+      { scheme: "vscode-notebook-cell", language: "golars" },
+    ],
   };
   client = new LanguageClient(
     "golars",
@@ -37,7 +44,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("golars.previewFrame", async () => {
       const editor = vscode.window.activeTextEditor;
-      if (!editor || editor.document.languageId !== "glr") {
+      if (!editor || editor.document.languageId !== "golars") {
         vscode.window.showWarningMessage("golars: open a .glr file first");
         return;
       }
@@ -51,7 +58,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     vscode.commands.registerCommand("golars.explainPlan", async () => {
       const editor = vscode.window.activeTextEditor;
-      if (!editor || editor.document.languageId !== "glr") {
+      if (!editor || editor.document.languageId !== "golars") {
         vscode.window.showWarningMessage("golars: open a .glr file first");
         return;
       }

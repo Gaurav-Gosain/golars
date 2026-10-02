@@ -461,6 +461,96 @@ func TestLSPInlayHints(t *testing.T) {
 	}
 }
 
+// TestLSPNotebookCells checks that a VS Code notebook cell sees the
+// frames of the cells before it, and that editing or closing a cell
+// updates the cells after it.
+func TestLSPNotebookCells(t *testing.T) {
+	c := newClient(t, 0)
+	dir, err := filepath.Abs("../../examples/script")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nb := "vscode-notebook-cell:" + filepath.ToSlash(filepath.Join(dir, "nb.ipynb"))
+	cellA, cellB := nb+"#A", nb+"#B"
+	openCell := func(uri, src string) {
+		c.notify("textDocument/didOpen", map[string]any{"textDocument": map[string]any{
+			"uri": uri, "languageId": "golars", "version": 1, "text": src}})
+	}
+	// published waits for diagnostics on every uri. Cells publish
+	// from separate goroutines, so they can arrive in any order.
+	published := func(uris ...string) map[string][]string {
+		out := map[string][]string{}
+		timeout := time.After(5 * time.Second)
+		for len(out) < len(uris) {
+			select {
+			case n := <-c.notes:
+				if n["method"] != "textDocument/publishDiagnostics" {
+					continue
+				}
+				p := n["params"].(map[string]any)
+				uri := p["uri"].(string)
+				if !slices.Contains(uris, uri) {
+					continue
+				}
+				msgs := []string{}
+				for _, d := range p["diagnostics"].([]any) {
+					msgs = append(msgs, d.(map[string]any)["message"].(string))
+				}
+				out[uri] = msgs
+			case <-timeout:
+				t.Fatalf("diagnostics for %v, want %v", out, uris)
+			}
+		}
+		return out
+	}
+	messages := func(uri string) []string { return published(uri)[uri] }
+
+	// The stash is used by a later cell, so cell A has no unused-stash
+	// warning, and cell B resolves both the frame and its columns.
+	openCell(cellA, "load data/salaries.csv\nstash base\n")
+	if m := messages(cellA); len(m) != 0 {
+		t.Fatalf("cell A diagnostics: %v", m)
+	}
+	openCell(cellB, "use base\nselect name, amount\n# ^?\n")
+	if m := messages(cellB); len(m) != 0 {
+		t.Fatalf("cell B diagnostics: %v", m)
+	}
+	hints := c.request("textDocument/inlayHint", map[string]any{"textDocument": map[string]any{"uri": cellB},
+		"range": map[string]any{"start": map[string]any{"line": 0, "character": 0}, "end": map[string]any{"line": 3, "character": 0}}}).([]any)
+	var probe string
+	for _, h := range hints {
+		if l := h.(map[string]any)["label"].(string); strings.HasPrefix(l, "cols(") {
+			probe = l
+		}
+	}
+	if !strings.HasPrefix(probe, "cols(name: str, amount: i64)") {
+		t.Errorf("probe %q", probe)
+	}
+
+	// Cell A now loads a frame without amount: cell B is analysed again.
+	c.notify("textDocument/didChange", map[string]any{
+		"textDocument":   map[string]any{"uri": cellA, "version": 2},
+		"contentChanges": []any{map[string]any{"text": "load data/people.csv\nstash base\n"}},
+	})
+	got := published(cellA, cellB)
+	if m := got[cellA]; len(m) != 0 {
+		t.Fatalf("cell A diagnostics after change: %v", m)
+	}
+	if m := got[cellB]; len(m) != 1 || !strings.Contains(m[0], `unknown column "amount"`) {
+		t.Fatalf("cell B diagnostics after change: %v", m)
+	}
+
+	// Closing cell A leaves cell B with no frame named base.
+	c.notify("textDocument/didClose", map[string]any{"textDocument": map[string]any{"uri": cellA}})
+	got = published(cellA, cellB)
+	if m := got[cellA]; len(m) != 0 {
+		t.Fatalf("closed cell A diagnostics: %v", m)
+	}
+	if m := got[cellB]; len(m) == 0 || !strings.Contains(m[0], `no frame named "base"`) {
+		t.Fatalf("cell B diagnostics after close: %v", m)
+	}
+}
+
 func TestLSPUnknownMethodAndFraming(t *testing.T) {
 	c := newClient(t, 0)
 	raw := c.requestRaw("workspace/unknownThing", map[string]any{})

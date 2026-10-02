@@ -15,11 +15,18 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
 func main() {
-	srv := newServer(os.Stdin, os.Stdout, os.Stderr)
+	logOut := io.Writer(os.Stderr)
+	if path := os.Getenv("GOLARS_LSP_LOG"); path != "" {
+		if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			logOut = io.MultiWriter(os.Stderr, f)
+		}
+	}
+	srv := newServer(os.Stdin, os.Stdout, logOut)
 	if err := srv.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "golars-lsp:", err)
 		os.Exit(1)

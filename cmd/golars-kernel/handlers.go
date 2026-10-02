@@ -22,9 +22,13 @@ func (k *kernel) handleKernelInfo(sock zmq4.Socket, msg message) {
 			"mimetype":       "text/x-glr",
 			"file_extension": ".glr",
 			"pygments_lexer": "text",
-			"codemirror_mode": map[string]any{
-				"name": "shell",
-			},
+			// codemirror_mode names the language registered by the
+			// jupyterlab-golars labextension (IEditorLanguageRegistry,
+			// name: "golars"). Stay a string here so JupyterLab looks it
+			// up by name; an object {"name": "shell"} routes to bash and
+			// breaks LSP language matching (only words that happen to
+			// also be shell builtins, like load/sort, would hover).
+			"codemirror_mode": "golars",
 		},
 		"banner": fmt.Sprintf(
 			"golars-kernel %s on %s/%s - pure-Go DataFrames with lazy plan + optimizer.\nLearn more: https://github.com/Gaurav-Gosain/golars",

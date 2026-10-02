@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,10 @@ type document struct {
 	content string
 	lines   []string
 	version int32
+	// prev is the notebook cell before this one, nil outside a
+	// notebook. Cells share one kernel session, so a cell's analysis
+	// starts from the state prev ends in.
+	prev *document
 
 	once   sync.Once
 	result *analysis.Result
@@ -28,33 +34,112 @@ type document struct {
 // analysis returns the document's analysis, computed on first use.
 func (d *document) analysis() *analysis.Result {
 	d.once.Do(func() {
-		d.result = analysis.Analyze(d.content, analysis.Options{Dir: docDir(d.uri)})
+		opts := analysis.Options{Dir: docDir(d.uri)}
+		if d.prev != nil {
+			focus, ok, frames := d.prev.analysis().StateAt(math.MaxInt)
+			opts.Frames = make(map[string]analysis.Frame, len(frames))
+			for name, f := range frames {
+				opts.Frames[name] = withoutOrigins(f)
+			}
+			if ok {
+				focus = withoutOrigins(focus)
+				opts.Focus = &focus
+			}
+		}
+		d.result = analysis.Analyze(d.content, opts)
 	})
 	return d.result
 }
 
-// docDir is the directory of a file:// URI, "" otherwise.
+// withoutOrigins drops column origins, which are line numbers in the
+// cell that defined them and would point into the wrong cell.
+func withoutOrigins(f analysis.Frame) analysis.Frame {
+	f.Origins = nil
+	return f
+}
+
+// docDir is the directory of a file:// URI or of a notebook cell's
+// notebook, "" otherwise.
 func docDir(uri string) string {
 	u, err := url.Parse(uri)
-	if err != nil || u.Scheme != "file" {
+	if err != nil || (u.Scheme != "file" && u.Scheme != notebookCellScheme) {
 		return ""
 	}
 	return filepath.Dir(filepath.FromSlash(u.Path))
 }
 
+// notebookCellScheme is the URI scheme VS Code gives notebook cells:
+// vscode-notebook-cell:/path/to/nb.ipynb#CELLID.
+const notebookCellScheme = "vscode-notebook-cell"
+
+// notebookOf returns the notebook a cell URI belongs to, or "" for a
+// URI that is not a notebook cell.
+func notebookOf(uri string) string {
+	if !strings.HasPrefix(uri, notebookCellScheme+":") {
+		return ""
+	}
+	nb, _, _ := strings.Cut(uri, "#")
+	return nb
+}
+
 type docStore struct {
 	mu sync.RWMutex
 	m  map[string]*document
+	// cells lists the open cells of each notebook in didOpen order,
+	// which is the notebook order when the notebook first opens.
+	cells map[string][]string
 }
 
-func newDocStore() *docStore { return &docStore{m: make(map[string]*document)} }
+func newDocStore() *docStore {
+	return &docStore{m: make(map[string]*document), cells: make(map[string][]string)}
+}
 
 func (s *docStore) set(uri, content string, version int32) *document {
 	doc := &document{uri: uri, content: content, lines: strings.Split(content, "\n"), version: version}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.m[uri] = doc
-	s.mu.Unlock()
+	nb := notebookOf(uri)
+	if nb == "" {
+		return doc
+	}
+	cells := s.cells[nb]
+	i := slices.Index(cells, uri)
+	if i < 0 {
+		cells = append(cells, uri)
+		s.cells[nb] = cells
+		i = len(cells) - 1
+	}
+	if i > 0 {
+		doc.prev = s.m[cells[i-1]]
+	}
+	s.relink(cells[i+1:], doc)
 	return doc
+}
+
+// relink replaces each cell in uris with a fresh copy chained after
+// prev, so cached analyses that depend on a changed cell recompute.
+// The caller holds s.mu.
+func (s *docStore) relink(uris []string, prev *document) {
+	for _, u := range uris {
+		old := s.m[u]
+		next := &document{uri: old.uri, content: old.content, lines: old.lines, version: old.version, prev: prev}
+		s.m[u] = next
+		prev = next
+	}
+}
+
+// following returns the notebook cells after uri, whose analyses
+// depend on it. It is empty outside a notebook.
+func (s *docStore) following(uri string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cells := s.cells[notebookOf(uri)]
+	i := slices.Index(cells, uri)
+	if i < 0 {
+		return nil
+	}
+	return slices.Clone(cells[i+1:])
 }
 
 func (s *docStore) get(uri string) *document {
@@ -65,8 +150,25 @@ func (s *docStore) get(uri string) *document {
 
 func (s *docStore) drop(uri string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.m, uri)
-	s.mu.Unlock()
+	nb := notebookOf(uri)
+	cells := s.cells[nb]
+	i := slices.Index(cells, uri)
+	if i < 0 {
+		return
+	}
+	cells = slices.Delete(cells, i, i+1)
+	if len(cells) == 0 {
+		delete(s.cells, nb)
+		return
+	}
+	s.cells[nb] = cells
+	var prev *document
+	if i > 0 {
+		prev = s.m[cells[i-1]]
+	}
+	s.relink(cells[i:], prev)
 }
 
 // -----------------------------------------------------------------
@@ -213,6 +315,9 @@ func (s *server) handleDidChange(msg *rawMessage) {
 	}
 	d := s.docs.set(p.TextDocument.URI, p.ContentChanges[len(p.ContentChanges)-1].Text, p.TextDocument.Version)
 	s.schedule(d.uri)
+	for _, u := range s.docs.following(d.uri) {
+		s.schedule(u)
+	}
 }
 
 func (s *server) handleDidSave(msg *rawMessage) {
@@ -233,8 +338,12 @@ func (s *server) handleDidClose(msg *rawMessage) {
 		return
 	}
 	s.cancel(d.uri)
+	following := s.docs.following(d.uri)
 	s.docs.drop(d.uri)
 	s.notify("textDocument/publishDiagnostics", map[string]any{"uri": d.uri, "diagnostics": []any{}})
+	for _, u := range following {
+		s.schedule(u)
+	}
 }
 
 // schedule publishes diagnostics for uri after the debounce pause,
@@ -278,8 +387,14 @@ type diagnostic struct {
 
 func (s *server) publishDiagnostics(d *document) {
 	r := d.analysis()
+	cell := notebookOf(d.uri) != ""
 	diags := make([]diagnostic, 0, len(r.Diags))
 	for _, dg := range r.Diags {
+		// A later cell may use a stash, so a cell cannot know it is
+		// unused.
+		if cell && dg.Code == "unused-stash" {
+			continue
+		}
 		diags = append(diags, toDiagnostic(d, dg))
 	}
 	s.notify("textDocument/publishDiagnostics", map[string]any{
