@@ -1,0 +1,4 @@
+# Check out text files with LF on every platform. Tests compare files
+# byte for byte (glr canonical form, generated docs), and a CRLF
+# checkout on Windows breaks them.
+* text=auto eol=lf
