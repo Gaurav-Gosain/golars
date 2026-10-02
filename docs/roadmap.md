@@ -183,10 +183,10 @@ Shipped:
   group-by keys
 - Notebook integration: `DataFrame.MimeBundle` / `HTML` and the same on
   `Series`, backed by `internal/reprtable`; structured tables in
-  `golars kernel-host` replies. A terminal notebook front end, a fork
-  of gopyter at
-  [github.com/Gaurav-Gosain/gopyter](https://github.com/Gaurav-Gosain/gopyter),
-  is the planned home for Go notebooks; it is not published yet. See
+  `golars kernel-host` replies. A terminal notebook front end, the
+  `golars` branch of
+  [github.com/Gaurav-Gosain/gopyter](https://github.com/Gaurav-Gosain/gopyter/tree/golars),
+  runs glr and Go cells with shared frames. See
   [jupyter.md](jupyter.md).
 
 Pending:

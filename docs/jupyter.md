@@ -1,6 +1,6 @@
 # Jupyter integration
 
-golars ships two ways into the notebook ecosystem:
+golars ships three ways into the notebook ecosystem:
 
 1. **`golars-kernel`** - a native Jupyter kernel for the `.glr`
    scripting language. Each cell is a glr pipeline, the kernel runs
@@ -9,6 +9,11 @@ golars ships two ways into the notebook ecosystem:
 2. **`jupyter/render` package** - HTML/markdown/text renderers for
    `*dataframe.DataFrame`. Drop into [GoNB](https://github.com/janpfeifer/gonb)
    so DataFrames show up as proper tables in a Go notebook.
+
+3. **gopyter** - a terminal notebook. The
+   [golars fork](https://github.com/Gaurav-Gosain/gopyter/tree/golars)
+   runs glr cells and Go cells side by side and shares frames between
+   them. See [gopyter](#gopyter-a-terminal-notebook).
 
 ## golars-kernel: a kernel for .glr
 
@@ -86,11 +91,9 @@ auto-displayed frame). Each table is an
 `application/vnd.golars.table+json` object with `columns`, `dtypes`,
 `rows` (cell strings, `null` for nulls), `shape` and optional
 `row_gap` / `col_gap` where rows or columns were left out. The fields
-are optional, so older clients and hosts keep working. A terminal
-notebook built on a fork of
-[gopyter](https://github.com/Gaurav-Gosain/gopyter) uses them to draw
-themed tables; that fork is the planned home for Go notebooks but is
-not published yet. `DataFrame.MimeBundle()` and `Series.MimeBundle()`
+are optional, so older clients and hosts keep working.
+[gopyter](#gopyter-a-terminal-notebook) uses them to draw themed
+tables. `DataFrame.MimeBundle()` and `Series.MimeBundle()`
 return the same table next to `text/plain` and `text/html`, and
 `DataFrame.HTML()` / `Series.HTML()` return just the HTML table.
 
@@ -161,6 +164,10 @@ land in the gutter, hover shows command docs, completion suggests
 commands + frame names. golars-lsp speaks the same JSON-RPC over stdio
 it speaks to Neovim and Zed, so feature parity is automatic.
 
+In VS Code, the [vscode-golars](../editors/vscode-golars/) extension
+connects golars-lsp to the cells of a golars-kernel notebook. Each
+cell starts from the frames of the cells above it, as in the kernel.
+
 ### Themes
 
 JupyterLab's official themes are pretty plain. Two community options
@@ -178,11 +185,33 @@ Reload JupyterLab and pick one in **Settings → Theme**.
 
 ### Syntax highlighting
 
-The kernel declares CodeMirror mode `shell` so braces, strings and
-numbers read sensibly without extra setup. For real `.glr`
-highlighting (commands, keywords, operators) install the JupyterLab
-extension in [`editors/jupyterlab-golars`](../editors/jupyterlab-golars/),
-which registers a CodeMirror language for the `text/x-glr` mime type.
+The kernel declares CodeMirror mode `golars`. Install the JupyterLab
+extension in [`editors/jupyterlab-golars`](../editors/jupyterlab-golars/)
+to highlight `.glr` cells (commands, keywords, operators). The
+extension registers the `golars` language for the `text/x-glr` mime
+type. jupyterlab-lsp also uses this language name to send cells to
+golars-lsp. Without the extension, cells show as plain text.
+
+## gopyter: a terminal notebook
+
+[gopyter](https://github.com/mark3labs/gopyter) is a Jupyter-style
+notebook for Go that runs in the terminal. The
+[golars fork](https://github.com/Gaurav-Gosain/gopyter/tree/golars)
+adds glr cells, golars tables drawn in the terminal theme, and frames
+shared by name between glr cells and Go cells.
+
+```sh
+go install github.com/Gaurav-Gosain/golars/cmd/golars@latest
+go install github.com/Gaurav-Gosain/golars/cmd/golars-lsp@latest  # optional: completion and diagnostics
+go install github.com/Gaurav-Gosain/gopyter@golars
+gopyter --lang glr sales.ipynb   # a new glr notebook
+gopyter run sales.ipynb --save   # run a notebook headless
+```
+
+gopyter finds `golars` like golars-kernel does: `$GOLARS_BIN`, next to
+the gopyter binary, then `$PATH`. Set `GOLARS_DIR` to a golars checkout
+to build Go cells against it. The fork's README describes cell
+languages, shared frames and the example notebooks.
 
 ## GoNB: golars in a Go notebook
 

@@ -311,10 +311,18 @@ gonbui.DisplayHTML(jrender.HTML(df))
 `DataFrame.MimeBundle()` and `Series.MimeBundle()` return `text/plain`,
 `text/html` and a JSON table (`application/vnd.golars.table+json`) in
 one map, so any notebook front end that duck types on a `MimeBundle`
-method picks the richest form it supports. A terminal notebook built
-on a fork of [gopyter](https://github.com/Gaurav-Gosain/gopyter) uses
-the JSON table to draw themed tables; that fork is the planned home
-for Go notebooks but is not published yet.
+method picks the richest form it supports.
+
+For a notebook in the terminal, use the golars fork of
+[gopyter](https://github.com/Gaurav-Gosain/gopyter/tree/golars). It runs
+glr cells and Go cells in one notebook, shares frames between them, and
+draws tables from the JSON table:
+
+```sh
+go install github.com/Gaurav-Gosain/golars/cmd/golars@latest
+go install github.com/Gaurav-Gosain/gopyter@golars
+gopyter --lang glr sales.ipynb
+```
 
 See [docs/jupyter.md](docs/jupyter.md) for the full walkthrough.
 
