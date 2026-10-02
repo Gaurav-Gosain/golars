@@ -24,3 +24,4 @@ groupby region revenue:sum:total_revenue revenue:count:line_count
 # Biggest spenders on top.
 sort total_revenue desc
 show
+# ^?

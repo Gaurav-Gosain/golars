@@ -14,6 +14,7 @@ with discount_filled = discount.fill_null(0.0)
 # multiplication would propagate nulls into revenue.
 with revenue = unit_price * (1 - discount_filled)
 show
+# ^?
 
 reset
 
