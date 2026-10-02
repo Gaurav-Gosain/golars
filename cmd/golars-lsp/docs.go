@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -65,7 +66,12 @@ func docDir(uri string) string {
 	if err != nil || (u.Scheme != "file" && u.Scheme != notebookCellScheme) {
 		return ""
 	}
-	return filepath.Dir(filepath.FromSlash(u.Path))
+	p := u.Path
+	// A Windows path arrives as /C:/dir/file.
+	if runtime.GOOS == "windows" && len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.Dir(filepath.FromSlash(p))
 }
 
 // notebookCellScheme is the URI scheme VS Code gives notebook cells:

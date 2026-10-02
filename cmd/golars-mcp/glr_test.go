@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,9 @@ func TestRunGlr(t *testing.T) {
 		t.Skip("builds the golars binary")
 	}
 	bin := filepath.Join(t.TempDir(), "golars")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	if out, err := exec.Command("go", "build", "-o", bin, "../golars").CombinedOutput(); err != nil {
 		t.Fatalf("build golars: %v\n%s", err, out)
 	}

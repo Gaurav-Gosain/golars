@@ -470,7 +470,7 @@ func TestLSPNotebookCells(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nb := "vscode-notebook-cell:" + filepath.ToSlash(filepath.Join(dir, "nb.ipynb"))
+	nb := "vscode-notebook-cell:" + strings.TrimPrefix(fileURI(filepath.Join(dir, "nb.ipynb")), "file://")
 	cellA, cellB := nb+"#A", nb+"#B"
 	openCell := func(uri, src string) {
 		c.notify("textDocument/didOpen", map[string]any{"textDocument": map[string]any{
