@@ -1,0 +1,103 @@
+{
+  "name": "cum_min_nan",
+  "status": "fixed",
+  "note": "cum_min propagates NaN; polars treats NaN as larger than any number: [NaN, 1] (column \"o4\" row 0: golars [NaN, NaN], polars [NaN, 1])",
+  "plan": {
+    "seed": 200128,
+    "ops": [
+      {
+        "op": "explode",
+        "keys": [
+          "c1"
+        ]
+      },
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "cum_min",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c3"
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o4"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c1",
+          "c2"
+        ]
+      }
+    ],
+    "order": {
+      "mode": "unordered"
+    }
+  },
+  "left": [
+    {
+      "name": "c1",
+      "type": "list[i32]",
+      "values": [
+        null,
+        null
+      ]
+    },
+    {
+      "name": "c2",
+      "type": "i64",
+      "values": [
+        1,
+        1
+      ]
+    },
+    {
+      "name": "c3",
+      "type": "f64",
+      "values": [
+        "nan",
+        1
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "i32",
+        "values": [
+          null
+        ]
+      },
+      {
+        "name": "c2",
+        "type": "i64",
+        "values": [
+          1
+        ]
+      },
+      {
+        "name": "o4",
+        "type": "list[f64]",
+        "values": [
+          [
+            "nan",
+            1
+          ]
+        ]
+      }
+    ]
+  }
+}

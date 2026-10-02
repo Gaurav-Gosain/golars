@@ -1,0 +1,97 @@
+{
+  "name": "list_join_ignores_nulls_by_default",
+  "status": "fixed",
+  "note": "glr list.join did not skip nulls; polars ignore_nulls defaults to true (column \"o4\" row 0: golars null, polars \"𐍈x\")",
+  "plan": {
+    "seed": 200186,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "col",
+                "name": "c1"
+              },
+              {
+                "k": "raw",
+                "val": "o3"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "with_columns",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "list.join",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "o3"
+                  },
+                  {
+                    "k": "raw",
+                    "val": " | "
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o4"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c1",
+      "type": "list[str]",
+      "values": [
+        [
+          null,
+          "𐍈x",
+          null
+        ]
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "o3",
+        "type": "list[str]",
+        "values": [
+          [
+            null,
+            "𐍈x",
+            null
+          ]
+        ]
+      },
+      {
+        "name": "o4",
+        "type": "str",
+        "values": [
+          "𐍈x"
+        ]
+      }
+    ]
+  }
+}

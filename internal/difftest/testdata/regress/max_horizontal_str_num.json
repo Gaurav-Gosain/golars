@@ -1,0 +1,59 @@
+{
+  "name": "max_horizontal_str_num",
+  "status": "fixed",
+  "note": "max_horizontal over str and u32: polars raises (polars raised ComputeError: cannot compare string with numeric type (u32))",
+  "plan": {
+    "seed": 213511,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "fn",
+                "name": "max_horizontal",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c0"
+                  },
+                  {
+                    "k": "call",
+                    "name": "str.len_bytes",
+                    "args": [
+                      {
+                        "k": "col",
+                        "name": "c0"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "str",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": false,
+    "error": "ComputeError: cannot compare string with numeric type (u32)"
+  }
+}

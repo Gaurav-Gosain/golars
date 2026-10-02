@@ -3,6 +3,8 @@ package lazy
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"slices"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -11,6 +13,7 @@ import (
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/eval"
 	"github.com/Gaurav-Gosain/golars/expr"
+	"github.com/Gaurav-Gosain/golars/internal/pool"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -30,6 +33,14 @@ func resolveExec(opts []ExecOption) execConfig {
 	c := execConfig{alloc: memory.DefaultAllocator}
 	for _, o := range opts {
 		o(&c)
+	}
+	if c.workers <= 0 {
+		// Parallel streaming stages by default: inter-morsel work is
+		// independent and ordered output is preserved. Explicit
+		// WithStreamingWorkers(1) still selects the serial stages.
+		// Capped like the other fan-outs so in-flight morsels stay
+		// memory-bounded.
+		c.workers = min(runtime.GOMAXPROCS(0), 8)
 	}
 	return c
 }
@@ -80,11 +91,17 @@ func executeNodeProfiled(ctx context.Context, cfg execConfig, n Node) (*datafram
 }
 
 func executeNodeRaw(ctx context.Context, cfg execConfig, n Node) (*dataframe.DataFrame, error) {
+	switch n.(type) {
+	case Filter, WithColumns, Projection, Rename, Drop:
+		if out, ok, err := tryMorselChain(ctx, cfg, n); ok {
+			return out, err
+		}
+	}
 	switch node := n.(type) {
 	case DataFrameScan:
 		return executeScan(ctx, cfg, node)
 	case SourceFunc:
-		return node.Load(ctx)
+		return node.load(ctx)
 	case Projection:
 		return executeProjection(ctx, cfg, node)
 	case WithColumns:
@@ -127,11 +144,23 @@ func executeNodeRaw(ctx context.Context, cfg execConfig, n Node) (*dataframe.Dat
 		return executeAggregate(ctx, cfg, node)
 	case Join:
 		return executeJoin(ctx, cfg, node)
+	case FrameOpNode:
+		return executeFrameOp(ctx, cfg, node)
+	case BinaryFrameOpNode:
+		return executeBinaryFrameOp(ctx, cfg, node)
+	}
+	if out, ok, err := executeTemporalGroup(ctx, cfg, n); ok {
+		return out, err
 	}
 	return nil, fmt.Errorf("lazy: cannot execute node %T", n)
 }
 
 func executeAggregate(ctx context.Context, cfg execConfig, a Aggregate) (*dataframe.DataFrame, error) {
+	if len(a.Keys) > 0 {
+		if out, ok, err := tryMorselAggregate(ctx, cfg, a.Input, a.Keys, a.Aggs); ok {
+			return out, err
+		}
+	}
 	input, err := executeNode(ctx, cfg, a.Input)
 	if err != nil {
 		return nil, err
@@ -141,17 +170,103 @@ func executeAggregate(ctx context.Context, cfg execConfig, a Aggregate) (*datafr
 }
 
 func executeJoin(ctx context.Context, cfg execConfig, j Join) (*dataframe.DataFrame, error) {
-	left, err := executeNode(ctx, cfg, j.Left)
+	left, right, err := executeBoth(ctx, cfg, j.Left, j.Right)
 	if err != nil {
 		return nil, err
 	}
 	defer left.Release()
-	right, err := executeNode(ctx, cfg, j.Right)
-	if err != nil {
-		return nil, err
-	}
 	defer right.Release()
-	return left.Join(ctx, right, j.On, j.How, dataframe.WithJoinAllocator(cfg.alloc))
+	if out, ok, err := joinBuildSmaller(ctx, cfg, left, right, j); ok {
+		return out, err
+	}
+	return left.Join(ctx, right, j.On, j.How, j.options(cfg.alloc)...)
+}
+
+// joinBuildSmaller runs an inner join with the inputs swapped when the
+// right input is the larger one. The join kernel builds its table on
+// the right input, so a small filtered dimension joined with a large
+// fact table (orders with lineitem in TPC-H Q3, Q5, Q10) built the table
+// over the large side: several times more memory and slower probes.
+// The swapped result is restored to the left-then-right column layout.
+// Row order is not part of the inner join contract (polars' default
+// maintain_order is "none"). Only applies to a coalesced inner join on
+// same-named keys with no order or validation request, when no non-key
+// column name occurs on both sides, so no suffixing is involved.
+func joinBuildSmaller(ctx context.Context, cfg execConfig, left, right *dataframe.DataFrame, j Join) (*dataframe.DataFrame, bool, error) {
+	spec := j.Spec()
+	if spec.How != dataframe.InnerJoin || !spec.Coalesce || spec.Order != dataframe.JoinOrderNone ||
+		spec.Validate != dataframe.ValidateManyToMany || !slices.Equal(spec.LeftOn, spec.RightOn) ||
+		right.Height() <= 2*left.Height() {
+		return nil, false, nil
+	}
+	keys := stringSet(spec.LeftOn)
+	names := append(make([]string, 0, left.Width()+right.Width()), left.ColumnNames()...)
+	for _, n := range right.ColumnNames() {
+		if _, isKey := keys[n]; isKey {
+			continue
+		}
+		if left.Contains(n) {
+			return nil, false, nil
+		}
+		names = append(names, n)
+	}
+	swapped, err := right.Join(ctx, left, spec.LeftOn, spec.How,
+		dataframe.WithJoinNullsEqual(spec.NullsEqual), dataframe.WithJoinAllocator(cfg.alloc))
+	if err != nil {
+		return nil, true, err
+	}
+	defer swapped.Release()
+	out, err := swapped.Select(names...)
+	return out, true, err
+}
+
+// executeBoth runs two independent inputs concurrently (the right one on
+// a new goroutine), as polars does for join inputs. A scan with nothing
+// to compute runs inline. On error both results are released.
+func executeBoth(ctx context.Context, cfg execConfig, a, b Node) (*dataframe.DataFrame, *dataframe.DataFrame, error) {
+	if isTrivialInput(a) || isTrivialInput(b) {
+		l, err := executeJoinInput(ctx, cfg, a)
+		if err != nil {
+			return nil, nil, err
+		}
+		r, err := executeJoinInput(ctx, cfg, b)
+		if err != nil {
+			l.Release()
+			return nil, nil, err
+		}
+		return l, r, nil
+	}
+	type res struct {
+		df  *dataframe.DataFrame
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		df, err := executeJoinInput(ctx, cfg, b)
+		ch <- res{df, err}
+	}()
+	l, lerr := executeJoinInput(ctx, cfg, a)
+	r := <-ch
+	if lerr != nil || r.err != nil {
+		if l != nil {
+			l.Release()
+		}
+		if r.df != nil {
+			r.df.Release()
+		}
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		return nil, nil, r.err
+	}
+	return l, r.df, nil
+}
+
+// isTrivialInput reports whether executing n is just handing over an
+// in-memory frame, where a goroutine costs more than it saves.
+func isTrivialInput(n Node) bool {
+	s, ok := n.(DataFrameScan)
+	return ok && s.Predicate == nil && s.Length < 0
 }
 
 func executeScan(ctx context.Context, cfg execConfig, s DataFrameScan) (*dataframe.DataFrame, error) {
@@ -187,7 +302,8 @@ func executeScan(ctx context.Context, cfg execConfig, s DataFrameScan) (*datafra
 
 	// Apply pushed-down slice.
 	if s.Length >= 0 {
-		out, err := projected.Slice(s.Offset, min(s.Length, projected.Height()-s.Offset))
+		off, length := series.ClampSlice(s.Offset, s.Length, projected.Height())
+		out, err := projected.Slice(off, length)
 		projected.Release()
 		if err != nil {
 			return nil, err
@@ -198,34 +314,135 @@ func executeScan(ctx context.Context, cfg execConfig, s DataFrameScan) (*datafra
 }
 
 func executeProjection(ctx context.Context, cfg execConfig, p Projection) (*dataframe.DataFrame, error) {
+	if out, ok, err := tryMorselAggregate(ctx, cfg, p.Input, nil, p.Exprs); ok {
+		return out, err
+	}
+	if f, ok := p.Input.(Filter); ok && cfg.profiler == nil && cfg.tracer == nil {
+		if names, ok := bareColumns(p.Exprs); ok {
+			return executeFilterSelect(ctx, cfg, f, names)
+		}
+	}
 	input, err := executeNode(ctx, cfg, p.Input)
 	if err != nil {
 		return nil, err
 	}
 	defer input.Release()
 
-	cols := make([]*series.Series, len(p.Exprs))
-	for i, e := range p.Exprs {
-		s, err := eval.Eval(ctx, eval.EvalContext{Alloc: cfg.alloc}, e, input)
+	cols, err := evalOutputs(ctx, cfg, p.Exprs, input, "projection")
+	if err != nil {
+		return nil, err
+	}
+	return newProjectedFrame(cols, cfg.alloc)
+}
+
+// Parallel expression evaluation cutoffs. Every expression in a
+// select/with_columns reads the same input frame, so they are
+// independent and can run concurrently, as polars does. Fan-out pays
+// once the frame is tall enough that one expression costs well over the
+// goroutine handoff (a few microseconds), or the list is wide enough
+// that the serial sum does. Kernels also split rows internally at large
+// heights; the Go scheduler absorbs the overlap.
+const (
+	parallelEvalMinExprs = 2
+	parallelEvalMinRows  = 8 * 1024
+	parallelSelectWide   = 8
+)
+
+func parallelEvalWorthIt(nexprs, height int) bool {
+	if nexprs < parallelEvalMinExprs {
+		return false
+	}
+	return height >= parallelEvalMinRows || nexprs >= parallelSelectWide
+}
+
+// evalOutputs evaluates every expression against input and renames each
+// result to its output name. On error every produced series is released
+// and the error of the lowest failing index is returned, so the error
+// does not depend on scheduling. what prefixes the error message when
+// non-empty.
+func evalOutputs(ctx context.Context, cfg execConfig, exprs []expr.Expr, input *dataframe.DataFrame, what string) ([]*series.Series, error) {
+	cols := make([]*series.Series, len(exprs))
+	one := func(ctx context.Context, src *dataframe.DataFrame, i int) error {
+		e := exprs[i]
+		s, err := eval.Eval(ctx, eval.EvalContext{Alloc: cfg.alloc}, e, src)
 		if err != nil {
-			for _, c := range cols[:i] {
-				if c != nil {
-					c.Release()
-				}
+			if what != "" {
+				return fmt.Errorf("%s %s: %w", what, e, err)
 			}
-			return nil, fmt.Errorf("projection %s: %w", e, err)
+			return err
 		}
-		name := expr.OutputName(e)
-		if s.Name() != name {
+		if name := expr.OutputName(e); s.Name() != name {
 			renamed := s.Rename(name)
 			s.Release()
 			s = renamed
 		}
 		cols[i] = s
+		return nil
 	}
-	return dataframe.New(cols...)
+
+	if !parallelEvalWorthIt(len(exprs), input.Height()) {
+		for i := range exprs {
+			if err := one(ctx, input, i); err != nil {
+				releaseSeries(cols[:i])
+				return nil, err
+			}
+		}
+		return cols, nil
+	}
+
+	// series.Chunk(0) consolidates a multi-chunk Series in place, which
+	// is not safe to do concurrently on one shared Series. When the input
+	// has such a column, each goroutine works on its own shallow clone
+	// (fresh Series wrappers over the same buffers).
+	shared := true
+	for _, c := range input.Columns() {
+		if c.NumChunks() > 1 {
+			shared = false
+			break
+		}
+	}
+	errs := make([]error, len(exprs))
+	g := pool.NewGroup(ctx, 0)
+	for i := range exprs {
+		g.Go(func(gctx context.Context) error {
+			src := input
+			if !shared {
+				src = input.Clone()
+				defer src.Release()
+			}
+			// Record instead of returning so one failure does not cancel
+			// siblings mid-flight; the lowest index wins below.
+			errs[i] = one(gctx, src, i)
+			return nil
+		})
+	}
+	_ = g.Wait()
+	for _, err := range errs {
+		if err != nil {
+			releaseSeries(cols)
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		releaseSeries(cols)
+		return nil, err
+	}
+	return cols, nil
 }
 
+func releaseSeries(cols []*series.Series) {
+	for _, c := range cols {
+		if c != nil {
+			c.Release()
+		}
+	}
+}
+
+// executeWithColumns evaluates every expression against the input frame
+// (not against columns added earlier in the same call), matching polars
+// with_columns and the schema WithColumns.Schema reports. Outputs are
+// then applied in order, so a later expression with the same output
+// name replaces an earlier one.
 func executeWithColumns(ctx context.Context, cfg execConfig, w WithColumns) (*dataframe.DataFrame, error) {
 	input, err := executeNode(ctx, cfg, w.Input)
 	if err != nil {
@@ -233,23 +450,16 @@ func executeWithColumns(ctx context.Context, cfg execConfig, w WithColumns) (*da
 	}
 	defer input.Release()
 
+	cols, err := evalOutputs(ctx, cfg, w.Exprs, input, "")
+	if err != nil {
+		return nil, err
+	}
 	out := input.Clone()
-	for _, e := range w.Exprs {
-		s, err := eval.Eval(ctx, eval.EvalContext{Alloc: cfg.alloc}, e, out)
-		if err != nil {
-			out.Release()
-			return nil, err
-		}
-		name := expr.OutputName(e)
-		if s.Name() != name {
-			r := s.Rename(name)
-			s.Release()
-			s = r
-		}
+	for i, s := range cols {
 		updated, err := out.WithColumn(s)
 		out.Release()
 		if err != nil {
-			s.Release()
+			releaseSeries(cols[i:])
 			return nil, err
 		}
 		out = updated
@@ -258,6 +468,14 @@ func executeWithColumns(ctx context.Context, cfg execConfig, w WithColumns) (*da
 }
 
 func executeFilter(ctx context.Context, cfg execConfig, f Filter) (*dataframe.DataFrame, error) {
+	return executeFilterSelect(ctx, cfg, f, nil)
+}
+
+// executeFilterSelect filters f's input and keeps only the columns in
+// keep (all when nil). Columns only the predicate reads are then never
+// filtered: the optimizer puts a projection of bare columns right above
+// a filter whose predicate columns are not needed further up.
+func executeFilterSelect(ctx context.Context, cfg execConfig, f Filter, keep []string) (*dataframe.DataFrame, error) {
 	input, err := executeNode(ctx, cfg, f.Input)
 	if err != nil {
 		return nil, err
@@ -274,7 +492,29 @@ func executeFilter(ctx context.Context, cfg execConfig, f Filter) (*dataframe.Da
 		return nil, fmt.Errorf("%w: filter predicate must be bool, got %s",
 			compute.ErrMaskNotBool, mask.DType())
 	}
+	if keep != nil {
+		sub, err := input.Select(keep...)
+		if err != nil {
+			return nil, err
+		}
+		defer sub.Release()
+		return sub.Filter(ctx, mask, dataframe.WithFilterAllocator(cfg.alloc))
+	}
 	return input.Filter(ctx, mask, dataframe.WithFilterAllocator(cfg.alloc))
+}
+
+// bareColumns returns the column names when every expression is a bare
+// column reference with no alias (a pure column selection).
+func bareColumns(exprs []expr.Expr) ([]string, bool) {
+	names := make([]string, len(exprs))
+	for i, e := range exprs {
+		c, ok := e.Node().(expr.ColNode)
+		if !ok || c.Name == "*" {
+			return nil, false
+		}
+		names[i] = c.Name
+	}
+	return names, len(names) > 0
 }
 
 func executeSort(ctx context.Context, cfg execConfig, s Sort) (*dataframe.DataFrame, error) {
@@ -292,14 +532,8 @@ func executeSlice(ctx context.Context, cfg execConfig, s SliceNode) (*dataframe.
 		return nil, err
 	}
 	defer input.Release()
-	length := s.Length
-	if s.Offset+length > input.Height() {
-		length = input.Height() - s.Offset
-	}
-	if s.Offset < 0 || length < 0 {
-		return nil, fmt.Errorf("%w: offset=%d length=%d", dataframe.ErrSliceOutOfBounds, s.Offset, length)
-	}
-	return input.Slice(s.Offset, length)
+	off, length := series.ClampSlice(s.Offset, s.Length, input.Height())
+	return input.Slice(off, length)
 }
 
 func executeRename(ctx context.Context, cfg execConfig, r Rename) (*dataframe.DataFrame, error) {

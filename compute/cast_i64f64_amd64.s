@@ -1,13 +1,18 @@
 //go:build amd64 && !noasm
 
-// Cast int64 → float64 with AVX2 regular stores (no streaming), for
-// inputs that fit in cache. The streaming-store variant in
-// cast_nt_amd64.s pays the SFENCE + write-combining-buffer cost on
-// every call and is only a win when the output doesn't fit in L2.
+// Cast int64 → float64 with regular stores (no streaming), for inputs
+// that fit in cache. The streaming-store variant in cast_nt_amd64.s
+// pays the SFENCE + write-combining-buffer cost on every call and is
+// only a win when the output doesn't fit in L2.
 //
 // AVX2 lacks a packed int64→double instruction (VCVTQQ2PD is AVX-512
-// only), so we do 4 scalar CVTSQ2SD converts and pack them into a
-// YMM before the store. 4-wide × 2-unroll = 8 elements per iter.
+// only), so we do scalar CVTSQ2SD converts and pack pairs with MOVLHPS
+// before SSE stores. 4-wide × 2-unroll = 8 elements per iter.
+//
+// Every floating-point op deliberately uses its LEGACY SSE encoding:
+// mixing legacy SSE (CVTSQ2SD/MOVLHPS) with VEX (VINSERTF128/VMOVUPD)
+// costs a ~100-cycle SSE-AVX transition penalty per iteration on Intel.
+// Pure SSE has identical store traffic (8× 64-bit stores per 8 elems).
 
 #include "textflag.h"
 
@@ -37,7 +42,10 @@ loop8:
 	MOVQ 24(SI)(AX*8), R10
 	CVTSQ2SD R10, X3
 	MOVLHPS X3, X2
-	VINSERTF128 $1, X2, Y0, Y0
+	MOVLPD X0, (DI)(AX*8)
+	MOVHPD X0, 8(DI)(AX*8)
+	MOVLPD X2, 16(DI)(AX*8)
+	MOVHPD X2, 24(DI)(AX*8)
 
 	// Second 4 lanes, independent data deps so the two iterations can
 	// issue in parallel through the two CVT ports on Skylake/Zen.
@@ -51,10 +59,10 @@ loop8:
 	MOVQ 56(SI)(AX*8), R10
 	CVTSQ2SD R10, X7
 	MOVLHPS X7, X6
-	VINSERTF128 $1, X6, Y4, Y4
-
-	VMOVUPD Y0, (DI)(AX*8)
-	VMOVUPD Y4, 32(DI)(AX*8)
+	MOVLPD X4, 32(DI)(AX*8)
+	MOVHPD X4, 40(DI)(AX*8)
+	MOVLPD X6, 48(DI)(AX*8)
+	MOVHPD X6, 56(DI)(AX*8)
 
 	ADDQ $8, AX
 	JMP loop8
@@ -77,15 +85,16 @@ loop4:
 	MOVQ 24(SI)(AX*8), R10
 	CVTSQ2SD R10, X3
 	MOVLHPS X3, X2
-	VINSERTF128 $1, X2, Y0, Y0
-	VMOVUPD Y0, (DI)(AX*8)
+	MOVLPD X0, (DI)(AX*8)
+	MOVHPD X0, 8(DI)(AX*8)
+	MOVLPD X2, 16(DI)(AX*8)
+	MOVHPD X2, 24(DI)(AX*8)
 
 	ADDQ $4, AX
 	CMPQ AX, R8
 	JL loop4
 
 tail1:
-	VZEROUPPER
 	CMPQ AX, CX
 	JGE done
 

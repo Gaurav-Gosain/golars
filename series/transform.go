@@ -147,43 +147,49 @@ func (s *Series) Shuffle(seed uint64, opts ...Option) (*Series, error) {
 	return s.Sample(s.Len(), false, seed, opts...)
 }
 
-// TopK returns the k largest non-null elements, sorted descending.
-// Stable across ties. Empty/all-null returns an empty Series.
+// TopK returns the k largest elements, sorted descending and stable
+// across ties. Like polars, nulls fill the tail when there are fewer
+// than k non-null values.
 func (s *Series) TopK(k int, opts ...Option) (*Series, error) {
 	if k < 0 {
 		return nil, fmt.Errorf("series: TopK k must be non-negative")
 	}
-	idx, err := s.ArgSort()
+	idx, err := topKIndices(s, k, true)
 	if err != nil {
 		return nil, err
 	}
-	// ArgSort returns ascending with nulls last. Reverse non-null prefix
-	// for descending top-k.
-	nn := s.Len() - s.NullCount()
-	if k > nn {
-		k = nn
-	}
-	out := make([]int, k)
-	for i := range k {
-		out[i] = idx[nn-1-i]
-	}
-	return s.takeIndices(out, opts)
+	return s.takeIndices(s.PadTopKNulls(idx, k), opts)
 }
 
-// BottomK returns the k smallest non-null elements, sorted ascending.
+// BottomK returns the k smallest elements, sorted ascending, with nulls
+// filling the tail like TopK.
 func (s *Series) BottomK(k int, opts ...Option) (*Series, error) {
 	if k < 0 {
 		return nil, fmt.Errorf("series: BottomK k must be non-negative")
 	}
-	idx, err := s.ArgSort()
+	idx, err := topKIndices(s, k, false)
 	if err != nil {
 		return nil, err
 	}
-	nn := s.Len() - s.NullCount()
-	if k > nn {
-		k = nn
+	return s.takeIndices(s.PadTopKNulls(idx, k), opts)
+}
+
+// PadTopKNulls extends top-k row indices (which only cover non-null
+// rows) with null rows in input order, up to min(k, s.Len()). polars
+// top_k and bottom_k return nulls when there are fewer than k non-null
+// values.
+func (s *Series) PadTopKNulls(idx []int, k int) []int {
+	want := min(k, s.Len())
+	if len(idx) >= want || s.NullCount() == 0 {
+		return idx
 	}
-	return s.takeIndices(idx[:k], opts)
+	chunk := s.Chunk(0)
+	for i := 0; i < chunk.Len() && len(idx) < want; i++ {
+		if chunk.IsNull(i) {
+			idx = append(idx, i)
+		}
+	}
+	return idx
 }
 
 // Equal reports whether two Series are element-wise equal (names +

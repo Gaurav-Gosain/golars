@@ -2,7 +2,6 @@ package series
 
 import (
 	"fmt"
-	"regexp"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -11,7 +10,7 @@ import (
 // ContainsRegex returns a boolean Series: true where the value
 // matches the compiled regex pattern. Nulls stay null.
 func (o StrOps) ContainsRegex(pattern string, opts ...Option) (*Series, error) {
-	re, err := regexp.Compile(pattern)
+	re, err := compileRegex(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("series.Str.ContainsRegex: %w", err)
 	}
@@ -22,7 +21,7 @@ func (o StrOps) ContainsRegex(pattern string, opts ...Option) (*Series, error) {
 // the first regex match per cell. Cells that don't match become null.
 // Mirrors polars' str.extract(pattern, group_index).
 func (o StrOps) Extract(pattern string, group int, opts ...Option) (*Series, error) {
-	re, err := regexp.Compile(pattern)
+	re, err := compileRegex(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("series.Str.Extract: %w", err)
 	}
@@ -51,7 +50,7 @@ func (o StrOps) Extract(pattern string, group int, opts ...Option) (*Series, err
 // CountMatchesRegex returns the number of non-overlapping matches of
 // pattern in each string.
 func (o StrOps) CountMatchesRegex(pattern string, opts ...Option) (*Series, error) {
-	re, err := regexp.Compile(pattern)
+	re, err := compileRegex(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("series.Str.CountMatchesRegex: %w", err)
 	}
@@ -61,21 +60,21 @@ func (o StrOps) CountMatchesRegex(pattern string, opts ...Option) (*Series, erro
 		return nil, err
 	}
 	n := a.Len()
-	out := make([]int64, n)
+	out := make([]uint32, n) // polars: u32
 	valid := make([]bool, n)
 	for i := range n {
 		if !a.IsValid(i) {
 			continue
 		}
-		out[i] = int64(len(re.FindAllStringIndex(a.Value(i), -1)))
+		out[i] = uint32(len(re.FindAllStringIndex(a.Value(i), -1)))
 		valid[i] = true
 	}
-	return FromInt64(o.s.Name(), out, valid, WithAllocator(cfg.alloc))
+	return FromUint32(o.s.Name(), out, valid, WithAllocator(cfg.alloc))
 }
 
 // ReplaceRegex replaces every regex-matching substring with repl.
 func (o StrOps) ReplaceRegex(pattern, repl string, opts ...Option) (*Series, error) {
-	re, err := regexp.Compile(pattern)
+	re, err := compileRegex(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("series.Str.ReplaceRegex: %w", err)
 	}

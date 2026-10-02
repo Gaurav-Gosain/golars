@@ -1,0 +1,110 @@
+{
+  "name": "f32_sin_precision",
+  "status": "known",
+  "note": "sin on f32 keeps f64 precision; polars rounds to f32 (column \"o2\" row 0: golars [-0.48999646306037903], polars [-0.4899964928627014])",
+  "plan": {
+    "seed": 200008,
+    "ops": [
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "fn",
+                "name": "min_horizontal",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c4"
+                  },
+                  {
+                    "k": "call",
+                    "name": "sin",
+                    "args": [
+                      {
+                        "k": "col",
+                        "name": "c0"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o2"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c1",
+          "c3"
+        ]
+      }
+    ],
+    "order": {
+      "mode": "unordered"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "f32",
+      "values": [
+        709.4878540039062
+      ]
+    },
+    {
+      "name": "c1",
+      "type": "str",
+      "values": [
+        null
+      ]
+    },
+    {
+      "name": "c3",
+      "type": "str",
+      "values": [
+        null
+      ]
+    },
+    {
+      "name": "c4",
+      "type": "f64",
+      "values": [
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "str",
+        "values": [
+          null
+        ]
+      },
+      {
+        "name": "c3",
+        "type": "str",
+        "values": [
+          null
+        ]
+      },
+      {
+        "name": "o2",
+        "type": "list[f64]",
+        "values": [
+          [
+            -0.4899964928627014
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -120,7 +120,7 @@ func TestDataFrameNullCountAndEstimatedSize(t *testing.T) {
 		t.Fatalf("null_count shape = (%d,%d)", nc.Height(), nc.Width())
 	}
 	row, _ := nc.Row(0)
-	if row[0].(int64) != 1 {
+	if row[0].(uint32) != 1 {
 		t.Errorf("null_count = %v, want 1", row[0])
 	}
 

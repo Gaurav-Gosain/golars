@@ -33,6 +33,7 @@ import (
 	"github.com/Gaurav-Gosain/golars/script"
 	"github.com/Gaurav-Gosain/golars/script/exprparse"
 	"github.com/Gaurav-Gosain/golars/script/predparse"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
 // Transpile reads the script at path and writes equivalent Go source
@@ -72,10 +73,12 @@ type trans struct {
 	pkg     string
 	src     string
 	imports map[string]struct{}
+	cur     *syntax.Stmt // the statement being translated
 	stmts   []string
 
 	focus       string   // Go var name for the focused lazy frame
 	chainOrigin string   // Go expression the next chain extends from
+	source      string   // Go expression `reset` returns to
 	pending     []string // ".Method(args)" fragments to flush
 
 	frames  map[string]string // glr frame name -> Go var
@@ -89,15 +92,9 @@ type trans struct {
 }
 
 func (t *trans) walk() error {
-	for line := range splitLines(t.src) {
-		raw := line
-		stmt := script.Normalize(raw)
-		if stmt == "" {
-			continue
-		}
-		if err := t.handle(stmt); err != nil {
-			return fmt.Errorf("line %q: %w", raw, err)
-		}
+	runner := script.Runner{Exec: script.ExecutorFunc(t.handle)}
+	if err := runner.Run(strings.NewReader(t.src), "<script>"); err != nil {
+		return err
 	}
 	// Implicit display when the script never materialised: flush any
 	// pending chain into focus, then print.
@@ -114,16 +111,28 @@ func (t *trans) walk() error {
 }
 
 func (t *trans) handle(stmt string) error {
-	parts := strings.Fields(stmt)
-	cmd := strings.TrimPrefix(parts[0], ".")
-	args := parts[1:]
-	rest := strings.TrimSpace(strings.TrimPrefix(stmt, parts[0]))
+	f := syntax.Parse(stmt)
+	if len(f.Stmts) == 0 {
+		return nil
+	}
+	st := f.Stmts[0]
+	if st.Spec != nil {
+		// Unknown commands become TODO comments below; known ones must
+		// be well formed.
+		if err := syntax.FirstError(st); err != nil {
+			return err
+		}
+	}
+	t.cur = st
+	cmd := st.Name() // resolves aliases such as write and melt
+	rest, _ := st.Rest()
+	args := syntax.SplitArgs(rest)
 
 	switch cmd {
 	case "load":
 		return t.load(args)
 	case "select":
-		return t.selectCols(args)
+		return t.selectCols(rest)
 	case "drop":
 		return t.dropCols(args)
 	case "sort":
@@ -139,7 +148,49 @@ func (t *trans) handle(stmt string) error {
 	case "with":
 		return t.with(rest)
 	case "groupby":
-		return t.groupby(args)
+		return t.groupby(rest)
+	case "group_by_dynamic":
+		return t.groupByDynamic(rest)
+	case "join_asof":
+		return t.joinAsof(args)
+	case "explode":
+		t.pipe("Explode", quoteList(parseCommaListOrEmpty(args)))
+		return nil
+	case "with_row_index":
+		return t.withRowIndex(args)
+	case "to_dummies":
+		var cols []string
+		drop := false
+		for _, c := range parseCommaListOrEmpty(args) {
+			if strings.EqualFold(c, "drop_first") {
+				drop = true
+				continue
+			}
+			cols = append(cols, c)
+		}
+		opts := ""
+		if len(cols) > 0 {
+			opts = "Columns: []string{" + quoteList(cols) + "}"
+		}
+		if drop {
+			opts = strings.TrimPrefix(opts+", DropFirst: true", ", ")
+		}
+		t.imports["github.com/Gaurav-Gosain/golars/dataframe"] = struct{}{}
+		return t.eagerStep(fmt.Sprintf("ToDummies(ctx, dataframe.ToDummiesOptions{%s})", opts))
+	case "unnest":
+		if len(args) != 1 {
+			return fmt.Errorf("unnest requires one column")
+		}
+		return t.eagerStep(fmt.Sprintf("Unnest(ctx, %q)", args[0]))
+	case "top_k", "bottom_k":
+		if len(args) != 2 {
+			return fmt.Errorf("%s requires K and a column", cmd)
+		}
+		method := "TopK"
+		if cmd == "bottom_k" {
+			method = "BottomK"
+		}
+		return t.eagerStep(fmt.Sprintf("%s(ctx, %d, %q)", method, parseN(args, 0), args[1]))
 	case "rename":
 		return t.rename(args)
 	case "show":
@@ -150,24 +201,26 @@ func (t *trans) handle(stmt string) error {
 		return t.stash(args)
 	case "join":
 		return t.join(args)
-	case "save", "write":
+	case "save":
 		return t.save(args)
 	case "collect":
 		return t.collect()
 	case "reset":
-		// Drop the lazy pipeline; keep nothing focused. Subsequent
-		// `load` will start a fresh chain.
+		// Drop the pending pipeline and return to the focus source
+		// (the last load, use or stash), as the REPL does.
 		t.abandonFocus()
-		t.focus = ""
-		t.chainOrigin = ""
-		t.pending = nil
-		t.materialised = false
+		if t.source == "" {
+			t.focus, t.chainOrigin = "", ""
+			return nil
+		}
+		t.focus = t.freshVar("lf")
+		t.chainOrigin = t.source
 		return nil
 	// REPL-only commands - meaningless in a compiled program. Track
 	// for the header note instead of polluting the body with TODOs.
-	case "frames", "drop_frame", "schema", "describe", "ishow", "browse",
-		"explain", "explain_tree", "tree", "graph", "show_graph", "mermaid",
-		"timing", "info", "clear", "help", "exit", "quit", "source",
+	case "frames", "drop_frame", "schema", "describe", "ishow",
+		"explain", "explain_tree", "graph", "mermaid",
+		"timing", "info", "clear", "help", "exit", "source",
 		"null_count", "null_count_all", "size", "glimpse",
 		"sum_all", "mean_all", "min_all", "max_all", "std_all", "var_all", "median_all":
 		t.noteSkipped(cmd)
@@ -213,6 +266,7 @@ func (t *trans) load(args []string) error {
 		lf := t.freshVar("lf")
 		t.focus = lf
 		t.chainOrigin = fmt.Sprintf("lazy.FromDataFrame(%s)", df)
+		t.source = t.chainOrigin
 		t.pending = nil
 	} else {
 		// Staged frame: bind eagerly under the stage var so `use NAME`
@@ -224,17 +278,55 @@ func (t *trans) load(args []string) error {
 	return nil
 }
 
-func (t *trans) selectCols(args []string) error {
-	cols, err := parseCommaList(args)
-	if err != nil {
-		return err
+func (t *trans) selectCols(rest string) error {
+	if strings.TrimSpace(rest) == "" {
+		return fmt.Errorf("select: expected a column list")
 	}
-	exprs := make([]string, len(cols))
-	for i, c := range cols {
-		exprs[i] = fmt.Sprintf("expr.Col(%q)", c)
+	var exprs []string
+	if !syntax.SelectIsPlain(rest) {
+		items, err := namedItemSources(t.cur)
+		if err != nil {
+			return fmt.Errorf("select: %w", err)
+		}
+		t.pipe("Select", strings.Join(items, ", "))
+		return nil
+	}
+	if syntax.SelectIsPlain(rest) {
+		cols, err := parseCommaList(strings.Fields(rest))
+		if err != nil {
+			return err
+		}
+		for _, c := range cols {
+			exprs = append(exprs, fmt.Sprintf("expr.Col(%q)", c))
+		}
+	} else {
+		for _, part := range script.SplitTopLevel(rest, ',') {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			src, err := namedExprSource(part)
+			if err != nil {
+				return fmt.Errorf("select: %w", err)
+			}
+			exprs = append(exprs, src)
+		}
 	}
 	t.pipe("Select", strings.Join(exprs, ", "))
 	return nil
+}
+
+// namedExprSource renders `name = expr` (or a bare expr) as Go.
+func namedExprSource(text string) (string, error) {
+	name, body, err := splitAssign(text)
+	if err != nil {
+		return exprparse.GoSource(text)
+	}
+	src, err := exprparse.GoSource(body)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", text, err)
+	}
+	return fmt.Sprintf("%s.Alias(%q)", src, name), nil
 }
 
 func (t *trans) dropCols(args []string) error {
@@ -251,15 +343,34 @@ func (t *trans) dropCols(args []string) error {
 }
 
 func (t *trans) sort(args []string) error {
-	if len(args) == 0 {
+	var keys []string
+	var desc []bool
+	for _, a := range strings.Split(strings.Join(args, ","), ",") {
+		a = strings.TrimSpace(a)
+		switch strings.ToLower(a) {
+		case "":
+		case "asc", "desc":
+			if len(desc) > 0 {
+				desc[len(desc)-1] = strings.EqualFold(a, "desc")
+			}
+		default:
+			keys = append(keys, a)
+			desc = append(desc, false)
+		}
+	}
+	switch len(keys) {
+	case 0:
 		return fmt.Errorf("sort requires a column")
+	case 1:
+		t.pipe("Sort", fmt.Sprintf("%q, %t", keys[0], desc[0]))
+		return nil
 	}
-	col := args[0]
-	desc := false
-	if len(args) >= 2 && strings.EqualFold(args[1], "desc") {
-		desc = true
+	t.imports["github.com/Gaurav-Gosain/golars/compute"] = struct{}{}
+	opts := make([]string, len(keys))
+	for i, d := range desc {
+		opts[i] = fmt.Sprintf("{Descending: %t}", d)
 	}
-	t.pipe("Sort", fmt.Sprintf("%q, %t", col, desc))
+	t.pipe("SortBy", fmt.Sprintf("%s, []compute.SortOptions{%s}", "[]string{"+quoteList(keys)+"}", strings.Join(opts, ", ")))
 	return nil
 }
 
@@ -306,64 +417,235 @@ func (t *trans) filter(rest string) error {
 	if rest == "" {
 		return fmt.Errorf("filter requires a predicate")
 	}
-	e, err := predparse.Parse(rest)
-	if err != nil {
-		e, err = exprparse.Parse(rest)
-	}
+	src, err := predparse.GoSource(rest)
 	if err != nil {
 		return fmt.Errorf("filter: parse %q: %w", rest, err)
 	}
-	t.pipe("Filter", renderExpr(e.Node()))
+	t.pipe("Filter", src)
 	return nil
 }
 
-func (t *trans) with(rest string) error {
-	name, exprText, err := splitAssign(rest)
+func (t *trans) with(string) error {
+	items, err := namedItemSources(t.cur)
 	if err != nil {
-		return err
+		return fmt.Errorf("with: %w", err)
 	}
-	e, err := exprparse.Parse(exprText)
-	if err != nil {
-		return fmt.Errorf("with %q: parse: %w", name, err)
+	if len(items) == 0 {
+		return fmt.Errorf("with: expected NAME = EXPR")
 	}
-	goExpr := renderExpr(e.Node())
-	t.pipe("WithColumns", fmt.Sprintf("%s.Alias(%q)", goExpr, name))
+	t.pipe("WithColumns", strings.Join(items, ", "))
 	return nil
 }
 
-func (t *trans) groupby(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("groupby requires at least one key")
-	}
-	keys := strings.Split(args[0], ",")
-	quotedKeys := make([]string, len(keys))
-	for i, k := range keys {
-		quotedKeys[i] = strconv.Quote(strings.TrimSpace(k))
-	}
-	var aggs []string
-	for _, spec := range args[1:] {
-		parts := strings.Split(spec, ":")
-		if len(parts) < 2 {
-			t.emitComment("skipping invalid agg spec %q", spec)
+// namedItemSources renders the expression items of a parsed
+// statement (`name = expr` or a bare expression) as Go.
+func namedItemSources(st *syntax.Stmt) ([]string, error) {
+	var out []string
+	for i := 0; i < len(st.Parts); i++ {
+		p := st.Parts[i]
+		name := ""
+		if p.Kind == syntax.PartNewColumn && i+2 < len(st.Parts) && st.Parts[i+2].Kind == syntax.PartExpr {
+			name = p.Value
+			i += 2
+			p = st.Parts[i]
+		} else if p.Kind != syntax.PartExpr {
 			continue
 		}
-		col := parts[0]
-		op := parts[1]
-		alias := ""
-		if len(parts) >= 3 {
-			alias = parts[2]
+		src, err := exprparse.GoSource(p.Text)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p.Text, err)
 		}
-		a := fmt.Sprintf("expr.Col(%q).%s()", col, aggMethod(op))
-		if alias != "" {
-			a = fmt.Sprintf("%s.Alias(%q)", a, alias)
+		if name != "" {
+			src = fmt.Sprintf("%s.Alias(%q)", src, name)
 		}
-		aggs = append(aggs, a)
+		out = append(out, src)
+	}
+	return out, nil
+}
+
+func (t *trans) groupby(string) error {
+	if len(t.cur.Parts) == 0 {
+		return fmt.Errorf("groupby requires at least one key")
+	}
+	var quotedKeys []string
+	for _, k := range t.cur.Parts[0].Items {
+		quotedKeys = append(quotedKeys, strconv.Quote(k.Value))
+	}
+	aggs, err := aggPartSources(t.cur)
+	if err != nil {
+		return err
 	}
 	// GroupBy.Agg is two methods chained together, but it's still a
 	// single dot-chain link from the focus var's perspective.
 	t.pendingChain(fmt.Sprintf("GroupBy(%s).Agg(%s)",
 		strings.Join(quotedKeys, ", "), strings.Join(aggs, ", ")))
 	return nil
+}
+
+// aggPartSources renders the `col:op[:alias]` and `name = expr`
+// aggregations of a groupby statement in source order.
+func aggPartSources(st *syntax.Stmt) ([]string, error) {
+	var aggs []string
+	for i := 0; i < len(st.Parts); i++ {
+		p := st.Parts[i]
+		switch {
+		case p.Kind == syntax.PartAgg:
+			col, op := p.Items[0].Value, p.Items[1].Value
+			alias := col
+			if len(p.Items) == 3 {
+				alias = p.Items[2].Value
+			}
+			aggs = append(aggs, fmt.Sprintf("expr.Col(%q).%s().Alias(%q)", col, aggMethod(op), alias))
+		case p.Kind == syntax.PartNewColumn && i+2 < len(st.Parts) && st.Parts[i+2].Kind == syntax.PartExpr:
+			x := st.Parts[i+2]
+			src, err := exprparse.GoSource(x.Text)
+			if err != nil {
+				return nil, fmt.Errorf("aggregation %s: %w", p.Value, err)
+			}
+			aggs = append(aggs, fmt.Sprintf("%s.Alias(%q)", src, p.Value))
+			i += 2
+		}
+	}
+	return aggs, nil
+}
+
+func (t *trans) groupByDynamic(string) error {
+	st := t.cur
+	if len(st.Parts) < 3 {
+		return fmt.Errorf("group_by_dynamic: expected TIME_COL every DUR AGG")
+	}
+	var fields []string
+	for i := 1; i+1 < len(st.Parts); i++ {
+		if st.Parts[i].Kind != syntax.PartKeyword {
+			continue
+		}
+		v := st.Parts[i+1].Value
+		switch st.Parts[i].Value {
+		case "every":
+			fields = append(fields, fmt.Sprintf("Every: %q", v))
+		case "period":
+			fields = append(fields, fmt.Sprintf("Period: %q", v))
+		case "offset":
+			fields = append(fields, fmt.Sprintf("Offset: %q", v))
+		case "by":
+			var keys []string
+			for _, it := range st.Parts[i+1].Items {
+				keys = append(keys, it.Value)
+			}
+			fields = append(fields, "GroupBy: []string{"+quoteList(keys)+"}")
+		case "closed":
+			fields = append(fields, fmt.Sprintf("Closed: %q", v))
+		case "label":
+			fields = append(fields, fmt.Sprintf("Label: %q", v))
+		case "start_by":
+			fields = append(fields, fmt.Sprintf("StartBy: %q", v))
+		}
+	}
+	aggs, err := aggPartSources(st)
+	if err != nil {
+		return err
+	}
+	t.imports["github.com/Gaurav-Gosain/golars/dataframe"] = struct{}{}
+	t.pendingChain(fmt.Sprintf("GroupByDynamic(%q, dataframe.DynamicGroupOptions{%s}).Agg(%s)",
+		st.Parts[0].Value, strings.Join(fields, ", "), strings.Join(aggs, ", ")))
+	return nil
+}
+
+func (t *trans) joinAsof(args []string) error {
+	if len(args) < 3 || !strings.EqualFold(args[1], "on") {
+		return fmt.Errorf("join_asof: expected NAME on KEY")
+	}
+	rhs, ok := t.frames[args[0]]
+	if !ok {
+		return fmt.Errorf("join_asof: unknown frame %q", args[0])
+	}
+	fields := []string{fmt.Sprintf("On: %q", args[2])}
+	rest := args[3:]
+	for i := 0; i < len(rest); i++ {
+		switch strings.ToLower(rest[i]) {
+		case "forward":
+			fields = append(fields, "Strategy: dataframe.AsofForward")
+		case "nearest":
+			fields = append(fields, "Strategy: dataframe.AsofNearest")
+		case "backward":
+		case "by":
+			if i+1 < len(rest) {
+				i++
+				keys, _ := parseCommaList([]string{rest[i]})
+				fields = append(fields, "By: []string{"+quoteList(keys)+"}")
+			}
+		case "tolerance":
+			if i+1 < len(rest) {
+				i++
+				fields = append(fields, "Tolerance: "+toleranceSource(rest[i]))
+			}
+		}
+	}
+	t.imports["github.com/Gaurav-Gosain/golars/dataframe"] = struct{}{}
+	t.pipe("JoinAsof", fmt.Sprintf("%s, dataframe.AsofOptions{%s}", rhs, strings.Join(fields, ", ")))
+	return nil
+}
+
+// eagerStep lowers a reshape command with no lazy form: collect the
+// focus, call the DataFrame method, and refocus on the result.
+func (t *trans) eagerStep(call string) error {
+	t.flush()
+	if t.focus == "" {
+		return fmt.Errorf("%s requires a loaded frame", strings.SplitN(call, "(", 2)[0])
+	}
+	t.needsCtx = true
+	in := t.freshVar("df")
+	t.emit("%s, err := %s.Collect(ctx)", in, t.focus)
+	t.emit("if err != nil { log.Fatal(err) }")
+	t.emit("defer %s.Release()", in)
+	out := t.freshVar("df")
+	t.emit("%s, err := %s.%s", out, in, call)
+	t.emit("if err != nil { log.Fatal(err) }")
+	t.emit("defer %s.Release()", out)
+	t.focus = t.freshVar("lf")
+	t.chainOrigin = fmt.Sprintf("lazy.FromDataFrame(%s)", out)
+	t.source = t.chainOrigin
+	t.pending = nil
+	return nil
+}
+
+func (t *trans) withRowIndex(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("with_row_index requires a name")
+	}
+	offset := "0"
+	if len(args) >= 2 {
+		if _, err := strconv.ParseInt(args[1], 10, 64); err == nil {
+			offset = args[1]
+		}
+	}
+	t.pipe("WithRowIndex", fmt.Sprintf("%q, %s", args[0], offset))
+	return nil
+}
+
+// toleranceSource renders an asof tolerance: integers and floats stay
+// numeric, anything else is a duration string such as "2m".
+func toleranceSource(v string) string {
+	if _, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return "int64(" + v + ")"
+	}
+	if _, err := strconv.ParseFloat(v, 64); err == nil {
+		return "float64(" + v + ")"
+	}
+	return strconv.Quote(strings.Trim(v, `"`))
+}
+
+func quoteList(items []string) string {
+	q := make([]string, len(items))
+	for i, it := range items {
+		q[i] = strconv.Quote(it)
+	}
+	return strings.Join(q, ", ")
+}
+
+func parseCommaListOrEmpty(args []string) []string {
+	out, _ := parseCommaList(args)
+	return out
 }
 
 func (t *trans) use(args []string) error {
@@ -381,6 +663,7 @@ func (t *trans) use(args []string) error {
 	lf := t.freshVar("lf")
 	t.focus = lf
 	t.chainOrigin = target
+	t.source = target
 	t.pending = nil
 	return nil
 }
@@ -397,6 +680,7 @@ func (t *trans) stash(args []string) error {
 	stageVar := goIdent(name)
 	t.emit("%s := %s", stageVar, t.focus)
 	t.frames[name] = stageVar
+	t.source = stageVar
 	return nil
 }
 
@@ -405,18 +689,39 @@ func (t *trans) join(args []string) error {
 		return fmt.Errorf("join: expected NAME on KEY [how]")
 	}
 	name := args[0]
-	key := args[2]
+	var keys []string
+	for k := range strings.SplitSeq(args[2], ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			keys = append(keys, fmt.Sprintf("%q", k))
+		}
+	}
 	how := "InnerJoin"
-	if len(args) >= 4 {
-		switch strings.ToLower(args[3]) {
+	suffix := ""
+	rest := args[3:]
+	for i := 0; i < len(rest); i++ {
+		switch strings.ToLower(rest[i]) {
 		case "inner":
 			how = "InnerJoin"
 		case "left":
 			how = "LeftJoin"
+		case "right":
+			how = "RightJoin"
+		case "full", "outer":
+			how = "FullJoin"
+		case "semi":
+			how = "SemiJoin"
+		case "anti":
+			how = "AntiJoin"
 		case "cross":
 			how = "CrossJoin"
+		case "suffix":
+			if i+1 >= len(rest) {
+				return fmt.Errorf("join: suffix needs a value")
+			}
+			i++
+			suffix = fmt.Sprintf(", dataframe.WithJoinSuffix(%q)", rest[i])
 		default:
-			return fmt.Errorf("join: unknown join type %q", args[3])
+			return fmt.Errorf("join: unknown join type %q", rest[i])
 		}
 	}
 	rhs, ok := t.frames[name]
@@ -424,7 +729,7 @@ func (t *trans) join(args []string) error {
 		return fmt.Errorf("join: unknown frame %q", name)
 	}
 	t.imports["github.com/Gaurav-Gosain/golars/dataframe"] = struct{}{}
-	t.pipe("Join", fmt.Sprintf("%s, []string{%q}, dataframe.%s", rhs, key, how))
+	t.pipe("Join", fmt.Sprintf("%s, []string{%s}, dataframe.%s%s", rhs, strings.Join(keys, ", "), how, suffix))
 	return nil
 }
 
@@ -614,6 +919,14 @@ func (t *trans) render(w io.Writer) error {
 	if t.needsFmt {
 		t.imports["fmt"] = struct{}{}
 		t.imports["log"] = struct{}{}
+	}
+	// Expressions such as cast or a null literal reference dtype.
+	// Add it only when used: pruning an unused import leaves a gap.
+	for _, st := range t.stmts {
+		if strings.Contains(st, "dtype.") {
+			t.imports["github.com/Gaurav-Gosain/golars/dtype"] = struct{}{}
+			break
+		}
 	}
 
 	stdlib, external := splitImports(t.imports)
@@ -848,6 +1161,8 @@ func aggMethod(s string) string {
 		return "Std"
 	case "var":
 		return "Var"
+	case "n_unique":
+		return "NUnique"
 	}
 	if s == "" {
 		return s
@@ -890,21 +1205,4 @@ func goIdent(s string) string {
 		out = "f_" + out
 	}
 	return out
-}
-
-func splitLines(s string) func(yield func(string) bool) {
-	return func(yield func(string) bool) {
-		start := 0
-		for i := 0; i < len(s); i++ {
-			if s[i] == '\n' {
-				if !yield(s[start:i]) {
-					return
-				}
-				start = i + 1
-			}
-		}
-		if start < len(s) {
-			yield(s[start:])
-		}
-	}
 }

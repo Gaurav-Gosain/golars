@@ -91,6 +91,38 @@ func BuildTypedInt32Direct(name string, n int, mem memory.Allocator, dt arrow.Da
 	return New(name, arr)
 }
 
+// BuildInt32DirectFused is the int32 counterpart of BuildInt64DirectFused.
+func BuildInt32DirectFused(name string, n int, mem memory.Allocator, fill func(out []int32, validBits []byte) int) (*Series, error) {
+	if mem == nil {
+		mem = memory.DefaultAllocator
+	}
+	data := memory.NewResizableBuffer(mem)
+	data.Resize(n * arrow.Int32SizeBytes)
+	defer data.Release()
+
+	validBuf := memory.NewResizableBuffer(mem)
+	nBytes := bitutil.BytesForBits(int64(n))
+	validBuf.Resize(int(nBytes))
+	defer validBuf.Release()
+	// Pooled allocators (compute.poolingMem) hand back recycled
+	// buffers, and fill callbacks may only OR in the valid bits, so
+	// the bitmap must start all-invalid.
+	validBytes := validBuf.Bytes()
+	clear(validBytes)
+
+	nullCount := n
+	if n > 0 {
+		view := unsafe.Slice((*int32)(unsafe.Pointer(&data.Bytes()[0])), n)
+		nullCount = fill(view, validBytes)
+	}
+
+	ad := array.NewData(arrow.PrimitiveTypes.Int32, n,
+		[]*memory.Buffer{validBuf, data}, nil, nullCount, 0)
+	defer ad.Release()
+	arr := array.NewInt32Data(ad)
+	return New(name, arr)
+}
+
 // BuildInt64DirectFused is the fused-fill nullable variant: the callback
 // receives both the output value slice AND the packed bitmap buffer, and
 // returns the null count. This lets the caller write to values and the
@@ -108,8 +140,11 @@ func BuildInt64DirectFused(name string, n int, mem memory.Allocator, fill func(o
 	nBytes := bitutil.BytesForBits(int64(n))
 	validBuf.Resize(int(nBytes))
 	defer validBuf.Release()
-	// mallocgc zeroes buffers; bitmap starts all-invalid.
+	// Pooled allocators (compute.poolingMem) hand back recycled
+	// buffers, and fill callbacks may only OR in the valid bits, so
+	// the bitmap must start all-invalid.
 	validBytes := validBuf.Bytes()
+	clear(validBytes)
 
 	nullCount := n
 	if n > 0 {
@@ -137,7 +172,11 @@ func BuildFloat64DirectFused(name string, n int, mem memory.Allocator, fill func
 	nBytes := bitutil.BytesForBits(int64(n))
 	validBuf.Resize(int(nBytes))
 	defer validBuf.Release()
+	// Pooled allocators (compute.poolingMem) hand back recycled
+	// buffers, and fill callbacks may only OR in the valid bits, so
+	// the bitmap must start all-invalid.
 	validBytes := validBuf.Bytes()
+	clear(validBytes)
 
 	nullCount := n
 	if n > 0 {

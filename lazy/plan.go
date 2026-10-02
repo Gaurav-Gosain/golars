@@ -66,57 +66,6 @@ func (a Aggregate) String() string {
 	return fmt.Sprintf("AGG keys=%v [%s]", a.Keys, strings.Join(aggs, ", "))
 }
 
-// Join is a two-source join.
-type Join struct {
-	Left  Node
-	Right Node
-	On    []string
-	How   dataframe.JoinType
-}
-
-func (Join) isLogicalNode() {}
-
-func (j Join) Children() []Node { return []Node{j.Left, j.Right} }
-
-func (j Join) WithChildren(children []Node) Node {
-	if len(children) != 2 {
-		panic("lazy: Join takes two children")
-	}
-	return Join{Left: children[0], Right: children[1], On: j.On, How: j.How}
-}
-
-func (j Join) Schema() (*schema.Schema, error) {
-	ls, err := j.Left.Schema()
-	if err != nil {
-		return nil, err
-	}
-	rs, err := j.Right.Schema()
-	if err != nil {
-		return nil, err
-	}
-	onSet := make(map[string]struct{}, len(j.On))
-	for _, k := range j.On {
-		onSet[k] = struct{}{}
-	}
-	fields := make([]schema.Field, 0, ls.Len()+rs.Len())
-	fields = append(fields, ls.Fields()...)
-	for _, f := range rs.Fields() {
-		if _, isKey := onSet[f.Name]; isKey {
-			continue
-		}
-		name := f.Name
-		if ls.Contains(name) {
-			name = name + "_right"
-		}
-		fields = append(fields, schema.Field{Name: name, DType: f.DType})
-	}
-	return schema.New(fields...)
-}
-
-func (j Join) String() string {
-	return fmt.Sprintf("JOIN %s on=%v", j.How, j.On)
-}
-
 // Ensure dtype import is referenced in this file even when callers do not use
 // nested inference paths.
 var _ = dtype.Null
@@ -443,7 +392,18 @@ func inferExprDType(e expr.Expr, in *schema.Schema) (dtype.DType, error) {
 		if err != nil {
 			return dtype.DType{}, err
 		}
-		return promote(lt, rt), nil
+		if !lt.Equal(rt) {
+			// Mixed dtypes follow the evaluator's supertype and untyped
+			// literal rules; ask it.
+			if dt := inferByEmptyEval(e, in); !dt.IsNull() {
+				return dt, nil
+			}
+		}
+		out := promote(lt, rt)
+		if n.Op == expr.OpDiv && out.IsInteger() {
+			return dtype.Float64(), nil // `/` is true division
+		}
+		return out, nil
 	case expr.UnaryNode:
 		if n.Op == expr.OpNot {
 			return dtype.Bool(), nil
@@ -460,13 +420,13 @@ func inferExprDType(e expr.Expr, in *schema.Schema) (dtype.DType, error) {
 		case expr.AggMean:
 			return dtype.Float64(), nil
 		case expr.AggCount, expr.AggNullCount:
-			return dtype.Int64(), nil
+			return dtype.Uint32(), nil
 		}
 		return inner, nil
 	case expr.WhenThenNode:
 		return inferExprDType(n.Then, in)
 	}
-	return dtype.Null(), nil
+	return inferByEmptyEval(e, in), nil
 }
 
 // promote returns the dtype both operands would need to share for a binary

@@ -7,6 +7,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/bitutil"
+
+	"github.com/Gaurav-Gosain/golars/internal/mempool"
 )
 
 // FillNan replaces every NaN in a float Series with value. Nulls are
@@ -92,11 +94,23 @@ func (s *Series) directionalFill(limit int, forward bool, opts []Option) (*Serie
 	switch a := chunk.(type) {
 	case *array.Int64:
 		src := a.Int64Values()
+		if limit <= 0 {
+			bits, off := a.NullBitmapBytes(), a.Data().Offset()
+			return BuildInt64DirectFused(s.Name(), n, mempool.Pooling(cfg.alloc), func(out []int64, validBits []byte) int {
+				return directionalFillNoLimit(as64(out), as64(src), bits, off, forward, validBits)
+			})
+		}
 		return BuildInt64DirectFused(s.Name(), n, cfg.alloc, func(out []int64, validBits []byte) int {
 			return directionalFillFused(out, src, a, n, limit, forward, validBits)
 		})
 	case *array.Float64:
 		src := a.Float64Values()
+		if limit <= 0 {
+			bits, off := a.NullBitmapBytes(), a.Data().Offset()
+			return BuildFloat64DirectFused(s.Name(), n, mempool.Pooling(cfg.alloc), func(out []float64, validBits []byte) int {
+				return directionalFillNoLimit(as64(out), as64(src), bits, off, forward, validBits)
+			})
+		}
 		return BuildFloat64DirectFused(s.Name(), n, cfg.alloc, func(out []float64, validBits []byte) int {
 			return directionalFillFused(out, src, a, n, limit, forward, validBits)
 		})

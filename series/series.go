@@ -263,10 +263,27 @@ func (s *Series) Chunks() []arrow.Array { return s.data.Chunks() }
 // multi-chunk Series are a caller bug; callers that want safety should
 // rechunk up-front via s.Consolidated().
 func (s *Series) Chunk(i int) arrow.Array {
-	if i == 0 && len(s.data.Chunks()) > 1 {
-		s.consolidateInPlace()
+	if i == 0 {
+		switch len(s.data.Chunks()) {
+		case 0:
+			// A zero-chunk Series (Empty, a zero-length slice) gets one
+			// empty chunk so callers that read Chunk(0) never index an
+			// empty slice.
+			s.installEmptyChunk()
+		case 1:
+		default:
+			s.consolidateInPlace()
+		}
 	}
 	return s.data.Chunk(i)
+}
+
+func (s *Series) installEmptyChunk() {
+	arr := array.MakeArrayOfNull(memory.DefaultAllocator, s.data.DataType(), 0)
+	defer arr.Release()
+	newChunked := arrow.NewChunked(s.data.DataType(), []arrow.Array{arr})
+	s.data.Release()
+	s.data = newChunked
 }
 
 // consolidateInPlace replaces s.data with a single-chunk *arrow.Chunked
@@ -277,7 +294,7 @@ func (s *Series) consolidateInPlace() {
 	if len(chunks) <= 1 {
 		return
 	}
-	arr, err := array.Concatenate(chunks, memory.DefaultAllocator)
+	arr, err := ConcatArrays(chunks, memory.DefaultAllocator)
 	if err != nil {
 		// Concatenate only fails on dtype mismatch, which arrow already
 		// prevents at NewChunked time; treat as impossible but fall back
@@ -306,6 +323,26 @@ func (s *Series) Rechunk() *Series {
 	return clone
 }
 
+// nonEmptyChunks drops zero-length chunks from a multi-chunk list,
+// keeping one when all are empty so the dtype survives. arrow's
+// Concatenate fails on some empty chunks (an empty dictionary chunk
+// panics), and they add nothing.
+func nonEmptyChunks(chunks []arrow.Array) []arrow.Array {
+	if len(chunks) < 2 {
+		return chunks
+	}
+	kept := make([]arrow.Array, 0, len(chunks))
+	for _, c := range chunks {
+		if c.Len() > 0 {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == 0 {
+		return chunks[:1]
+	}
+	return kept
+}
+
 // Consolidated returns an arrow.Array that holds every row of this
 // Series in a single contiguous chunk. When the Series already has one
 // chunk the call is a retain-only no-op; with multiple chunks it
@@ -318,7 +355,7 @@ func (s *Series) Rechunk() *Series {
 // already does this internally, so compute kernels don't need to call
 // this - it's for external consumers and tests.
 func (s *Series) Consolidated() (arrow.Array, error) {
-	chunks := s.data.Chunks()
+	chunks := nonEmptyChunks(s.data.Chunks())
 	switch len(chunks) {
 	case 0:
 		return array.MakeArrayOfNull(memory.DefaultAllocator, s.data.DataType(), 0), nil
@@ -326,7 +363,7 @@ func (s *Series) Consolidated() (arrow.Array, error) {
 		chunks[0].Retain()
 		return chunks[0], nil
 	default:
-		return array.Concatenate(chunks, memory.DefaultAllocator)
+		return ConcatArrays(chunks, memory.DefaultAllocator)
 	}
 }
 
@@ -364,6 +401,24 @@ func (s *Series) Slice(offset, length int) (*Series, error) {
 	}
 	sliced := array.NewChunkedSlice(s.data, int64(offset), int64(offset+length))
 	return &Series{name: s.name, data: sliced}, nil
+}
+
+// ClampSlice resolves a polars-style slice against a length n. A
+// negative offset counts from the end, a negative length means "to the
+// end", and the window is clamped to [0, n]. The result is always a
+// valid argument pair for Slice.
+func ClampSlice(offset, length, n int) (int, int) {
+	start := offset
+	if start < 0 {
+		start += n
+	}
+	stop := n
+	if length >= 0 && start+length < n {
+		stop = start + length
+	}
+	start = min(max(start, 0), n)
+	stop = min(max(stop, 0), n)
+	return start, max(stop-start, 0)
 }
 
 // String returns a short one-line repr: name: dtype [len=N, nulls=M].

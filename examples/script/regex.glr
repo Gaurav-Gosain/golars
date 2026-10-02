@@ -5,8 +5,8 @@
 load examples/script/data/people.csv
 
 # Add a derived column via the Str namespace.
-with name_caps  = name.str.upper()
-with first_two  = name.str.head(2)
+with name_caps = name.str.upper()
+with first_two = name.str.head(2)
 
 # Filter with the SQL-flavoured Like keyword (%: any, _: one, \ escape).
 filter name like "a%"

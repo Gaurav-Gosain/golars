@@ -2,27 +2,32 @@
 // bridge.
 //
 // Parquet is a columnar on-disk format with compression, statistics, and
-// predicate pushdown support. golars exposes a minimal Read/Write surface
-// here; richer features (per-column compression, row-group tuning, predicate
-// pushdown) will be added as the query engine grows.
+// predicate pushdown support. golars exposes a small Read/Write surface
+// here, plus column projection (WithColumns) and footer-only schema reads
+// (ReadSchema) so lazy scans decode only what a query needs.
 package parquet
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"runtime/debug"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/compress"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/internal/mmapfile"
+	"github.com/Gaurav-Gosain/golars/schema"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -34,6 +39,10 @@ type config struct {
 	compression compress.Compression
 	chunkSize   int64
 	httpClient  *http.Client
+	columns     []string
+	// noNative forces the pqarrow reader and writer (tests compare the
+	// two paths).
+	noNative bool
 }
 
 func resolve(opts []Option) config {
@@ -70,17 +79,39 @@ func WithChunkSize(rows int64) Option {
 	}
 }
 
+// WithColumns restricts Read to the named top-level columns. Only those
+// columns are decoded and the result keeps the requested order. An
+// unknown or repeated name is an error. Mirrors polars'
+// pl.read_parquet(path, columns=[...]).
+func WithColumns(names ...string) Option {
+	return func(c *config) { c.columns = append([]string{}, names...) }
+}
+
 // Read reads a parquet file from r into a DataFrame. r must support random
 // access because parquet reads the footer before the body.
 func Read(ctx context.Context, r parquet.ReaderAtSeeker, opts ...Option) (*dataframe.DataFrame, error) {
 	cfg := resolve(opts)
 
-	table, err := pqarrow.ReadTable(ctx,
-		r,
-		parquet.NewReaderProperties(cfg.alloc),
-		pqarrow.ArrowReadProperties{},
-		cfg.alloc,
-	)
+	pf, err := file.NewParquetReader(r, file.WithReadProps(parquet.NewReaderProperties(cfg.alloc)))
+	if err != nil {
+		return nil, fmt.Errorf("parquet: read: %w", err)
+	}
+	props := pqarrow.ArrowReadProperties{Parallel: true, BatchSize: batchSizeFor(pf), PreAllocBinaryData: true}
+	fr, err := pqarrow.NewFileReader(pf, props, cfg.alloc)
+	if err != nil {
+		return nil, fmt.Errorf("parquet: read: %w", err)
+	}
+	if !cfg.noNative {
+		df, err := readNativeTable(ctx, r, pf, fr, cfg)
+		if err == nil {
+			return df, nil
+		}
+		if !errors.Is(err, errUnsupported) {
+			return nil, fmt.Errorf("parquet: read: %w", err)
+		}
+		pqarrowReads.Add(1)
+	}
+	table, err := readTable(ctx, fr, pf.NumRowGroups(), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("parquet: read: %w", err)
 	}
@@ -89,19 +120,58 @@ func Read(ctx context.Context, r parquet.ReaderAtSeeker, opts ...Option) (*dataf
 	return tableToDataFrame(table)
 }
 
-// ReadBytes is a convenience wrapper over Read for in-memory data.
-func ReadBytes(ctx context.Context, b []byte, opts ...Option) (*dataframe.DataFrame, error) {
-	return Read(ctx, bytes.NewReader(b), opts...)
-}
-
-// ReadFile opens path and reads the parquet file into a DataFrame.
-func ReadFile(ctx context.Context, path string, opts ...Option) (*dataframe.DataFrame, error) {
+// ReadSchema returns the schema of the parquet file at path. Only the
+// footer is read; no column data is decoded.
+func ReadSchema(path string) (*schema.Schema, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("parquet: open %q: %w", path, err)
 	}
 	defer f.Close()
-	return Read(ctx, f, opts...)
+	pf, err := file.NewParquetReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("parquet: read schema: %w", err)
+	}
+	fr, err := pqarrow.NewFileReader(pf, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	if err != nil {
+		return nil, fmt.Errorf("parquet: read schema: %w", err)
+	}
+	sc, err := fr.Schema()
+	if err != nil {
+		return nil, fmt.Errorf("parquet: read schema: %w", err)
+	}
+	return schema.FromArrow(sc), nil
+}
+
+// ReadBytes is a convenience wrapper over Read for in-memory data.
+func ReadBytes(ctx context.Context, b []byte, opts ...Option) (*dataframe.DataFrame, error) {
+	return Read(ctx, newSliceReader(b), opts...)
+}
+
+// ReadFile opens path and reads the parquet file into a DataFrame. The
+// file is memory mapped where the platform supports it; no part of the
+// result refers to the mapping.
+func ReadFile(ctx context.Context, path string, opts ...Option) (*dataframe.DataFrame, error) {
+	m, err := mmapfile.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("parquet: open %q: %w", path, err)
+	}
+	defer m.Close()
+	return readGuarded(ctx, m.Data, opts)
+}
+
+// readGuarded reads a possibly memory mapped file. A memory fault on the
+// calling goroutine (the file shrank while mapped) becomes an error;
+// decode workers and the reader handed to pqarrow guard themselves.
+func readGuarded(ctx context.Context, b []byte, opts []Option) (df *dataframe.DataFrame, err error) {
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	defer func() {
+		if errors.Is(err, mmapfile.ErrFault) && !strings.HasPrefix(err.Error(), "parquet:") {
+			err = fmt.Errorf("parquet: read: %w", err)
+		}
+	}()
+	defer mmapfile.Recover(&err)
+	return ReadBytes(ctx, b, opts...)
 }
 
 // ReadURL fetches parquet from an http(s) URL and reads it into a
@@ -145,15 +215,7 @@ func Write(ctx context.Context, w io.Writer, df *dataframe.DataFrame, opts ...Op
 	}
 	defer table.Release()
 
-	writerProps := parquet.NewWriterProperties(
-		parquet.WithCompression(cfg.compression),
-		parquet.WithAllocator(cfg.alloc),
-	)
-	arrProps := pqarrow.NewArrowWriterProperties(
-		pqarrow.WithAllocator(cfg.alloc),
-	)
-
-	if err := pqarrow.WriteTable(table, w, cfg.chunkSize, writerProps, arrProps); err != nil {
+	if err := writeTable(ctx, table, w, cfg); err != nil {
 		return fmt.Errorf("parquet: write: %w", err)
 	}
 	return nil

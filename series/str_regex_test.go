@@ -71,8 +71,8 @@ func TestStrCountMatchesRegex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer out.Release()
-	arr := out.Chunk(0).(*array.Int64)
-	want := []int64{3, 2, 0}
+	arr := out.Chunk(0).(*array.Uint32) // polars: u32
+	want := []uint32{3, 2, 0}
 	for i, v := range want {
 		if arr.Value(i) != v {
 			t.Fatalf("idx %d: got %d want %d", i, arr.Value(i), v)

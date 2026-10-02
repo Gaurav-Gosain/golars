@@ -16,10 +16,10 @@ bench/pds-h/
   cmd/pdsh/main.go           CLI: -q N -data DIR [-sf F] [-repeats N]
   queries/                   one file per query
     registry.go              name->func table
-    q01.go                   Q1: pricing summary report
-    q06.go                   Q6: forecasting revenue change
-  gen/                       synthetic data for local dev
-    gen.go                   lineitem.parquet generator
+    tables.go                scan and expression helpers
+    q01.go ... q19.go        one query each
+  gen/main.go                TPC-H table generator for local dev
+  compare.py                 polars twins, timing, memory, answer check
 ```
 
 ## Running against real TPC-H data
@@ -45,28 +45,52 @@ golars,0.1.0,1,0.34,parquet,1.0
 Drop this into upstream's `output/run/timings.csv` to have its plot
 scripts pick us up alongside polars/duckdb/etc.
 
-## Running against synthetic data (local dev, no tpchgen)
+## Running against generated data (local dev, no tpchgen)
 
 ```sh
-# Emit a small synthetic lineitem.parquet (100k rows by default).
-go run ./bench/pds-h/gen -rows 100000 -out /tmp/pdsh
-
-# Run against it.
-go run ./bench/pds-h/cmd/pdsh -q 1 -data /tmp/pdsh -sf synthetic
+# All eight tables at scale factor 0.1 (600k lineitem rows).
+go run ./bench/pds-h/gen -sf 0.1 -out /tmp/pdsh
+go run ./bench/pds-h/cmd/pdsh -q all -data /tmp/pdsh -sf 0.1
 ```
 
-The synthetic dataset is schema-compatible with tpchgen but drops
-the cross-table referential invariants. Good enough to validate the
-query compiles; not a real benchmark.
+The generator follows the dbgen rules the queries depend on (key
+ranges, foreign keys, date offsets, flag rules, value lists), so the
+answers are meaningful, but free text comes from word lists and does
+not match dbgen byte for byte.
+
+## Comparing against polars
+
+`compare.py` runs the golars queries and the polars-benchmark polars
+queries on the same parquet files and prints per-query medians, the
+speedup, and peak RSS of each side:
+
+```sh
+go run ./bench/pds-h/gen -sf 1 -out /tmp/pdsh
+uv run --project bench/polars-compare python bench/pds-h/compare.py \
+    --data /tmp/pdsh --runs 5
+# Check that every golars answer matches polars:
+uv run --project bench/polars-compare python bench/pds-h/compare.py \
+    --data /tmp/pdsh --check
+```
+
+The pdsh binary is built into the data directory. `pdsh -cpuprofile
+FILE` writes a CPU profile covering every repetition and `pdsh -dump
+DIR` writes each result to `DIR/q<N>.parquet`.
 
 ## Query status
 
-| # | Name                        | Status | Blocker |
-|---|-----------------------------|--------|---------|
-| 1 | Pricing summary report      | done    | - |
-| 6 | Forecasting revenue change  | done    | - |
-| 2, 7-22 | other queries         | todo    | date interval arithmetic, semi/anti join, substring, regex |
+| # | Name                         | Status | Note |
+|---|------------------------------|--------|------|
+| 1 | Pricing summary report       | done   | - |
+| 3 | Shipping priority            | done   | - |
+| 4 | Order priority checking      | done   | unique on the selected pair instead of unique(subset=...) |
+| 5 | Local supplier volume        | done   | one-key join plus a nation filter instead of a two-key join |
+| 6 | Forecasting revenue change   | done   | - |
+| 10 | Returned item reporting     | done   | - |
+| 12 | Shipping modes and priority | done   | - |
+| 14 | Promotion effect            | done   | - |
+| 19 | Discounted revenue          | done   | - |
+| others |                         | todo   | multi-key joins, semi/anti joins |
 
-Porting cadence: add a `q<N>.go`, register in `registry.go`, verify
-output matches `data/answers/q<N>.parquet` at SF=1 (the reference
-answers upstream ships). Hook missing kernels into golars as we go.
+Porting cadence: add a `q<N>.go`, register in `registry.go`, add the
+polars twin to `compare.py`, and run `compare.py --check`.

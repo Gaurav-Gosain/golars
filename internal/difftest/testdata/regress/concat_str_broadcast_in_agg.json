@@ -1,0 +1,109 @@
+{
+  "name": "concat_str_broadcast_in_agg",
+  "status": "fixed",
+  "plan": {
+    "seed": 301224,
+    "ops": [
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "fn",
+                "name": "concat_str",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c4"
+                  },
+                  {
+                    "k": "call",
+                    "name": "dt.strftime",
+                    "args": [
+                      {
+                        "k": "fn",
+                        "name": "date",
+                        "args": [
+                          {
+                            "k": "raw",
+                            "val": 2021
+                          },
+                          {
+                            "k": "raw",
+                            "val": 12
+                          },
+                          {
+                            "k": "raw",
+                            "val": 16
+                          }
+                        ]
+                      },
+                      {
+                        "k": "raw",
+                        "val": "%a %b %e"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o2"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c5"
+        ],
+        "maintain_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c4",
+      "type": "bool",
+      "values": [
+        null,
+        false
+      ]
+    },
+    {
+      "name": "c5",
+      "type": "bool",
+      "values": [
+        false,
+        false
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c5",
+        "type": "bool",
+        "values": [
+          false
+        ]
+      },
+      {
+        "name": "o2",
+        "type": "list[str]",
+        "values": [
+          [
+            null,
+            "falseThu Dec 16"
+          ]
+        ]
+      }
+    ]
+  }
+}

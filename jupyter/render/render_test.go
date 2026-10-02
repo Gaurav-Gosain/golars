@@ -5,6 +5,11 @@ import (
 	"testing"
 
 	"github.com/Gaurav-Gosain/golars"
+	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/internal/testutil"
+	"github.com/Gaurav-Gosain/golars/series"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 )
 
 // buildDF: tiny helper since most tests need a DF and we don't want
@@ -84,6 +89,38 @@ func TestMimeBundle(t *testing.T) {
 	// text/plain should be the existing ASCII repr - includes box-drawing.
 	if !strings.Contains(bundle["text/plain"], "shape:") {
 		t.Errorf("text/plain missing shape marker")
+	}
+}
+
+func TestChunkedRendering(t *testing.T) {
+	mem := testutil.NewCheckedAllocator(t)
+	b := array.NewStringBuilder(mem)
+	defer b.Release()
+	chunks := []arrow.Array{b.NewArray()}
+	b.Append("first")
+	chunks = append(chunks, b.NewArray())
+	b.AppendNull()
+	b.Append("last")
+	chunks = append(chunks, b.NewArray())
+	s, err := series.New("name", chunks...)
+	if err != nil {
+		for _, chunk := range chunks {
+			chunk.Release()
+		}
+		t.Fatal(err)
+	}
+	df, err := dataframe.New(s)
+	if err != nil {
+		s.Release()
+		t.Fatal(err)
+	}
+	defer df.Release()
+	for _, output := range []string{HTML(df), Markdown(df)} {
+		for _, want := range []string{"first", "null", "last"} {
+			if !strings.Contains(output, want) {
+				t.Errorf("missing %q in %s", want, output)
+			}
+		}
 	}
 }
 

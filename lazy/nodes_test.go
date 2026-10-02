@@ -117,9 +117,9 @@ func TestLazyCast(t *testing.T) {
 
 func TestLazyCache(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
-	// Cache uses runtime.AddCleanup to release its held frame when the
+	// Cache uses runtime.SetFinalizer to release its held frame when the
 	// cacheState is GC'd. AssertSize runs after our explicit GC below
-	// so the cleanup fires before the leak check.
+	// so the finalizer fires before the leak check.
 	defer func() {
 		runtime.GC()
 		runtime.GC()
@@ -169,7 +169,7 @@ func TestLazyWithRowIndex(t *testing.T) {
 		t.Errorf("first col = %q, want row", out.ColumnNames()[0])
 	}
 	idx, _ := out.Column("row")
-	arr := idx.Chunk(0).(*array.Int64)
+	arr := idx.Chunk(0).(*array.Uint32)
 	if arr.Value(0) != 100 || arr.Value(2) != 102 {
 		t.Errorf("row idx = [%d, %d, %d]", arr.Value(0), arr.Value(1), arr.Value(2))
 	}

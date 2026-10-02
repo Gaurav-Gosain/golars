@@ -9,6 +9,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
 	"github.com/Gaurav-Gosain/golars/compute"
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -18,6 +19,9 @@ import (
 type GroupBy struct {
 	df   *DataFrame
 	keys []string
+	// maintainOrder emits groups in first-appearance order. Set by
+	// MaintainOrder (see groupby_methods.go).
+	maintainOrder bool
 }
 
 // GroupByOption configures Agg.
@@ -40,6 +44,49 @@ func WithGroupByAllocator(alloc memory.Allocator) GroupByOption {
 	return func(c *groupByConfig) { c.alloc = alloc }
 }
 
+// rechunkedForGroupBy returns a frame holding the key and aggregated
+// columns, with multi-chunk ones concatenated into one chunk
+// (single-chunk columns are shared, not copied). Columns the group-by
+// does not read are left out so they are never concatenated. ok=false
+// means every needed column was already single-chunk.
+func rechunkedForGroupBy(df *DataFrame, keys []string, specs []aggSpec) (*DataFrame, bool, error) {
+	needed := make(map[string]bool, len(keys)+len(specs))
+	for _, k := range keys {
+		needed[k] = true
+	}
+	for _, sp := range specs {
+		needed[sp.colName] = true
+	}
+	var src []*series.Series
+	multi := false
+	for _, c := range df.cols {
+		if !needed[c.Name()] {
+			continue
+		}
+		src = append(src, c)
+		multi = multi || c.NumChunks() > 1
+	}
+	if !multi {
+		return nil, false, nil
+	}
+	cols := make([]*series.Series, len(src))
+	for i, c := range src {
+		if c.NumChunks() > 1 {
+			cols[i] = c.Rechunk()
+		} else {
+			cols[i] = c.Clone()
+		}
+	}
+	out, err := New(cols...)
+	if err != nil {
+		for _, c := range cols {
+			c.Release()
+		}
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
 // GroupBy returns a group-by builder keyed on the given columns.
 func (df *DataFrame) GroupBy(keys ...string) *GroupBy {
 	return &GroupBy{df: df, keys: keys}
@@ -56,23 +103,175 @@ func (df *DataFrame) GroupBy(keys ...string) *GroupBy {
 // contiguous runs of equal keys form groups, and each aggregation is applied
 // per group.
 func (g *GroupBy) Agg(ctx context.Context, aggs []expr.Expr, opts ...GroupByOption) (*DataFrame, error) {
+	out, err := g.agg(ctx, aggs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return countsToUint32(ctx, out, aggs, resolveGroupBy(opts).alloc)
+}
+
+// countsToUint32 casts count and null_count results to u32, the polars
+// dtype. The kernels count in i64; the group count is small, so one
+// cast at the end keeps them unchanged.
+func countsToUint32(ctx context.Context, df *DataFrame, aggs []expr.Expr, alloc memory.Allocator) (*DataFrame, error) {
+	targets := map[string]bool{}
+	for _, e := range aggs {
+		node := e.Node()
+		if a, ok := node.(expr.AliasNode); ok {
+			node = a.Inner.Node()
+		}
+		if a, ok := node.(expr.AggNode); ok && (a.Op == expr.AggCount || a.Op == expr.AggNullCount) {
+			targets[expr.OutputName(e)] = true
+		}
+	}
+	needed := false
+	for name := range targets {
+		if c, err := df.Column(name); err == nil && c.DType().ID() == arrow.INT64 {
+			needed = true
+		}
+	}
+	if !needed {
+		return df, nil
+	}
+	cols := make([]*series.Series, df.Width())
+	for i := range df.Width() {
+		c := df.ColumnAt(i)
+		if targets[c.Name()] && c.DType().ID() == arrow.INT64 {
+			u, err := compute.Cast(ctx, c, dtype.Uint32(), compute.WithAllocator(alloc))
+			if err != nil {
+				for _, p := range cols[:i] {
+					p.Release()
+				}
+				df.Release()
+				return nil, err
+			}
+			cols[i] = u
+			continue
+		}
+		cols[i] = c.Clone()
+	}
+	df.Release()
+	return New(cols...)
+}
+
+func (g *GroupBy) agg(ctx context.Context, aggs []expr.Expr, opts ...GroupByOption) (*DataFrame, error) {
+	out, err := g.aggRaw(ctx, aggs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return g.fixAggDTypes(ctx, out, aggs)
+}
+
+// fixAggDTypes casts the outputs of bare-column aggregations to the
+// dtype polars gives them (dtype.AggResultDType): the hash kernels
+// produce i64 and f64 for every integer and float input.
+func (g *GroupBy) fixAggDTypes(ctx context.Context, out *DataFrame, aggs []expr.Expr) (*DataFrame, error) {
+	specs, err := parseAggs(aggs)
+	if err != nil {
+		return out, nil
+	}
+	cur := out
+	for _, sp := range specs {
+		op := ""
+		switch sp.op {
+		case expr.AggSum:
+			op = "sum"
+		case expr.AggMin:
+			op = "min"
+		case expr.AggMax:
+			op = "max"
+		case expr.AggMean:
+			op = "mean"
+		case expr.AggFirst:
+			op = "first"
+		case expr.AggLast:
+			op = "last"
+		default:
+			continue
+		}
+		src, err := g.df.Column(sp.colName)
+		if err != nil {
+			continue
+		}
+		want, ok := dtype.AggResultDType(op, src.DType())
+		if !ok {
+			continue
+		}
+		col, err := cur.Column(sp.outputName)
+		if err != nil || col.DType().Equal(want) || !(col.DType().IsNumeric() || col.DType().IsBool()) {
+			continue
+		}
+		cast, err := compute.Cast(ctx, col, want)
+		if err != nil {
+			cur.Release()
+			return nil, err
+		}
+		next, err := cur.WithColumn(cast)
+		cur.Release()
+		if err != nil {
+			cast.Release()
+			return nil, err
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+func (g *GroupBy) aggRaw(ctx context.Context, aggs []expr.Expr, opts ...GroupByOption) (*DataFrame, error) {
+	if GenericAgg != nil && !g.maintainOrder && len(g.keys) > 0 && !kernelAggInputs(g.df, aggs) {
+		// The group kernels cover 32 and 64 bit numbers, strings and
+		// bools; other inputs (i8, u16, temporal sums, ...) go through
+		// the expression evaluator.
+		return GenericAgg(ctx, g.df, g.keys, aggs, resolveGroupBy(opts).alloc)
+	}
 	if len(g.keys) == 0 {
 		return nil, fmt.Errorf("dataframe.GroupBy: at least one key required")
+	}
+	if g.maintainOrder {
+		return g.aggMaintainOrder(ctx, aggs, opts...)
+	}
+	if out, ok, err := catGroupByAgg(ctx, g, aggs, opts); ok {
+		return out, err
 	}
 	// Empty aggs is valid: it emits the distinct key rows (polars-
 	// compatible semantics, used by df.Unique). parseAggs returns an
 	// empty slice so the downstream kernels handle it.
+	cfg := resolveGroupBy(opts)
 	specs, err := parseAggs(aggs)
 	if err != nil {
+		if GenericAgg != nil {
+			return GenericAgg(ctx, g.df, g.keys, aggs, cfg.alloc)
+		}
 		return nil, err
 	}
-	cfg := resolveGroupBy(opts)
+
+	// The hash kernels read a single contiguous chunk per column. Frames
+	// built by chunked readers (parallel parquet row groups, concat,
+	// streaming) arrive multi-chunk, which used to push them onto the
+	// much slower sort path. Consolidate those columns once up front.
+	if rechunked, ok, err := rechunkedForGroupBy(g.df, g.keys, specs); err != nil {
+		return nil, err
+	} else if ok {
+		defer rechunked.Release()
+		g = &GroupBy{df: rechunked, keys: g.keys}
+	}
 
 	// Fast path: single-key hash groupby. O(n) vs the sort-based O(n log n);
 	// measured ~80x faster on the GroupBySum benchmark. Falls through to the
-	// sort path for multi-key or unsupported dtype combinations.
+	// sort path for unsupported dtype combinations.
 	if len(g.keys) == 1 {
 		if out, ok, err := hashAggSingleKey(ctx, g.df, g.keys[0], specs, cfg.alloc); err != nil {
+			return nil, err
+		} else if ok {
+			return out, nil
+		}
+	}
+
+	// Multi-key hash groupby: same O(n) assignment over encoded key
+	// tuples, groups reordered to match the sort path. Falls through
+	// for unsupported key dtypes.
+	if len(g.keys) > 1 {
+		if out, ok, err := hashAggMultiKey(ctx, g.df, g.keys, specs, cfg.alloc); err != nil {
 			return nil, err
 		} else if ok {
 			return out, nil
@@ -203,11 +402,15 @@ func runAggForGroups(ctx context.Context, alloc memory.Allocator, sorted *DataFr
 func countGroups(boundaries []int, total int, col *series.Series, name string, alloc memory.Allocator) (*series.Series, error) {
 	arr := col.Chunk(0)
 	out := make([]int64, len(boundaries))
-	for i, start := range boundaries {
-		end := total
-		if i+1 < len(boundaries) {
-			end = boundaries[i+1]
+	if arr.NullN() == 0 {
+		// No nulls: every row counts, no per-row scan.
+		for i, start := range boundaries {
+			out[i] = int64(groupEnd(boundaries, i, total) - start)
 		}
+		return series.FromInt64(name, out, nil, series.WithAllocator(alloc))
+	}
+	for i, start := range boundaries {
+		end := groupEnd(boundaries, i, total)
 		var n int64
 		for j := start; j < end; j++ {
 			if arr.IsValid(j) {
@@ -222,11 +425,12 @@ func countGroups(boundaries []int, total int, col *series.Series, name string, a
 func nullCountGroups(boundaries []int, total int, col *series.Series, name string, alloc memory.Allocator) (*series.Series, error) {
 	arr := col.Chunk(0)
 	out := make([]int64, len(boundaries))
+	if arr.NullN() == 0 {
+		// No nulls: every group contributes zero.
+		return series.FromInt64(name, out, nil, series.WithAllocator(alloc))
+	}
 	for i, start := range boundaries {
-		end := total
-		if i+1 < len(boundaries) {
-			end = boundaries[i+1]
-		}
+		end := groupEnd(boundaries, i, total)
 		var n int64
 		for j := start; j < end; j++ {
 			if arr.IsNull(j) {
@@ -412,7 +616,7 @@ func firstLastGroups(col *series.Series, sp aggSpec, boundaries []int, total int
 			indices[i] = end - 1
 		}
 	}
-	return compute.Take(context.Background(), col, indices, compute.WithAllocator(alloc))
+	return compute.Take(context.Background(), col, indices, compute.WithAllocator(alloc), compute.WithName(sp.outputName))
 }
 
 func groupEnd(boundaries []int, i, total int) int {
@@ -503,6 +707,20 @@ func arrowValuesEqual(arr arrow.Array, a, b int) bool {
 		return x.Value(a) == x.Value(b)
 	case *array.String:
 		return x.Value(a) == x.Value(b)
+	case *array.LargeString:
+		return x.Value(a) == x.Value(b)
+	case *array.Date32:
+		return x.Value(a) == x.Value(b)
+	case *array.Date64:
+		return x.Value(a) == x.Value(b)
+	case *array.Timestamp:
+		return x.Value(a) == x.Value(b)
+	case *array.Time32:
+		return x.Value(a) == x.Value(b)
+	case *array.Time64:
+		return x.Value(a) == x.Value(b)
+	case *array.Duration:
+		return x.Value(a) == x.Value(b)
 	case *array.Binary:
 		av, bv := x.Value(a), x.Value(b)
 		if len(av) != len(bv) {
@@ -516,4 +734,36 @@ func arrowValuesEqual(arr arrow.Array, a, b int) bool {
 		return true
 	}
 	return false
+}
+
+// kernelAggInputs reports whether every aggregation is a bare-column
+// aggregation over a dtype the group kernels handle. Aggregations that
+// do not parse are left to the existing fallbacks.
+func kernelAggInputs(df *DataFrame, aggs []expr.Expr) bool {
+	specs, err := parseAggs(aggs)
+	if err != nil {
+		return true
+	}
+	for _, sp := range specs {
+		c, err := df.Column(sp.colName)
+		if err != nil {
+			return true
+		}
+		positional := sp.op == expr.AggCount || sp.op == expr.AggNullCount ||
+			sp.op == expr.AggFirst || sp.op == expr.AggLast
+		switch c.DType().ID() {
+		case arrow.INT32, arrow.INT64, arrow.UINT32, arrow.UINT64,
+			arrow.FLOAT32, arrow.FLOAT64:
+		case arrow.STRING, arrow.BOOL:
+			// The kernels only count and pick rows for these.
+			if !positional {
+				return false
+			}
+		default:
+			if sp.op != expr.AggCount && sp.op != expr.AggNullCount {
+				return false
+			}
+		}
+	}
+	return true
 }

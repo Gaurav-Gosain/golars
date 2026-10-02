@@ -1,4 +1,5 @@
-// Package ipc reads and writes the Arrow IPC stream format.
+// Package ipc reads and writes the Arrow IPC stream format. Readers also
+// accept the Arrow IPC file format.
 //
 // IPC is the native wire format for Apache Arrow and the fastest way to move
 // DataFrames between processes. No type coercion is performed; columns
@@ -6,6 +7,8 @@
 package ipc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -44,8 +47,27 @@ func WithAllocator(alloc memory.Allocator) Option {
 // Read consumes an Arrow IPC stream from r and returns a DataFrame. Each
 // incoming record batch becomes one chunk per column; columns may be chunked
 // when the stream contains multiple batches.
+//
+// The Arrow IPC file format (Feather v2, what polars' write_ipc
+// produces) is detected by its magic and read as well.
 func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFrame, error) {
 	cfg := resolve(opts)
+	if ra, ok := r.(arrowipc.ReadAtSeeker); ok {
+		var head [len(fileMagic)]byte
+		if n, _ := ra.ReadAt(head[:], 0); n == len(head) && string(head[:]) == fileMagic {
+			return readFileFormat(ctx, ra, cfg)
+		}
+	} else {
+		br := bufio.NewReader(r)
+		if head, _ := br.Peek(len(fileMagic)); string(head) == fileMagic {
+			data, err := io.ReadAll(br)
+			if err != nil {
+				return nil, fmt.Errorf("ipc: read: %w", err)
+			}
+			return readFileFormat(ctx, bytes.NewReader(data), cfg)
+		}
+		r = br
+	}
 	reader, err := arrowipc.NewReader(r, arrowipc.WithAllocator(cfg.alloc))
 	if err != nil {
 		return nil, fmt.Errorf("ipc: new reader: %w", err)
@@ -72,6 +94,12 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 		rec := reader.RecordBatch()
 		for i := range numCols {
 			col := rec.Column(i)
+			// The reader does not check offsets against buffer sizes, so
+			// a corrupt stream would otherwise panic later on access.
+			if err := validateArray(col); err != nil {
+				releaseChunks()
+				return nil, fmt.Errorf("ipc: column %q: %w", sch.Field(i).Name, err)
+			}
 			col.Retain()
 			chunks[i] = append(chunks[i], col)
 		}
@@ -84,19 +112,50 @@ func Read(ctx context.Context, r io.Reader, opts ...Option) (*dataframe.DataFram
 	return buildDataFrameFromChunks(sch, chunks)
 }
 
-// buildDataFrameFromChunks materialises a DataFrame from the stream
-// reader's per-column chunk slices. Consumes chunk references: the
-// resulting Series own them.
-func buildDataFrameFromChunks(sch *arrow.Schema, chunks [][]arrow.Array) (*dataframe.DataFrame, error) {
-	numCols := sch.NumFields()
-	cols := make([]*series.Series, numCols)
-	releaseChunks := func() {
+// fileMagic starts (and ends) an Arrow IPC file.
+const fileMagic = "ARROW1"
+
+// readFileFormat reads every record batch of an Arrow IPC file.
+func readFileFormat(ctx context.Context, r arrowipc.ReadAtSeeker, cfg config) (*dataframe.DataFrame, error) {
+	reader, err := arrowipc.NewFileReader(r, arrowipc.WithAllocator(cfg.alloc))
+	if err != nil {
+		return nil, fmt.Errorf("ipc: new file reader: %w", err)
+	}
+	defer reader.Close()
+	sch := reader.Schema()
+	chunks := make([][]arrow.Array, sch.NumFields())
+	release := func() {
 		for _, cs := range chunks {
 			for _, c := range cs {
 				c.Release()
 			}
 		}
 	}
+	for i := range reader.NumRecords() {
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, err
+		}
+		rec, err := reader.RecordBatch(i)
+		if err != nil {
+			release()
+			return nil, fmt.Errorf("ipc: read record batch %d: %w", i, err)
+		}
+		for c := range chunks {
+			col := rec.Column(c)
+			col.Retain()
+			chunks[c] = append(chunks[c], col)
+		}
+	}
+	return buildDataFrameFromChunks(sch, chunks)
+}
+
+// buildDataFrameFromChunks materialises a DataFrame from the stream
+// reader's per-column chunk slices. Consumes chunk references: the
+// resulting Series own them.
+func buildDataFrameFromChunks(sch *arrow.Schema, chunks [][]arrow.Array) (*dataframe.DataFrame, error) {
+	numCols := sch.NumFields()
+	cols := make([]*series.Series, numCols)
 	for i := range numCols {
 		name := sch.Field(i).Name
 		if len(chunks[i]) == 0 {
@@ -105,12 +164,17 @@ func buildDataFrameFromChunks(sch *arrow.Schema, chunks [][]arrow.Array) (*dataf
 		}
 		s, err := series.New(name, chunks[i]...)
 		if err != nil {
+			// Columns before i own their chunks through the Series
+			// built from them; series.New does not consume on error,
+			// so column i onward still holds raw references.
 			for _, pc := range cols[:i] {
-				if pc != nil {
-					pc.Release()
+				pc.Release()
+			}
+			for _, cs := range chunks[i:] {
+				for _, c := range cs {
+					c.Release()
 				}
 			}
-			releaseChunks()
 			return nil, fmt.Errorf("ipc: build series %q: %w", name, err)
 		}
 		cols[i] = s
@@ -196,7 +260,14 @@ func WriteFile(ctx context.Context, path string, df *dataframe.DataFrame, opts .
 // concatChunks flattens a Series to a single arrow.Array. The caller owns one
 // reference and must Release.
 func concatChunks(s *series.Series, mem memory.Allocator) (arrow.Array, error) {
-	chunks := s.Chunks()
+	// Skip empty chunks: arrow's Concatenate panics on an empty
+	// dictionary chunk whose dictionary has no value buffer.
+	var chunks []arrow.Array
+	for _, c := range s.Chunks() {
+		if c.Len() > 0 {
+			chunks = append(chunks, c)
+		}
+	}
 	switch len(chunks) {
 	case 0:
 		return array.MakeArrayOfNull(mem, s.DType().Arrow(), 0), nil
@@ -206,4 +277,26 @@ func concatChunks(s *series.Series, mem memory.Allocator) (arrow.Array, error) {
 	default:
 		return array.Concatenate(chunks, mem)
 	}
+}
+
+// validateArray runs arrow's full validation for the array types that
+// carry offsets, including dictionary values. arrow-go's ValidateFull
+// itself indexes past the value buffer when the last offset is out of
+// range, so a panic there is reported as a validation error.
+func validateArray(a arrow.Array) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid array data: %v", r)
+		}
+	}()
+	if d, ok := a.(*array.Dictionary); ok {
+		if err := validateArray(d.Dictionary()); err != nil {
+			return err
+		}
+		return validateArray(d.Indices())
+	}
+	if v, ok := a.(interface{ ValidateFull() error }); ok {
+		return v.ValidateFull()
+	}
+	return nil
 }

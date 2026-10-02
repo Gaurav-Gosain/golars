@@ -10,6 +10,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/internal/intmap"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -58,6 +59,22 @@ func hashAggSingleKey(ctx context.Context, df *DataFrame, keyName string, specs 
 	if err != nil {
 		return nil, true, err
 	}
+	out, handled, err := hashAggWithGroups(ctx, df, groupIDs, numGroups, []*series.Series{keyOut}, specs, mem)
+	intScratch.put(groupIDs)
+	return out, handled, err
+}
+
+// hashAggWithGroups runs the per-column aggregation loop shared by the
+// single-key and multi-key hash paths. keyOuts holds one unique-key
+// column per group key, already in final output order.
+func hashAggWithGroups(ctx context.Context, df *DataFrame, groupIDs []int, numGroups int, keyOuts []*series.Series, specs []aggSpec, mem memory.Allocator) (*DataFrame, bool, error) {
+	releaseKeys := func() {
+		for _, k := range keyOuts {
+			if k != nil {
+				k.Release()
+			}
+		}
+	}
 
 	outSpecs := make([]*series.Series, len(specs))
 	cleanupSpecs := func() {
@@ -88,7 +105,7 @@ func hashAggSingleKey(ctx context.Context, df *DataFrame, keyName string, specs 
 		colSpecs := byCol[col]
 		valCol, err := df.Column(col)
 		if err != nil {
-			keyOut.Release()
+			releaseKeys()
 			cleanupSpecs()
 			return nil, true, err
 		}
@@ -111,7 +128,7 @@ func hashAggSingleKey(ctx context.Context, df *DataFrame, keyName string, specs 
 				}
 			}
 			if err != nil {
-				keyOut.Release()
+				releaseKeys()
 				cleanupSpecs()
 				return nil, true, err
 			}
@@ -126,12 +143,12 @@ func hashAggSingleKey(ctx context.Context, df *DataFrame, keyName string, specs 
 		for _, sr := range colSpecs {
 			out, ok, err := hashAggCompute(valCol, groupIDs, numGroups, sr.sp, mem)
 			if err != nil {
-				keyOut.Release()
+				releaseKeys()
 				cleanupSpecs()
 				return nil, true, err
 			}
 			if !ok {
-				keyOut.Release()
+				releaseKeys()
 				cleanupSpecs()
 				return nil, false, nil
 			}
@@ -139,8 +156,8 @@ func hashAggSingleKey(ctx context.Context, df *DataFrame, keyName string, specs 
 		}
 	}
 
-	outCols := make([]*series.Series, 0, 1+len(specs))
-	outCols = append(outCols, keyOut)
+	outCols := make([]*series.Series, 0, len(keyOuts)+len(specs))
+	outCols = append(outCols, keyOuts...)
 	outCols = append(outCols, outSpecs...)
 
 	result, err := New(outCols...)
@@ -174,28 +191,41 @@ func assignGroupsInt64(arr *array.Int64, name string, mem memory.Allocator) ([]i
 		return ids, len(uniqueKeys), keyOut, err
 	}
 
-	groupIDs := make([]int, n)
+	groupIDs := intScratch.get(n)
 	table := intmap.New(64)
 	defer table.Release()
 	var uniqueKeys []int64
 	nullGroupID := -1
 
-	for i := range n {
-		if hasNulls && arr.IsNull(i) {
-			if nullGroupID < 0 {
-				nullGroupID = len(uniqueKeys)
-				uniqueKeys = append(uniqueKeys, 0)
+	// NOTE: the insert body stays inline in both loops (rather than a
+	// shared helper) because it sits just above the inliner budget;
+	// a call per row costs ~2ns on a ~5ns/row hot loop.
+	if hasNulls {
+		for i := range n {
+			if arr.IsNull(i) {
+				if nullGroupID < 0 {
+					nullGroupID = len(uniqueKeys)
+					uniqueKeys = append(uniqueKeys, 0)
+				}
+				groupIDs[i] = nullGroupID
+				continue
 			}
-			groupIDs[i] = nullGroupID
-			continue
+			k := vals[i]
+			id, inserted := table.InsertOrGet(k, int32(len(uniqueKeys)))
+			if inserted {
+				uniqueKeys = append(uniqueKeys, k)
+			}
+			groupIDs[i] = int(id)
 		}
-		k := vals[i]
-		nextID := int32(len(uniqueKeys))
-		id, inserted := table.InsertOrGet(k, nextID)
-		if inserted {
-			uniqueKeys = append(uniqueKeys, k)
+	} else {
+		for i := range n {
+			k := vals[i]
+			id, inserted := table.InsertOrGet(k, int32(len(uniqueKeys)))
+			if inserted {
+				uniqueKeys = append(uniqueKeys, k)
+			}
+			groupIDs[i] = int(id)
 		}
-		groupIDs[i] = int(id)
 	}
 
 	var valid []bool
@@ -215,6 +245,22 @@ func assignGroupsInt64(arr *array.Int64, name string, mem memory.Allocator) ([]i
 // serialAssignInt64 is the single-threaded equivalent of parallelAssignInt64.
 // One intmap, one pass - produces (groupIDs, uniqueKeys) in first-seen order.
 // Preferred at medium sizes where goroutine startup dominates.
+// serialUniqueInt64 returns the distinct values of vals in first-seen
+// order: serialAssignInt64 without the per-row group ids, which Unique
+// does not need.
+func serialUniqueInt64(vals []int64) []int64 {
+	hint := max(len(vals)/4, 16)
+	m := intmap.New(hint)
+	defer m.Release()
+	uniques := make([]int64, 0, hint)
+	for _, v := range vals {
+		if _, inserted := m.InsertOrGet(v, int32(len(uniques))); inserted {
+			uniques = append(uniques, v)
+		}
+	}
+	return uniques
+}
+
 func serialAssignInt64(vals []int64, n int) ([]int, []int64) {
 	// Pre-size to n/4. This function is only called from Unique (see
 	// uniqueFastSingle) - GroupBy goes through parallelAssignInt64
@@ -310,7 +356,7 @@ func parallelAssignInt64(vals []int64, n int) ([]int, []int64) {
 
 	// Phase 3: parallel ID lookup into the finalized global map. This is
 	// read-only so probes run with no contention.
-	groupIDs := make([]int, n)
+	groupIDs := intScratch.get(n)
 	wg = sync.WaitGroup{}
 	for p := range k {
 		wg.Add(1)
@@ -330,30 +376,43 @@ func parallelAssignInt64(vals []int64, n int) ([]int, []int64) {
 
 func assignGroupsInt32(arr *array.Int32, name string, mem memory.Allocator) ([]int, int, *series.Series, error) {
 	n := arr.Len()
-	groupIDs := make([]int, n)
+	groupIDs := intScratch.get(n)
 	table := make(map[int32]int, 64)
 	var uniqueKeys []int32
 	nullGroupID := -1
 	vals := arr.Int32Values()
 	hasNulls := arr.NullN() > 0
 
-	for i := range n {
-		if hasNulls && arr.IsNull(i) {
-			if nullGroupID < 0 {
-				nullGroupID = len(uniqueKeys)
-				uniqueKeys = append(uniqueKeys, 0)
+	if hasNulls {
+		for i := range n {
+			if arr.IsNull(i) {
+				if nullGroupID < 0 {
+					nullGroupID = len(uniqueKeys)
+					uniqueKeys = append(uniqueKeys, 0)
+				}
+				groupIDs[i] = nullGroupID
+				continue
 			}
-			groupIDs[i] = nullGroupID
-			continue
+			k := vals[i]
+			id, ok := table[k]
+			if !ok {
+				id = len(uniqueKeys)
+				table[k] = id
+				uniqueKeys = append(uniqueKeys, k)
+			}
+			groupIDs[i] = id
 		}
-		k := vals[i]
-		id, ok := table[k]
-		if !ok {
-			id = len(uniqueKeys)
-			table[k] = id
-			uniqueKeys = append(uniqueKeys, k)
+	} else {
+		for i := range n {
+			k := vals[i]
+			id, ok := table[k]
+			if !ok {
+				id = len(uniqueKeys)
+				table[k] = id
+				uniqueKeys = append(uniqueKeys, k)
+			}
+			groupIDs[i] = id
 		}
-		groupIDs[i] = id
 	}
 
 	var valid []bool
@@ -368,66 +427,54 @@ func assignGroupsInt32(arr *array.Int32, name string, mem memory.Allocator) ([]i
 	return groupIDs, len(uniqueKeys), keyOut, err
 }
 
+// assignGroupsString numbers string keys by first appearance through the
+// dictionary encoder in strcodes.go (packed short keys, parallel
+// partitions for large inputs). Null keys form one group.
 func assignGroupsString(arr *array.String, name string, mem memory.Allocator) ([]int, int, *series.Series, error) {
 	n := arr.Len()
-	groupIDs := make([]int, n)
-	table := make(map[string]int, 64)
-	var uniqueKeys []string
-	nullGroupID := -1
-	hasNulls := arr.NullN() > 0
-
-	for i := range n {
-		if hasNulls && arr.IsNull(i) {
-			if nullGroupID < 0 {
-				nullGroupID = len(uniqueKeys)
-				uniqueKeys = append(uniqueKeys, "")
-			}
-			groupIDs[i] = nullGroupID
-			continue
+	kc := encodeStringCodes(arr)
+	groupIDs := intScratch.get(n)
+	widen := func(_, start, end int) {
+		for i, c := range kc.codes[start:end] {
+			groupIDs[start+i] = int(c)
 		}
-		k := arr.Value(i)
-		id, ok := table[k]
-		if !ok {
-			id = len(uniqueKeys)
-			table[k] = id
-			uniqueKeys = append(uniqueKeys, k)
-		}
-		groupIDs[i] = id
 	}
-
-	var valid []bool
-	if nullGroupID >= 0 {
-		valid = make([]bool, len(uniqueKeys))
-		for i := range valid {
-			valid[i] = true
-		}
-		valid[nullGroupID] = false
+	if k := denseWorkers(n); n >= denseParThreshold && k > 1 {
+		runChunks(n, k, widen)
+	} else {
+		widen(0, 0, n)
 	}
-	keyOut, err := series.FromString(name, uniqueKeys, valid, series.WithAllocator(mem))
-	return groupIDs, len(uniqueKeys), keyOut, err
+	int32Scratch.put(kc.codes)
+
+	// Gather the key column straight from the first rows (nulls carry
+	// over from the source) instead of building a []string first.
+	arr.Retain()
+	src, err := series.New(name, arr)
+	if err != nil {
+		arr.Release()
+		intScratch.put(groupIDs)
+		return nil, 0, nil, err
+	}
+	defer src.Release()
+	var opts []compute.Option
+	if mem != nil {
+		opts = append(opts, compute.WithAllocator(mem))
+	}
+	keyOut, err := compute.TakeInt32(context.Background(), src, kc.firstRows, opts...)
+	return groupIDs, len(kc.firstRows), keyOut, err
 }
 
 func assignGroupsBool(arr *array.Boolean, name string, mem memory.Allocator) ([]int, int, *series.Series, error) {
 	n := arr.Len()
-	groupIDs := make([]int, n)
+	groupIDs := intScratch.get(n)
 	// Boolean has at most 3 groups: false, true, null.
 	var falseID, trueID, nullGroupID int = -1, -1, -1
 	var uniqueKeys []bool
 	var nullPos int // index of null in uniqueKeys if any
 	hasNulls := arr.NullN() > 0
 
-	for i := range n {
-		if hasNulls && arr.IsNull(i) {
-			if nullGroupID < 0 {
-				nullGroupID = len(uniqueKeys)
-				nullPos = nullGroupID
-				uniqueKeys = append(uniqueKeys, false)
-			}
-			groupIDs[i] = nullGroupID
-			continue
-		}
-		v := arr.Value(i)
-		if v {
+	assignBool := func(i int) {
+		if arr.Value(i) {
 			if trueID < 0 {
 				trueID = len(uniqueKeys)
 				uniqueKeys = append(uniqueKeys, true)
@@ -439,6 +486,24 @@ func assignGroupsBool(arr *array.Boolean, name string, mem memory.Allocator) ([]
 				uniqueKeys = append(uniqueKeys, false)
 			}
 			groupIDs[i] = falseID
+		}
+	}
+	if hasNulls {
+		for i := range n {
+			if arr.IsNull(i) {
+				if nullGroupID < 0 {
+					nullGroupID = len(uniqueKeys)
+					nullPos = nullGroupID
+					uniqueKeys = append(uniqueKeys, false)
+				}
+				groupIDs[i] = nullGroupID
+				continue
+			}
+			assignBool(i)
+		}
+	} else {
+		for i := range n {
+			assignBool(i)
 		}
 	}
 
@@ -812,23 +877,43 @@ func hashMinMax(arr arrow.Array, groupIDs []int, numGroups int, sp aggSpec, mem 
 		vals := a.Int64Values()
 		out := make([]int64, numGroups)
 		init := make([]bool, numGroups)
-		for i, gid := range groupIDs {
-			if hasNulls && !a.IsValid(i) {
-				continue
-			}
-			v := vals[i]
-			if !init[gid] {
-				out[gid] = v
-				init[gid] = true
-				continue
-			}
-			if isMax {
-				if v > out[gid] {
-					out[gid] = v
+		if hasNulls {
+			for i, gid := range groupIDs {
+				if !a.IsValid(i) {
+					continue
 				}
-			} else {
-				if v < out[gid] {
+				v := vals[i]
+				if !init[gid] {
 					out[gid] = v
+					init[gid] = true
+					continue
+				}
+				if isMax {
+					if v > out[gid] {
+						out[gid] = v
+					}
+				} else {
+					if v < out[gid] {
+						out[gid] = v
+					}
+				}
+			}
+		} else {
+			for i, gid := range groupIDs {
+				v := vals[i]
+				if !init[gid] {
+					out[gid] = v
+					init[gid] = true
+					continue
+				}
+				if isMax {
+					if v > out[gid] {
+						out[gid] = v
+					}
+				} else {
+					if v < out[gid] {
+						out[gid] = v
+					}
 				}
 			}
 		}
@@ -839,23 +924,43 @@ func hashMinMax(arr arrow.Array, groupIDs []int, numGroups int, sp aggSpec, mem 
 		vals := a.Float64Values()
 		out := make([]float64, numGroups)
 		init := make([]bool, numGroups)
-		for i, gid := range groupIDs {
-			if hasNulls && !a.IsValid(i) {
-				continue
-			}
-			v := vals[i]
-			if !init[gid] {
-				out[gid] = v
-				init[gid] = true
-				continue
-			}
-			if isMax {
-				if floatGt(v, out[gid]) {
-					out[gid] = v
+		if hasNulls {
+			for i, gid := range groupIDs {
+				if !a.IsValid(i) {
+					continue
 				}
-			} else {
-				if floatLt(v, out[gid]) {
+				v := vals[i]
+				if !init[gid] {
 					out[gid] = v
+					init[gid] = true
+					continue
+				}
+				if isMax {
+					if floatGt(v, out[gid]) {
+						out[gid] = v
+					}
+				} else {
+					if floatLt(v, out[gid]) {
+						out[gid] = v
+					}
+				}
+			}
+		} else {
+			for i, gid := range groupIDs {
+				v := vals[i]
+				if !init[gid] {
+					out[gid] = v
+					init[gid] = true
+					continue
+				}
+				if isMax {
+					if floatGt(v, out[gid]) {
+						out[gid] = v
+					}
+				} else {
+					if floatLt(v, out[gid]) {
+						out[gid] = v
+					}
 				}
 			}
 		}
@@ -988,8 +1093,9 @@ func compactValid(v []bool) []bool {
 	return nil
 }
 
-// floatGt and floatLt handle NaN per polars: NaN sorts above all non-NaN for
-// max, below for min.
+// floatGt and floatLt order values for min/max the polars way: NaN is
+// ignored (never beats a number, always loses to one), so a group is NaN
+// only when all its values are NaN.
 func floatGt(a, b float64) bool {
 	aNaN := a != a
 	bNaN := b != b
@@ -997,10 +1103,10 @@ func floatGt(a, b float64) bool {
 		return false
 	}
 	if aNaN {
-		return true
+		return false
 	}
 	if bNaN {
-		return false
+		return true
 	}
 	return a > b
 }

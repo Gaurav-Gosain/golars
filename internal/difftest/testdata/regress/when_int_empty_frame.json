@@ -1,0 +1,64 @@
+{
+  "name": "when_int_empty_frame",
+  "status": "fixed",
+  "note": "when/then over an empty frame panicked in whereInt64Fused (golars panicked: runtime error: invalid memory address or nil pointer dereference)",
+  "plan": {
+    "seed": 202338,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "when",
+                "args": [
+                  {
+                    "k": "lit",
+                    "val": false
+                  },
+                  {
+                    "k": "call",
+                    "name": "str.to_integer",
+                    "args": [
+                      {
+                        "k": "col",
+                        "name": "c0"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "str",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "o1",
+        "type": "i64",
+        "values": []
+      }
+    ]
+  }
+}

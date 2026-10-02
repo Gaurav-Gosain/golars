@@ -53,7 +53,8 @@ type (
 	DType = dtype.DType
 
 	// JoinType enumerates join kinds: golars.InnerJoin,
-	// golars.LeftJoin, golars.CrossJoin.
+	// golars.LeftJoin, golars.RightJoin, golars.FullJoin,
+	// golars.SemiJoin, golars.AntiJoin, golars.CrossJoin.
 	JoinType = dataframe.JoinType
 )
 
@@ -62,6 +63,10 @@ const (
 	InnerJoin = dataframe.InnerJoin
 	LeftJoin  = dataframe.LeftJoin
 	CrossJoin = dataframe.CrossJoin
+	RightJoin = dataframe.RightJoin
+	FullJoin  = dataframe.FullJoin
+	SemiJoin  = dataframe.SemiJoin
+	AntiJoin  = dataframe.AntiJoin
 )
 
 // ----- Series / DataFrame constructors -----

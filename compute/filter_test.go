@@ -3,7 +3,10 @@ package compute_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/apache/arrow-go/v18/arrow/memory"
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/internal/testutil"
@@ -179,6 +182,85 @@ func TestTakeOutOfRange(t *testing.T) {
 	}
 	if _, err := compute.Take(context.Background(), s, []int{-1}, compute.WithAllocator(mem)); err == nil {
 		t.Error("expected out-of-range error")
+	}
+}
+
+func TestFilterNumericOutputOwnership(t *testing.T) {
+	for _, n := range []int{0, 1, 63, 64, 65, (1 << 18) + 13, (1 << 19) + 13} {
+		for _, floating := range []bool{false, true} {
+			for _, pooled := range []bool{false, true} {
+				t.Run(fmt.Sprintf("n=%d/float=%t/pooled=%t", n, floating, pooled), func(t *testing.T) {
+					mem := testutil.NewCheckedAllocator(t)
+					var outputMem memory.Allocator = mem
+					if pooled {
+						outputMem = memory.NewCheckedAllocator(compute.PoolingMem(nil))
+						t.Cleanup(func() { outputMem.(*memory.CheckedAllocator).AssertSize(t, 0) })
+					}
+					ints := make([]int64, n)
+					floats := make([]float64, n)
+					for i := range n {
+						ints[i] = int64(i)*17 - 100
+						floats[i] = float64(ints[i]) + 0.25
+					}
+					var src *series.Series
+					var err error
+					if floating {
+						src, err = series.FromFloat64("x", floats, nil, series.WithAllocator(mem))
+					} else {
+						src, err = series.FromInt64("x", ints, nil, series.WithAllocator(mem))
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer src.Release()
+					for _, stride := range []int{1, 3, 0, 5, 3} {
+						maskValues := make([]bool, n)
+						var wantInts []int64
+						var wantFloats []float64
+						for i := range n {
+							if stride != 0 && i%stride == 0 {
+								maskValues[i] = true
+								wantInts = append(wantInts, ints[i])
+								wantFloats = append(wantFloats, floats[i])
+							}
+						}
+						mask, err := series.FromBool("m", maskValues, nil, series.WithAllocator(mem))
+						if err != nil {
+							t.Fatal(err)
+						}
+						check := func(out *series.Series) {
+							t.Helper()
+							if out.Name() != "filtered" || out.DType() != src.DType() || out.NullCount() != 0 {
+								t.Fatalf("unexpected output metadata")
+							}
+							if floating {
+								assertFloat64Values(t, out, wantFloats, nil)
+							} else {
+								assertInt64Values(t, out, wantInts, nil)
+							}
+						}
+						held, err := compute.Filter(context.Background(), src, mask, compute.WithAllocator(outputMem), compute.WithName("filtered"))
+						if err != nil {
+							mask.Release()
+							t.Fatal(err)
+						}
+						for range 3 {
+							out, err := compute.Filter(context.Background(), src, mask, compute.WithAllocator(outputMem), compute.WithName("filtered"))
+							if err != nil {
+								held.Release()
+								mask.Release()
+								t.Fatal(err)
+							}
+							check(out)
+							out.Release()
+						}
+						check(held)
+						held.Release()
+						mask.Release()
+					}
+				})
+			}
+		}
 	}
 }
 

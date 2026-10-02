@@ -5,6 +5,7 @@ import (
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -38,6 +39,14 @@ func evalBinaryLiteralFast(
 		op = toCompareOp(n.Op, true) // flip sense
 	}
 	// Only comparison operators have Lit fast paths.
+	if _, isBool := lit.Value.(bool); isBool && isOrderingOp(n.Op) {
+		// Bool ordering goes through the generic path.
+		return nil, false, nil
+	}
+	if _, isStr := lit.Value.(string); isStr && isArithOp(op) {
+		// String `+` concatenates; the generic path handles it.
+		return nil, false, nil
+	}
 	if op == opInvalid {
 		return nil, false, nil
 	}
@@ -46,38 +55,71 @@ func evalBinaryLiteralFast(
 		return nil, true, err
 	}
 	defer colSer.Release()
+	litVal := lit.Value
+	if isArithOp(op) && (colSer.DType().IsNumeric() || colSer.DType().IsBool()) {
+		// Compute in the polars result dtype: col(i8) + 1000 is i16,
+		// col(f32) + 1 stays f32, col(i16) + LitInt64(1) is i64.
+		if target, ok := litTargetDType(lit, colSer.DType()); ok {
+			if !target.Equal(colSer.DType()) {
+				cs, err := compute.Cast(ctx, colSer, target, kernelOpts(ec)...)
+				if err != nil {
+					return nil, true, err
+				}
+				defer cs.Release()
+				colSer = cs
+			}
+			if iv, isInt := litVal.(int64); isInt && target.IsFloating() {
+				litVal = float64(iv)
+			}
+		}
+	}
+	if isArithOp(op) {
+		// polars supertypes: an integer column with a float literal is
+		// computed in f64, and `/` is true division, so an integer
+		// column divides as f64 too.
+		if f, ok := arithLitToFloat(colSer, litVal, op == opDiv); ok {
+			fs, err := compute.Cast(ctx, colSer, dtype.Float64(), kernelOpts(ec)...)
+			if err != nil {
+				return nil, true, err
+			}
+			defer fs.Release()
+			colSer, litVal = fs, f
+		}
+	}
 	var out *series.Series
 	opts := kernelOpts(ec)
 	switch op {
 	case opGt:
-		out, err = compute.GtLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.GtLit(ctx, colSer, litVal, opts...)
 	case opGe:
-		out, err = compute.GeLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.GeLit(ctx, colSer, litVal, opts...)
 	case opLt:
-		out, err = compute.LtLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.LtLit(ctx, colSer, litVal, opts...)
 	case opLe:
-		out, err = compute.LeLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.LeLit(ctx, colSer, litVal, opts...)
 	case opEq:
-		out, err = compute.EqLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.EqLit(ctx, colSer, litVal, opts...)
 	case opNe:
-		out, err = compute.NeLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.NeLit(ctx, colSer, litVal, opts...)
 	case opAdd:
-		out, err = compute.AddLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.AddLit(ctx, colSer, litVal, opts...)
 	case opSub:
 		// `lit - col` is not commutative; only route `col - lit`
 		// through SubLit. Flip was handled by toCompareOp for
 		// comparisons, but arithmetic requires the original sense.
 		if which != litRight {
-			return nil, false, nil
+			out, err = litLeftArith(ctx, ec, n, colSer, litVal, op, df)
+			break
 		}
-		out, err = compute.SubLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.SubLit(ctx, colSer, litVal, opts...)
 	case opMul:
-		out, err = compute.MulLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.MulLit(ctx, colSer, litVal, opts...)
 	case opDiv:
 		if which != litRight {
-			return nil, false, nil
+			out, err = litLeftArith(ctx, ec, n, colSer, litVal, op, df)
+			break
 		}
-		out, err = compute.DivLit(ctx, colSer, lit.Value, opts...)
+		out, err = compute.DivLit(ctx, colSer, litVal, opts...)
 	default:
 		return nil, false, nil
 	}
@@ -147,7 +189,10 @@ func toCompareOp(op expr.BinaryOp, flip bool) compareOp {
 			return opAdd // commutative
 		case expr.OpMul:
 			return opMul // commutative
-			// opSub / opDiv aren't symmetric; caller checks litRight.
+		case expr.OpSub:
+			return opSub // not symmetric: handled by revArithLit
+		case expr.OpDiv:
+			return opDiv // not symmetric: handled by revArithLit
 		}
 		return opInvalid
 	}
@@ -174,4 +219,30 @@ func toCompareOp(op expr.BinaryOp, flip bool) compareOp {
 		return opDiv
 	}
 	return opInvalid
+}
+
+func isArithOp(op compareOp) bool {
+	return op == opAdd || op == opSub || op == opMul || op == opDiv
+}
+
+// arithLitToFloat reports whether `col OP lit` must run in f64: the
+// column is an integer and the literal is a float, or the op is a true
+// division. It returns the literal as a float64.
+func arithLitToFloat(col *series.Series, lit any, div bool) (float64, bool) {
+	if !col.DType().IsInteger() {
+		return 0, false
+	}
+	switch v := lit.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int64:
+		return float64(v), div
+	case int:
+		return float64(v), div
+	case int32:
+		return float64(v), div
+	}
+	return 0, false
 }

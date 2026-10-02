@@ -1,0 +1,67 @@
+{
+  "name": "rolling_std_overflow",
+  "status": "fixed",
+  "note": "rolling_std over values near f64 max: golars NaN, polars +Inf (column \"o1\" row 2: golars NaN, polars +Inf)",
+  "plan": {
+    "seed": 200200,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "rolling_std",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c2"
+                  },
+                  {
+                    "k": "raw",
+                    "val": 3
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c2",
+      "type": "f64",
+      "values": [
+        1.7976931348623157e+308,
+        1,
+        1
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "o1",
+        "type": "f64",
+        "values": [
+          null,
+          null,
+          "inf"
+        ]
+      }
+    ]
+  }
+}

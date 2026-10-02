@@ -1,29 +1,16 @@
 //go:build !amd64 || noasm
 
-// The AArch64 codegen in Go's compiler auto-vectorizes these simple
-// loops well enough that hand-rolled NEON asm came in 0.85x slower on
-// M3 Pro at memory-bound sizes. The scalar fallback is the fastest
-// path on arm64 today; revisit if the Go compiler regresses or a
-// NEON-specific win (e.g. prefetch hints) materialises.
+// Non-temporal stores are an amd64 feature. Elsewhere these entry
+// points are plain elementwise kernels: vecBinInt64 / vecBinFloat64
+// run NEON on arm64 and scalar loops on other targets.
 
 package compute
 
-// simdAddInt64NT is a scalar fallback where the AVX2 asm isn't available.
-func simdAddInt64NT(out, a, b []int64) {
-	for i := range out {
-		out[i] = a[i] + b[i]
-	}
-}
+// simdAddInt64NT writes out[i] = a[i] + b[i].
+func simdAddInt64NT(out, a, b []int64) { vecBinInt64(out, a, b, opAdd) }
 
-func simdAddFloat64NT(out, a, b []float64) {
-	for i := range out {
-		out[i] = a[i] + b[i]
-	}
-}
+// simdAddFloat64NT writes out[i] = a[i] + b[i].
+func simdAddFloat64NT(out, a, b []float64) { vecBinFloat64(out, a, b, opAdd) }
 
-func simdMulInt64NT(out, a, b []int64) {
-	for i := range out {
-		out[i] = a[i] * b[i]
-	}
-}
-
+// simdMulInt64NT writes out[i] = a[i] * b[i].
+func simdMulInt64NT(out, a, b []int64) { vecBinInt64(out, a, b, opMul) }

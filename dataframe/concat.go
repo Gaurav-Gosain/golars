@@ -13,12 +13,9 @@ import (
 // Height of the result is the sum of heights; column order matches
 // the first frame.
 //
-// Mirrors polars pl.concat(..., how="vertical"). On error the caller
-// retains all inputs; on success Concat takes ownership and returns
-// a new DataFrame whose Release drops all internal Series.
-//
-// For the special case of a single input, Concat returns a Clone so
-// the caller's reference and the return value are independent.
+// Mirrors polars pl.concat(..., how="vertical"). Concat borrows its
+// inputs: the result holds its own references to the input buffers,
+// so the caller still owns every input frame and must release it.
 func Concat(frames ...*DataFrame) (*DataFrame, error) {
 	switch len(frames) {
 	case 0:
@@ -41,11 +38,18 @@ func Concat(frames ...*DataFrame) (*DataFrame, error) {
 				chunks = append(chunks, chunk)
 			}
 		}
-		merged, err := series.New(first.ColumnAt(col).Name(), chunks...)
-		for _, c := range chunks {
-			c.Release()
+		if len(chunks) == 0 {
+			// Every input column has zero chunks (all frames empty).
+			out[col] = series.Empty(first.ColumnAt(col).Name(), first.ColumnAt(col).DType())
+			continue
 		}
+		// series.New consumes the chunk references on success, so only
+		// the error path releases them.
+		merged, err := series.New(first.ColumnAt(col).Name(), chunks...)
 		if err != nil {
+			for _, c := range chunks {
+				c.Release()
+			}
 			for _, s := range out[:col] {
 				if s != nil {
 					s.Release()

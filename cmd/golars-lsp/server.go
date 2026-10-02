@@ -9,36 +9,45 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
-// Server speaks JSON-RPC 2.0 (LSP base protocol) over stdio. It is
-// deliberately compact: every LSP request we handle runs synchronously
-// on the reader goroutine. Notifications (didOpen/didChange) are
-// similarly serial; there's no request pipelining or cancellation
-// support because .glr documents are tiny and requests complete in
-// microseconds.
+// Server speaks JSON-RPC 2.0 (LSP base protocol) over stdio. Requests
+// run in order on the reader goroutine; each needs one analysis of
+// the document, which is cached per version. Diagnostics are
+// published from a debounce timer so fast typing analyses once.
 type server struct {
 	in    *bufio.Reader
 	out   *bufio.Writer
 	log   io.Writer
-	outMu sync.Mutex // serialises writes (LSP replies + notifications)
+	outMu sync.Mutex // serialises writes (replies and notifications)
 
 	docs     *docStore
 	shutdown bool
+	writeErr error
+
+	// debounce is the pause after a change before diagnostics are
+	// computed and published.
+	debounce time.Duration
+	timerMu  sync.Mutex
+	timers   map[string]*time.Timer
 }
 
 func newServer(in io.Reader, out io.Writer, log io.Writer) *server {
 	return &server{
-		in:   bufio.NewReader(in),
-		out:  bufio.NewWriter(out),
-		log:  log,
-		docs: newDocStore(),
+		in:       bufio.NewReader(in),
+		out:      bufio.NewWriter(out),
+		log:      log,
+		docs:     newDocStore(),
+		debounce: 120 * time.Millisecond,
+		timers:   map[string]*time.Timer{},
 	}
 }
 
 // Run drives the stdio loop until the peer sends `exit` or closes
 // stdin. Any transport-level error short-circuits with that error.
 func (s *server) Run() error {
+	defer s.stopTimers()
 	for {
 		raw, err := s.readMessage()
 		if err != nil {
@@ -53,30 +62,62 @@ func (s *server) Run() error {
 			continue
 		}
 		s.dispatch(&msg)
+		if err := s.writeError(); err != nil {
+			return err
+		}
 		if msg.Method == "exit" {
 			return nil
 		}
 	}
 }
 
+func (s *server) stopTimers() {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	for uri, t := range s.timers {
+		t.Stop()
+		delete(s.timers, uri)
+	}
+}
+
+func (s *server) writeError() error {
+	s.outMu.Lock()
+	defer s.outMu.Unlock()
+	return s.writeErr
+}
+
 // -----------------------------------------------------------------
 // Transport: LSP base protocol: "Content-Length: N\r\n\r\n{...}".
 // -----------------------------------------------------------------
 
+const maxMessageBytes = 8 * 1024 * 1024
+const maxHeaderBytes = 8192
+
 func (s *server) readMessage() ([]byte, error) {
-	var contentLen int
-	// Headers come one per CRLF line, terminated by a blank line.
+	var contentLen, headerBytes int
+	seenLength := false
 	for {
-		line, err := s.in.ReadString('\n')
+		rawLine, err := s.in.ReadSlice('\n')
+		headerBytes += len(rawLine)
+		if headerBytes > maxHeaderBytes || errors.Is(err, bufio.ErrBufferFull) {
+			return nil, errors.New("message headers too large")
+		}
 		if err != nil {
+			if errors.Is(err, io.EOF) && headerBytes > 0 {
+				return nil, io.ErrUnexpectedEOF
+			}
 			return nil, err
 		}
-		line = strings.TrimRight(line, "\r\n")
+		line := strings.TrimRight(string(rawLine), "\r\n")
 		if line == "" {
 			break
 		}
 		if k, v, ok := strings.Cut(line, ":"); ok {
 			if strings.EqualFold(strings.TrimSpace(k), "Content-Length") {
+				if seenLength {
+					return nil, errors.New("duplicate Content-Length header")
+				}
+				seenLength = true
 				contentLen, err = strconv.Atoi(strings.TrimSpace(v))
 				if err != nil {
 					return nil, fmt.Errorf("bad Content-Length %q: %w", v, err)
@@ -87,8 +128,14 @@ func (s *server) readMessage() ([]byte, error) {
 	if contentLen <= 0 {
 		return nil, errors.New("missing Content-Length header")
 	}
+	if contentLen > maxMessageBytes {
+		return nil, errors.New("message body too large")
+	}
 	buf := make([]byte, contentLen)
 	if _, err := io.ReadFull(s.in, buf); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, io.ErrUnexpectedEOF
+		}
 		return nil, err
 	}
 	return buf, nil
@@ -97,14 +144,21 @@ func (s *server) readMessage() ([]byte, error) {
 func (s *server) writeMessage(payload any) {
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
-	body, err := json.Marshal(payload)
-	if err != nil {
-		s.logf("marshal reply: %v", err)
+	if s.writeErr != nil {
 		return
 	}
-	fmt.Fprintf(s.out, "Content-Length: %d\r\n\r\n", len(body))
-	s.out.Write(body)
-	s.out.Flush()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		s.writeErr = fmt.Errorf("marshal reply: %w", err)
+		return
+	}
+	if _, err = fmt.Fprintf(s.out, "Content-Length: %d\r\n\r\n", len(body)); err == nil {
+		_, err = s.out.Write(body)
+	}
+	if err == nil {
+		err = s.out.Flush()
+	}
+	s.writeErr = err
 }
 
 func (s *server) logf(format string, args ...any) {
@@ -132,15 +186,40 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-func (s *server) dispatch(msg *rawMessage) {
-	// Notification: no id → no reply.
-	isRequest := msg.ID != nil
+// requestHandlers answer requests that need a document; each returns
+// the result to send back.
+var requestHandlers = map[string]func(s *server, params json.RawMessage) (any, error){
+	"textDocument/completion":          (*server).completion,
+	"textDocument/hover":               (*server).hover,
+	"textDocument/signatureHelp":       (*server).signatureHelp,
+	"textDocument/definition":          (*server).definition,
+	"textDocument/references":          (*server).references,
+	"textDocument/documentHighlight":   (*server).documentHighlight,
+	"textDocument/prepareRename":       (*server).prepareRename,
+	"textDocument/rename":              (*server).rename,
+	"textDocument/documentSymbol":      (*server).documentSymbol,
+	"textDocument/foldingRange":        (*server).foldingRange,
+	"textDocument/semanticTokens/full": (*server).semanticTokens,
+	"textDocument/formatting":          (*server).formatting,
+	"textDocument/codeAction":          (*server).codeAction,
+	"textDocument/inlayHint":           (*server).inlayHint,
+}
 
+func (s *server) dispatch(msg *rawMessage) {
+	isRequest := msg.ID != nil
+	if h, found := requestHandlers[msg.Method]; found {
+		result, err := s.safeCall(h, msg.Params)
+		if err != nil {
+			s.replyError(msg, -32602, err.Error())
+			return
+		}
+		s.reply(msg, result)
+		return
+	}
 	switch msg.Method {
 	case "initialize":
 		s.handleInitialize(msg)
-	case "initialized":
-		// no-op: client ack after initialize response
+	case "initialized", "$/cancelRequest", "$/setTrace", "workspace/didChangeConfiguration":
 	case "shutdown":
 		s.shutdown = true
 		s.reply(msg, nil)
@@ -150,21 +229,27 @@ func (s *server) dispatch(msg *rawMessage) {
 		s.handleDidOpen(msg)
 	case "textDocument/didChange":
 		s.handleDidChange(msg)
+	case "textDocument/didSave":
+		s.handleDidSave(msg)
 	case "textDocument/didClose":
 		s.handleDidClose(msg)
-	case "textDocument/completion":
-		s.handleCompletion(msg)
-	case "textDocument/hover":
-		s.handleHover(msg)
-	case "textDocument/definition":
-		s.handleDefinition(msg)
-	case "textDocument/inlayHint":
-		s.handleInlayHint(msg)
 	default:
 		if isRequest {
 			s.replyError(msg, -32601, "Method not found: "+msg.Method)
 		}
 	}
+}
+
+// safeCall runs a handler, turning a panic into an error reply so one
+// bad document cannot take the server down.
+func (s *server) safeCall(h func(*server, json.RawMessage) (any, error), params json.RawMessage) (result any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logf("panic: %v", r)
+			result, err = nil, fmt.Errorf("internal error: %v", r)
+		}
+	}()
+	return h(s, params)
 }
 
 func (s *server) reply(req *rawMessage, result any) {
@@ -201,42 +286,50 @@ func (s *server) notify(method string, params any) {
 // initialize
 // -----------------------------------------------------------------
 
-type initializeResult struct {
-	Capabilities serverCapabilities `json:"capabilities"`
-	ServerInfo   serverInfo         `json:"serverInfo"`
-}
-
-type serverInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-type serverCapabilities struct {
-	TextDocumentSync   int                 `json:"textDocumentSync"`
-	CompletionProvider *completionProvider `json:"completionProvider,omitempty"`
-	HoverProvider      bool                `json:"hoverProvider"`
-	InlayHintProvider  bool                `json:"inlayHintProvider,omitempty"`
-	DefinitionProvider bool                `json:"definitionProvider,omitempty"`
-}
-
-type completionProvider struct {
-	TriggerCharacters []string `json:"triggerCharacters"`
-	ResolveProvider   bool     `json:"resolveProvider"`
+type initializeParams struct {
+	InitializationOptions struct {
+		// DebounceMs overrides the diagnostics debounce.
+		DebounceMs *int `json:"debounceMs"`
+	} `json:"initializationOptions"`
 }
 
 func (s *server) handleInitialize(msg *rawMessage) {
-	s.reply(msg, initializeResult{
-		Capabilities: serverCapabilities{
-			TextDocumentSync: 1, // 1 = full text sync: simpler, fine for tiny docs
-			CompletionProvider: &completionProvider{
-				// '.' triggers command completion mid-line; space after
-				// `.load ` or `.source ` triggers path/frame completion.
-				TriggerCharacters: []string{".", " "},
+	var p initializeParams
+	_ = json.Unmarshal(msg.Params, &p)
+	if d := p.InitializationOptions.DebounceMs; d != nil && *d >= 0 {
+		s.debounce = time.Duration(*d) * time.Millisecond
+	}
+	s.reply(msg, map[string]any{
+		"capabilities": map[string]any{
+			"positionEncoding": "utf-16",
+			"textDocumentSync": map[string]any{
+				"openClose": true,
+				"change":    1, // full text: documents are small
+				"save":      map[string]any{"includeText": false},
 			},
-			HoverProvider:      true,
-			InlayHintProvider:  true,
-			DefinitionProvider: true,
+			"completionProvider": map[string]any{
+				"triggerCharacters": []string{".", " ", "(", ",", ":", "/", "="},
+				"resolveProvider":   false,
+			},
+			"hoverProvider": true,
+			"signatureHelpProvider": map[string]any{
+				"triggerCharacters":   []string{"(", ","},
+				"retriggerCharacters": []string{","},
+			},
+			"definitionProvider":        true,
+			"referencesProvider":        true,
+			"documentHighlightProvider": true,
+			"renameProvider":            map[string]any{"prepareProvider": true},
+			"documentSymbolProvider":    true,
+			"foldingRangeProvider":      true,
+			"semanticTokensProvider": map[string]any{
+				"legend": map[string]any{"tokenTypes": semanticTypes, "tokenModifiers": semanticModifiers},
+				"full":   true,
+			},
+			"documentFormattingProvider": true,
+			"codeActionProvider":         map[string]any{"codeActionKinds": []string{"quickfix"}},
+			"inlayHintProvider":          true,
 		},
-		ServerInfo: serverInfo{Name: "golars-lsp", Version: "0.1.0"},
+		"serverInfo": map[string]any{"name": "golars-lsp", "version": "0.2.0"},
 	})
 }

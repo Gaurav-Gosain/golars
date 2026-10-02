@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/lazy"
@@ -63,9 +64,19 @@ func (s *Statement) Execute(ctx context.Context, df *dataframe.DataFrame) (*data
 	if s.Distinct {
 		lf = lf.Unique()
 	}
-	// ORDER BY: apply each key in order.
-	for _, oi := range s.OrderBy {
-		lf = lf.Sort(oi.Col, oi.Descending)
+	// ORDER BY: one multi-key sort, first key primary. Like polars SQL
+	// (and PostgreSQL), nulls go last for ASC and first for DESC.
+	if len(s.OrderBy) > 0 {
+		keys := make([]string, len(s.OrderBy))
+		opts := make([]compute.SortOptions, len(s.OrderBy))
+		for i, oi := range s.OrderBy {
+			keys[i] = oi.Col
+			opts[i] = compute.SortOptions{Descending: oi.Descending, Nulls: compute.NullsLast}
+			if oi.Descending {
+				opts[i].Nulls = compute.NullsFirst
+			}
+		}
+		lf = lf.SortBy(keys, opts)
 	}
 	// LIMIT.
 	if s.Limit > 0 {

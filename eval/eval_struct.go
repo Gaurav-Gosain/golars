@@ -12,6 +12,12 @@ import (
 // evalStructFunction dispatches FunctionNodes whose Name starts with
 // "struct." to the matching series.StructOps kernel.
 func evalStructFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *dataframe.DataFrame) (*series.Series, error) {
+	if out, ok, err := evalStrJSONFunction(ctx, ec, n, df); ok {
+		return out, err
+	}
+	if out, ok, err := evalStructExtFunction(ctx, ec, n, df); ok {
+		return out, err
+	}
 	arg0, err := evalNode(ctx, ec, n.Args[0], df)
 	if err != nil {
 		return nil, err

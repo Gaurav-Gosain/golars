@@ -39,19 +39,14 @@ func int64BinaryBitmap(
 	name string,
 	aArr, bArr arrow.Array,
 	aVals, bVals []int64,
-	op func(int64, int64) int64,
+	op arithOp,
 	par int,
 	mem memory.Allocator,
 ) (*series.Series, error) {
 	n := aArr.Len()
 	nullBuf, nulls := series.AndValidityBitmap(aArr, bArr, mem)
 	return series.BuildInt64DirectWithValidity(name, n, mem, func(out []int64) {
-		_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-			for i := s; i < e; i++ {
-				out[i] = op(aVals[i], bVals[i])
-			}
-			return nil
-		})
+		runBinInt64(ctx, out, aVals, bVals, op, par)
 	}, nullBuf, nulls)
 }
 
@@ -62,19 +57,14 @@ func float64BinaryBitmap(
 	name string,
 	aArr, bArr arrow.Array,
 	aVals, bVals []float64,
-	op func(float64, float64) float64,
+	op arithOp,
 	par int,
 	mem memory.Allocator,
 ) (*series.Series, error) {
 	n := aArr.Len()
 	nullBuf, nulls := series.AndValidityBitmap(aArr, bArr, mem)
 	return series.BuildFloat64DirectWithValidity(name, n, mem, func(out []float64) {
-		_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-			for i := s; i < e; i++ {
-				out[i] = op(aVals[i], bVals[i])
-			}
-			return nil
-		})
+		runBinFloat64(ctx, out, aVals, bVals, op, par)
 	}, nullBuf, nulls)
 }
 
@@ -187,6 +177,9 @@ func DivLit(ctx context.Context, a *series.Series, lit any, opts ...Option) (*se
 }
 
 func runArithLit(ctx context.Context, a *series.Series, lit any, opts []Option, kernel string, op arithOp) (*series.Series, error) {
+	if out, ok, err := extraArithLit(ctx, a, lit, opts, op); ok {
+		return out, err
+	}
 	cfg := resolve(opts)
 	aArr, err := extractChunk(a, cfg.alloc)
 	if err != nil {
@@ -217,6 +210,15 @@ func runArithLit(ctx context.Context, a *series.Series, lit any, opts []Option, 
 		return nil, err
 	}
 	defer litSer.Release()
+	if a.DType().IsNumeric() && litSer.DType().IsNumeric() && !a.DType().Equal(litSer.DType()) {
+		// The literal takes the column's dtype (f32 column, f64 literal).
+		cast, err := Cast(ctx, litSer, a.DType(), WithAllocator(cfg.alloc))
+		if err != nil {
+			return nil, err
+		}
+		defer cast.Release()
+		litSer = cast
+	}
 	return runArith(ctx, a, litSer, opts, kernel, op)
 }
 
@@ -423,6 +425,9 @@ const (
 )
 
 func runArith(ctx context.Context, a, b *series.Series, opts []Option, kernel string, op arithOp) (*series.Series, error) {
+	if out, ok, err := temporalArith(ctx, a, b, opts, op); ok {
+		return out, err
+	}
 	if err := checkBinary(a, b); err != nil {
 		return nil, err
 	}
@@ -455,6 +460,25 @@ func runArith(ctx context.Context, a, b *series.Series, opts []Option, kernel st
 		return dispatchArithFloat32(ctx, name, aArr, bArr, op, cfg.alloc, par)
 	case arrow.FLOAT64:
 		return dispatchArithFloat64(ctx, name, aArr, bArr, op, cfg.alloc, par)
+	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16:
+		// Narrow integers compute in i64 and wrap back, as polars'
+		// wrapping integer arithmetic does.
+		wa, err := widenToInt64(a, cfg.alloc)
+		if err != nil {
+			return nil, err
+		}
+		defer wa.Release()
+		wb, err := widenToInt64(b, cfg.alloc)
+		if err != nil {
+			return nil, err
+		}
+		defer wb.Release()
+		res, err := runArith(ctx, wa, wb, []Option{WithAllocator(cfg.alloc)}, kernel, op)
+		if err != nil {
+			return nil, err
+		}
+		defer res.Release()
+		return wrapInt64To(res, a.DType().Arrow(), name, cfg.alloc)
 	}
 	return nil, isUnsupported(kernel, a.DType())
 }
@@ -500,86 +524,16 @@ func dispatchArithInt64(ctx context.Context, name string, aArr, bArr arrow.Array
 	n := aArr.Len()
 	noNulls := aArr.NullN() == 0 && bArr.NullN() == 0
 	switch op {
-	case opAdd:
+	case opAdd, opSub, opMul:
 		if noNulls {
-			// Direct buffer write. At 1M+ the output exceeds L2 and the
-			// next consumer almost certainly hits DRAM anyway, so AVX2
-			// non-temporal stores (VMOVNTDQ) win by skipping the write-
-			// allocate. Below that the cached autovec store is faster
-			// because the output lines may get re-read.
-			//
-			// poolingMem reuses the backing byte slice across back-to-back
-			// calls: for benchmark loops and streaming pipelines this
-			// saves the ~50μs mallocgc zero for a fresh 8 MB buffer.
+			// Direct buffer write into a pooled buffer: the kernel
+			// overwrites every slot, and reusing the backing slice
+			// across back-to-back calls skips mallocgc zeroing.
 			return series.BuildInt64Direct(name, n, poolingMem(mem), func(out []int64) {
-				if n < 128*1024 {
-					for i := range out {
-						out[i] = av[i] + bv[i]
-					}
-					return
-				}
-				if n >= 1024*1024 {
-					_ = pool.ParallelFor(ctx, n, 2, func(_ context.Context, s, e int) error {
-						simdAddInt64NT(out[s:e], av[s:e], bv[s:e])
-						return nil
-					})
-					return
-				}
-				_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-					for i := s; i < e; i++ {
-						out[i] = av[i] + bv[i]
-					}
-					return nil
-				})
+				runBinInt64(ctx, out, av, bv, op, par)
 			})
 		}
-		return int64BinaryBitmap(ctx, name, aArr, bArr, av, bv,
-			func(x, y int64) int64 { return x + y }, par, mem)
-	case opSub:
-		if noNulls {
-			return series.BuildInt64Direct(name, n, poolingMem(mem), func(out []int64) {
-				if n < 128*1024 {
-					for i := range out {
-						out[i] = av[i] - bv[i]
-					}
-					return
-				}
-				_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-					for i := s; i < e; i++ {
-						out[i] = av[i] - bv[i]
-					}
-					return nil
-				})
-			})
-		}
-		return int64BinaryBitmap(ctx, name, aArr, bArr, av, bv,
-			func(x, y int64) int64 { return x - y }, par, mem)
-	case opMul:
-		if noNulls {
-			return series.BuildInt64Direct(name, n, poolingMem(mem), func(out []int64) {
-				if n < 128*1024 {
-					for i := range out {
-						out[i] = av[i] * bv[i]
-					}
-					return
-				}
-				if n >= 1024*1024 {
-					_ = pool.ParallelFor(ctx, n, 2, func(_ context.Context, s, e int) error {
-						simdMulInt64NT(out[s:e], av[s:e], bv[s:e])
-						return nil
-					})
-					return
-				}
-				_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-					for i := s; i < e; i++ {
-						out[i] = av[i] * bv[i]
-					}
-					return nil
-				})
-			})
-		}
-		return int64BinaryBitmap(ctx, name, aArr, bArr, av, bv,
-			func(x, y int64) int64 { return x * y }, par, mem)
+		return int64BinaryBitmap(ctx, name, aArr, bArr, av, bv, op, par, mem)
 	case opDiv:
 		out, valid, err := applyBinaryNumericFallible(ctx, aArr, bArr, av, bv, func(x, y int64) (int64, bool) {
 			if y == 0 {
@@ -707,96 +661,10 @@ func dispatchArithFloat32(ctx context.Context, name string, aArr, bArr arrow.Arr
 func dispatchArithFloat64(ctx context.Context, name string, aArr, bArr arrow.Array, op arithOp, mem memory.Allocator, par int) (*series.Series, error) {
 	av, bv := float64Values(aArr), float64Values(bArr)
 	n := aArr.Len()
-	noNulls := aArr.NullN() == 0 && bArr.NullN() == 0
-	switch op {
-	case opAdd:
-		if noNulls {
-			return series.BuildFloat64Direct(name, n, poolingMem(mem), func(out []float64) {
-				if n < 128*1024 {
-					for i := range out {
-						out[i] = av[i] + bv[i]
-					}
-					return
-				}
-				if n >= 1024*1024 {
-					// Worker count tuned per-arch: on amd64 the two-writer
-					// saturation for VMOVNTPD is at ~2 cores; on arm64 the
-					// M-series chips have more memory bandwidth headroom
-					// and scale to 4+ writers before saturating. par is
-					// runtime-inferred from GOMAXPROCS.
-					_ = pool.ParallelFor(ctx, n, addFloat64NTWorkers(par), func(_ context.Context, s, e int) error {
-						simdAddFloat64NT(out[s:e], av[s:e], bv[s:e])
-						return nil
-					})
-					return
-				}
-				_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-					for i := s; i < e; i++ {
-						out[i] = av[i] + bv[i]
-					}
-					return nil
-				})
-			})
-		}
-		return float64BinaryBitmap(ctx, name, aArr, bArr, av, bv,
-			func(x, y float64) float64 { return x + y }, par, mem)
-	case opSub:
-		if noNulls {
-			return series.BuildFloat64Direct(name, n, poolingMem(mem), func(out []float64) {
-				if n < 128*1024 {
-					for i := range out {
-						out[i] = av[i] - bv[i]
-					}
-					return
-				}
-				_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-					for i := s; i < e; i++ {
-						out[i] = av[i] - bv[i]
-					}
-					return nil
-				})
-			})
-		}
-		return float64BinaryBitmap(ctx, name, aArr, bArr, av, bv,
-			func(x, y float64) float64 { return x - y }, par, mem)
-	case opMul:
-		if noNulls {
-			return series.BuildFloat64Direct(name, n, poolingMem(mem), func(out []float64) {
-				if n < 128*1024 {
-					for i := range out {
-						out[i] = av[i] * bv[i]
-					}
-					return
-				}
-				_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-					for i := s; i < e; i++ {
-						out[i] = av[i] * bv[i]
-					}
-					return nil
-				})
-			})
-		}
-		return float64BinaryBitmap(ctx, name, aArr, bArr, av, bv,
-			func(x, y float64) float64 { return x * y }, par, mem)
-	case opDiv:
-		if noNulls {
-			return series.BuildFloat64Direct(name, n, poolingMem(mem), func(out []float64) {
-				if n < 128*1024 {
-					for i := range out {
-						out[i] = av[i] / bv[i]
-					}
-					return
-				}
-				_ = pool.ParallelFor(ctx, n, par, func(_ context.Context, s, e int) error {
-					for i := s; i < e; i++ {
-						out[i] = av[i] / bv[i]
-					}
-					return nil
-				})
-			})
-		}
-		return float64BinaryBitmap(ctx, name, aArr, bArr, av, bv,
-			func(x, y float64) float64 { return x / y }, par, mem)
+	if aArr.NullN() == 0 && bArr.NullN() == 0 {
+		return series.BuildFloat64Direct(name, n, poolingMem(mem), func(out []float64) {
+			runBinFloat64(ctx, out, av, bv, op, par)
+		})
 	}
-	return nil, ErrUnsupportedDType
+	return float64BinaryBitmap(ctx, name, aArr, bArr, av, bv, op, par, mem)
 }

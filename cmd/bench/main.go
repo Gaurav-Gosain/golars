@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
@@ -24,11 +25,18 @@ import (
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
+// onlyRe filters workloads by name; nil runs everything.
+var onlyRe *regexp.Regexp
+
 type result struct {
 	Name           string  `json:"name"`
 	Rows           int     `json:"rows"`
 	MedianNs       int64   `json:"median_ns"`
 	ThroughputMBps float64 `json:"throughput_mbps"`
+	// AllocBytes and Allocs are the heap bytes and objects one call of
+	// the workload allocates; see mem.go.
+	AllocBytes int64 `json:"alloc_bytes"`
+	Allocs     int64 `json:"allocs"`
 }
 
 func timeNs(fn func(), warmup, repeat int) int64 {
@@ -66,6 +74,7 @@ func timeNs(fn func(), warmup, repeat int) int64 {
 		samples[i] = time.Since(t0).Nanoseconds() / int64(inner)
 	}
 	slices.Sort(samples)
+	measureAlloc(fn)
 	return samples[len(samples)/2]
 }
 
@@ -175,6 +184,34 @@ func benchGroupBySum(ctx context.Context, rows, groups int) result {
 	}
 	t := timeNs(fn, 1, 5)
 	return result{Name: fmt.Sprintf("GroupBySum(groups=%d)", groups), Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
+}
+
+var benchRegions = []string{"n", "s", "e", "w", "ne", "nw", "se", "sw"}
+
+func benchGroupBySumMultiKey(ctx context.Context, rows int) result {
+	regions := make([]string, rows)
+	years := make([]int64, rows)
+	for i := range regions {
+		regions[i] = benchRegions[i%len(benchRegions)]
+		years[i] = 2020 + int64(i%5)
+	}
+	vals := randInt64s(rows, 44, 1<<20)
+	rSeries, _ := series.FromString("region", regions, nil)
+	ySeries, _ := series.FromInt64("year", years, nil)
+	vSeries, _ := series.FromInt64("v", vals, nil)
+	df, _ := dataframe.New(rSeries, ySeries, vSeries)
+	defer df.Release()
+
+	aggs := []expr.Expr{expr.Col("v").Sum().Alias("s")}
+	fn := func() {
+		out, err := df.GroupBy("region", "year").Agg(ctx, aggs)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	return result{Name: "GroupBySumMultiKey", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*24) / float64(t) * 1000.0}
 }
 
 func benchInnerJoin(ctx context.Context, rows int) result {
@@ -538,6 +575,86 @@ func benchRollingSum(ctx context.Context, rows int) result {
 	return result{Name: "RollingSum(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
 }
 
+func benchRollingMin(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.RollingMin(series.RollingOptions{WindowSize: 32})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RollingMin(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
+func benchRollingMax(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.RollingMax(series.RollingOptions{WindowSize: 32})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RollingMax(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
+func benchRank(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.Rank(series.RankAverage)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RankInt64", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
+func benchTopK(ctx context.Context, rows, k int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.TopK(k)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: fmt.Sprintf("TopK(k=%d)", k), Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
+func benchRollingMean(ctx context.Context, rows int) result {
+	vals := randInt64s(rows, 42, 1<<20)
+	s, _ := series.FromInt64("x", vals, nil)
+	defer s.Release()
+	fn := func() {
+		out, err := s.RollingMean(series.RollingOptions{WindowSize: 32})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	_ = ctx
+	return result{Name: "RollingMean(w=32)", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
+}
+
 func benchWhenThen(ctx context.Context, rows int) result {
 	vals := randInt64s(rows, 42, 1<<20)
 	a, _ := series.FromInt64("a", vals, nil)
@@ -581,6 +698,30 @@ func benchOverSum(ctx context.Context, rows int) result {
 	}
 	t := timeNs(fn, 1, 5)
 	return result{Name: "SumOverGroup", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
+}
+
+func benchOverCumSum(ctx context.Context, rows int) result {
+	keys := make([]int64, rows)
+	r := rand.New(rand.NewPCG(42, 43))
+	for i := range keys {
+		keys[i] = r.Int64N(64)
+	}
+	vals := randInt64s(rows, 44, 1<<20)
+	k, _ := series.FromInt64("k", keys, nil)
+	v, _ := series.FromInt64("v", vals, nil)
+	df, _ := dataframe.New(k, v)
+	defer df.Release()
+	fn := func() {
+		out, err := lazy.FromDataFrame(df).
+			Select(expr.Col("v").CumSum().Over("k").Alias("cum")).
+			Collect(ctx)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	return result{Name: "CumSumOverGroup", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
 }
 
 func benchForwardFill(ctx context.Context, rows int) result {
@@ -732,10 +873,115 @@ func benchDropNulls(ctx context.Context, rows int) result {
 	return result{Name: "DropNulls", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*8) / float64(t) * 1000.0}
 }
 
+// --- join_asof / join_where workloads ---------------------------------
+// Inputs are arithmetic sequences (no RNG) so bench.py builds identical
+// frames. Mirrored by bench_join_asof* / bench_join_where there.
+
+func benchSeqFrame(cols map[string]func(i int) int64, order []string, n int) *dataframe.DataFrame {
+	ss := make([]*series.Series, len(order))
+	for c, name := range order {
+		v := make([]int64, n)
+		f := cols[name]
+		for i := range v {
+			v[i] = f(i)
+		}
+		ss[c], _ = series.FromInt64(name, v, nil)
+	}
+	df, err := dataframe.New(ss...)
+	if err != nil {
+		panic(err)
+	}
+	return df
+}
+
+func asofBenchFrames(rows int, by bool) (*dataframe.DataFrame, *dataframe.DataFrame) {
+	m := rows / 4
+	lcols := map[string]func(int) int64{
+		"t":  func(i int) int64 { return int64(i) * 3 },
+		"lv": func(i int) int64 { return int64(i) },
+		"g":  func(i int) int64 { return int64(i % 64) },
+	}
+	rcols := map[string]func(int) int64{
+		"t":  func(j int) int64 { return int64(j)*11 + 1 },
+		"rv": func(j int) int64 { return int64(j) },
+		"g":  func(j int) int64 { return int64(j % 64) },
+	}
+	lorder, rorder := []string{"t", "lv"}, []string{"t", "rv"}
+	if by {
+		lorder = append(lorder, "g")
+		rorder = append(rorder, "g")
+	}
+	return benchSeqFrame(lcols, lorder, rows), benchSeqFrame(rcols, rorder, m)
+}
+
+func benchJoinAsof(ctx context.Context, rows int) result {
+	left, right := asofBenchFrames(rows, false)
+	defer left.Release()
+	defer right.Release()
+	fn := func() {
+		out, err := left.JoinAsof(ctx, right, dataframe.AsofOptions{On: "t"})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	return result{Name: "JoinAsof", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
+}
+
+func benchJoinAsofBy(ctx context.Context, rows int) result {
+	left, right := asofBenchFrames(rows, true)
+	defer left.Release()
+	defer right.Release()
+	fn := func() {
+		out, err := left.JoinAsof(ctx, right, dataframe.AsofOptions{On: "t", By: []string{"g"}})
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	return result{Name: "JoinAsofBy", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*24) / float64(t) * 1000.0}
+}
+
+func benchJoinWhere(ctx context.Context, rows int) result {
+	m := rows / 64
+	left := benchSeqFrame(map[string]func(int) int64{
+		"a":  func(i int) int64 { return int64(i) * 7919 % int64(rows) },
+		"lv": func(i int) int64 { return int64(i) },
+	}, []string{"a", "lv"}, rows)
+	defer left.Release()
+	right := benchSeqFrame(map[string]func(int) int64{
+		"lo": func(j int) int64 { return int64(j) * 64 },
+		"hi": func(j int) int64 { return int64(j)*64 + 96 },
+		"rv": func(j int) int64 { return int64(j) },
+	}, []string{"lo", "hi", "rv"}, m)
+	defer right.Release()
+	preds := []expr.Expr{expr.Col("a").Ge(expr.Col("lo")), expr.Col("a").Lt(expr.Col("hi"))}
+	fn := func() {
+		out, err := left.JoinWhere(ctx, right, preds)
+		if err != nil {
+			panic(err)
+		}
+		out.Release()
+	}
+	t := timeNs(fn, 1, 5)
+	return result{Name: "JoinWhere", Rows: rows, MedianNs: t, ThroughputMBps: float64(rows*16) / float64(t) * 1000.0}
+}
+
 func main() {
 	cpuProfile := flag.String("cpuprofile", "", "write CPU profile to this file")
 	memProfile := flag.String("memprofile", "", "write allocation profile to this file")
+	only := flag.String("only", "", "run only workloads whose name matches this regexp")
 	flag.Parse()
+	if *only != "" {
+		re, err := regexp.Compile(*only)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "-only:", err)
+			os.Exit(2)
+		}
+		onlyRe = re
+	}
 
 	// Tune GC a touch for the microbenchmark; polars does its own allocator
 	// tuning so this is a fair comparison attempt, not a cheat.
@@ -773,72 +1019,109 @@ func main() {
 
 	ctx := context.Background()
 	var runs []result
+	// add runs f only when name matches -only. f builds its own inputs,
+	// so filtered-out workloads cost nothing.
+	add := func(name string, f func() result) {
+		if onlyRe != nil && !onlyRe.MatchString(name) {
+			return
+		}
+		memQueue = memQueue[:0]
+		r := []result{f()}
+		attachMem(r)
+		runs = append(runs, r[0])
+	}
 
 	sizes := []int{16 * 1024, 256 * 1024, 1024 * 1024}
 	for _, n := range sizes {
-		runs = append(runs,
-			benchSumInt64(ctx, n),
-			benchSumFloat64(ctx, n),
-			benchMeanFloat64(ctx, n),
-			benchMinFloat64(ctx, n),
-			benchAddInt64(ctx, n),
-			benchAddFloat64(ctx, n),
-			benchMulInt64(ctx, n),
-			benchGtInt64(ctx, n),
-			benchFilterInt64(ctx, n),
-			benchFilterFloat64(ctx, n),
-			benchSortInt64(ctx, n),
-			benchSortFloat64(ctx, n),
-			benchCastI64F64(ctx, n),
-			benchTake(ctx, n),
-		)
+		add("SumInt64", func() result { return benchSumInt64(ctx, n) })
+		add("SumFloat64", func() result { return benchSumFloat64(ctx, n) })
+		add("MeanFloat64", func() result { return benchMeanFloat64(ctx, n) })
+		add("MinFloat64", func() result { return benchMinFloat64(ctx, n) })
+		add("AddInt64", func() result { return benchAddInt64(ctx, n) })
+		add("AddFloat64", func() result { return benchAddFloat64(ctx, n) })
+		add("MulInt64", func() result { return benchMulInt64(ctx, n) })
+		add("GtInt64", func() result { return benchGtInt64(ctx, n) })
+		add("FilterInt64", func() result { return benchFilterInt64(ctx, n) })
+		add("FilterFloat64", func() result { return benchFilterFloat64(ctx, n) })
+		add("SortInt64", func() result { return benchSortInt64(ctx, n) })
+		add("SortFloat64", func() result { return benchSortFloat64(ctx, n) })
+		add("CastI64ToF64", func() result { return benchCastI64F64(ctx, n) })
+		add("Take", func() result { return benchTake(ctx, n) })
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs, benchSortTwoKeys(ctx, n))
+		add("SortTwoKeys", func() result { return benchSortTwoKeys(ctx, n) })
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs,
-			benchGroupBySum(ctx, n, 8),
-			benchGroupBySum(ctx, n, 1024),
-			benchGroupByMean(ctx, n, 64),
-			benchGroupByMultiAgg(ctx, n, 64),
-		)
+		add("GroupBySum(groups=8)", func() result { return benchGroupBySum(ctx, n, 8) })
+		add("GroupBySum(groups=1024)", func() result { return benchGroupBySum(ctx, n, 1024) })
+		add("GroupByMean(groups=64)", func() result { return benchGroupByMean(ctx, n, 64) })
+		add("GroupByMultiAgg(groups=64)", func() result { return benchGroupByMultiAgg(ctx, n, 64) })
+		add("GroupBySumMultiKey", func() result { return benchGroupBySumMultiKey(ctx, n) })
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs,
-			benchInnerJoin(ctx, n),
-			benchLeftJoin(ctx, n),
-		)
+		add("InnerJoin", func() result { return benchInnerJoin(ctx, n) })
+		add("LeftJoin", func() result { return benchLeftJoin(ctx, n) })
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs, benchPipeline(ctx, n))
+		add("JoinAsof", func() result { return benchJoinAsof(ctx, n) })
+		add("JoinAsofBy", func() result { return benchJoinAsofBy(ctx, n) })
+		add("JoinWhere", func() result { return benchJoinWhere(ctx, n) })
+	}
+	for _, n := range []int{16 * 1024, 256 * 1024} {
+		add("Pipeline(filter>gb>sort)", func() result { return benchPipeline(ctx, n) })
 	}
 	for _, n := range sizes {
-		runs = append(runs, benchSumHorizontal(ctx, n))
+		add("SumHorizontal(3cols)", func() result { return benchSumHorizontal(ctx, n) })
 	}
 	for _, n := range sizes {
-		runs = append(runs, benchMaxHorizontal(ctx, n))
+		add("MaxHorizontal(3cols)", func() result { return benchMaxHorizontal(ctx, n) })
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs, benchUniqueInt64(ctx, n))
+		add("UniqueInt64", func() result { return benchUniqueInt64(ctx, n) })
+		add("TopK(k=10)", func() result { return benchTopK(ctx, n, 10) })
+		add("RankInt64", func() result { return benchRank(ctx, n) })
 	}
 	for _, n := range sizes {
-		runs = append(runs,
-			benchCumSumInt64(ctx, n),
-			benchShiftInt64(ctx, n),
-			benchFillNullValue(ctx, n),
-			benchDropNulls(ctx, n),
-		)
+		add("CumSumInt64", func() result { return benchCumSumInt64(ctx, n) })
+		add("ShiftInt64", func() result { return benchShiftInt64(ctx, n) })
+		add("FillNullValue", func() result { return benchFillNullValue(ctx, n) })
+		add("DropNulls", func() result { return benchDropNulls(ctx, n) })
 	}
 	for _, n := range sizes {
-		runs = append(runs, benchForwardFill(ctx, n))
+		add("ForwardFillInt64", func() result { return benchForwardFill(ctx, n) })
 	}
 	for _, n := range sizes {
-		runs = append(runs, benchRollingSum(ctx, n))
+		add("RollingSum(w=32)", func() result { return benchRollingSum(ctx, n) })
+		add("RollingMin(w=32)", func() result { return benchRollingMin(ctx, n) })
+		add("RollingMax(w=32)", func() result { return benchRollingMax(ctx, n) })
+		add("RollingMean(w=32)", func() result { return benchRollingMean(ctx, n) })
 	}
 	for _, n := range []int{16 * 1024, 256 * 1024} {
-		runs = append(runs, benchWhenThen(ctx, n), benchOverSum(ctx, n))
+		add("WhenThenOtherwise", func() result { return benchWhenThen(ctx, n) })
+		add("SumOverGroup", func() result { return benchOverSum(ctx, n) })
+		add("CumSumOverGroup", func() result { return benchOverCumSum(ctx, n) })
 	}
+	// Grouped workloads build several results in one call. They run when
+	// any of their names matches -only, and only matching results are kept.
+	addAll := func(names []string, f func() []result) {
+		if onlyRe != nil && !slices.ContainsFunc(names, onlyRe.MatchString) {
+			return
+		}
+		memQueue = memQueue[:0]
+		rs := f()
+		attachMem(rs)
+		for _, r := range rs {
+			if onlyRe == nil || onlyRe.MatchString(r.Name) {
+				runs = append(runs, r)
+			}
+		}
+	}
+	addAll([]string{"StrContainsShort", "StrSplit"}, func() []result { return stringBenches(ctx) })
+	addAll([]string{"DtYear", "DtTruncate(1h)", "Strptime", "Strftime"}, func() []result { return temporalRuns(ctx, sizes) })
+	addAll([]string{"Cut(10 bins)", "QCut(10)", "ReplaceStrict(500 keys)", "FilterSumPerGroup(groups=64)"}, func() []result { return coreExprBenches(ctx) })
+	// Workloads beyond the original numeric suite live in extra.go.
+	addExtraWorkloads(ctx, add)
+	addJoinWorkloads(ctx, add)
 
 	out := map[string]any{
 		"engine":  "golars",

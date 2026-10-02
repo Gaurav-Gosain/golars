@@ -1,53 +1,207 @@
 // Package exprparse turns a short text expression into an expr.Expr.
 //
-// Grammar (whitespace-separated, case-sensitive for identifiers):
+// Grammar (identifiers are case-sensitive, keywords are not):
 //
-//	expr    := orExpr
-//	orExpr  := andExpr ("or" andExpr)*
-//	andExpr := notExpr ("and" notExpr)*
-//	notExpr := "not" notExpr | cmpExpr
-//	cmpExpr := addExpr ((== | != | < | <= | > | >=) addExpr)?
-//	addExpr := mulExpr ((+ | -) mulExpr)*
-//	mulExpr := unary ((* | /) unary)*
-//	unary   := "-" unary | primary
-//	primary := literal | "(" expr ")" | methodChain
-//	methodChain := ident ("." call)*
-//	call    := ident "(" argList? ")"
-//	argList := expr ("," expr)*
-//	literal := number | quoted-string | "true" | "false" | "null"
+//	expr     := orExpr
+//	orExpr   := andExpr ("or" andExpr)*
+//	andExpr  := notExpr ("and" notExpr)*
+//	notExpr  := "not" notExpr | cmpExpr
+//	cmpExpr  := addExpr ( cmpOp addExpr
+//	                    | "is_null" | "is_not_null"
+//	                    | strOp addExpr
+//	                    | ["not"] "in" list )?
+//	cmpOp    := "==" | "!=" | "<" | "<=" | ">" | ">="
+//	strOp    := "contains" | "starts_with" | "ends_with" | "like" | "not_like"
+//	addExpr  := mulExpr (("+" | "-") mulExpr)*
+//	mulExpr  := unary (("*" | "/" | "//" | "%") unary)*
+//	unary    := "-" unary | power
+//	power    := postfix ("**" unary)?
+//	postfix  := primary ("." member)*
+//	member   := ns "." ident args? | ident args?
+//	primary  := literal | list | "(" expr ")" | when
+//	          | ns "." ident args | ident args | ident
+//	when     := "when" orExpr "then" orExpr ("when" orExpr "then" orExpr)*
+//	            ("otherwise" orExpr)?
+//	args     := "(" (arg ("," arg)*)? ")"
+//	arg      := ident "=" expr | expr
+//	list     := "[" (expr ("," expr)*)? "]"
+//	literal  := number | quoted-string | "true" | "false" | "null"
+//	ns       := "str" | "dt" | "list" | "arr" | "struct" | "name" | "bin" | "cat"
 //
-// Bare identifiers resolve to column references (`expr.Col`). Chained
-// calls dispatch to method namespaces: `col.str.upper()` lowers to
-// `expr.Col("col").Str().ToUppercase()`. The supported surface
-// mirrors the `.glr` scripting language's audience; not every golars
-// operator is reachable. See the `dispatch*` helpers below for the
-// full list.
+// Bare identifiers are column references. Every function has one
+// regular spelling in two equivalent forms: a method on a value
+// (`ts.dt.year()`, `x.round(2)`) or a call whose first argument is
+// the receiver (`dt.year(ts)`, `round(x, 2)`). Calls resolve against
+// the public golars expression API through reflection, so a new
+// method on expr.Expr (or on one of its namespaces) is reachable
+// from glr without touching this package. The tables in funcs.go only
+// add aliases, polars-style default arguments and free functions.
 package exprparse
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
-	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
+	"github.com/Gaurav-Gosain/golars/script"
 )
 
-// Parse builds an expr.Expr from s. Trailing whitespace tolerated.
-// Errors point at the offending byte so callers can flag the cursor
-// in editor contexts.
+// Parse builds an expr.Expr from s. Errors are *Error values that
+// point at the offending span of s.
 func Parse(s string) (expr.Expr, error) {
-	p := &parser{src: s, toks: tokenize(s)}
-	e, err := p.parseExpr()
+	v, err := compileSource(s)
 	if err != nil {
 		return expr.Expr{}, err
 	}
-	if p.pos < len(p.toks) && p.toks[p.pos].kind != tokEOF {
-		return expr.Expr{}, fmt.Errorf("unexpected trailing token %q at byte %d",
-			p.toks[p.pos].text, p.toks[p.pos].start)
+	return v.e, nil
+}
+
+// GoSource parses s and returns Go source that rebuilds the same
+// expression with the golars expr (and dtype) packages. The glr to Go
+// transpiler uses it so generated programs call the real API.
+func GoSource(s string) (string, error) {
+	v, err := compileSource(s)
+	if err != nil {
+		return "", err
 	}
-	return e, nil
+	return v.src, nil
+}
+
+// ParseTree parses s into a syntax tree without resolving functions
+// against the expression API. Editors use it for highlighting,
+// completion and formatting; Compile turns the tree into an Expr.
+func ParseTree(s string) (*Node, error) {
+	n, _, err := parse(s, false)
+	if err != nil {
+		return nil, attachSource(err, s)
+	}
+	return n, nil
+}
+
+// ParsePrefix parses the longest expression at the start of s and
+// returns it with the byte offset where it stopped. It lets statement
+// grammars embed expressions without a delimiter, as in
+// `groupby k total = amount.sum() n = len()`.
+func ParsePrefix(s string) (*Node, int, error) {
+	n, end, err := parse(s, true)
+	if err != nil {
+		return nil, end, attachSource(err, s)
+	}
+	return n, end, nil
+}
+
+// Compile resolves a tree from ParseTree (or ParsePrefix) into an
+// expression. src is the text the tree was parsed from; it is only
+// used to report error columns.
+func Compile(n *Node, src string) (expr.Expr, error) {
+	v, err := safeCompile(n)
+	if err != nil {
+		return expr.Expr{}, attachSource(err, src)
+	}
+	return v.e, nil
+}
+
+func compileSource(s string) (val, error) {
+	n, _, err := parse(s, false)
+	if err != nil {
+		return val{}, attachSource(err, s)
+	}
+	v, err := safeCompile(n)
+	if err != nil {
+		return val{}, attachSource(err, s)
+	}
+	return v, nil
+}
+
+// safeCompile compiles n, turning a panic inside an expression
+// constructor (reached through reflection with user arguments) into
+// an error instead of crashing the host.
+func safeCompile(n *Node) (v val, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errAt(n, "internal: %v", r)
+		}
+	}()
+	return compile(n)
+}
+
+func parse(s string, prefix bool) (*Node, int, error) {
+	toks, err := tokenize(s)
+	if err != nil {
+		return nil, 0, err
+	}
+	p := &parser{toks: toks, src: s}
+	n, err := p.parseExpr()
+	if err != nil {
+		return nil, p.peek().start, err
+	}
+	t := p.peek()
+	if prefix || t.kind == tokEOF {
+		return n, t.start, nil
+	}
+	return nil, t.start, p.trailingError(t)
+}
+
+// trailingError explains a token left over after a complete
+// expression.
+func (p *parser) trailingError(t token) error {
+	if t.kind == tokOp && t.text == "=" {
+		e := errSpan(t.start, t.end, "unexpected '='")
+		e.Fix = "=="
+		return e.withHint("did you mean '=='?")
+	}
+	e := errSpan(t.start, t.end, "unexpected %s", describe(t))
+	if t.kind == tokIdent {
+		if kw := script.Closest(strings.ToLower(t.text), infixKeywords); kw != "" {
+			e.Fix = kw
+			return e.withHint("did you mean %q?", kw)
+		}
+		return e.withHint("expected an operator such as ==, and, or +")
+	}
+	if t.kind == tokRParen || t.kind == tokRBrack {
+		return e.withHint("it has no matching opening bracket")
+	}
+	return e
+}
+
+// describe names a token for an error message.
+func describe(t token) string {
+	switch t.kind {
+	case tokEOF:
+		return "end of input"
+	case tokIdent:
+		return "identifier " + strconv.Quote(t.text)
+	case tokNumber:
+		return "number " + t.text
+	case tokString:
+		return "string " + t.text
+	}
+	return strconv.Quote(t.text)
+}
+
+// infixKeywords are the words that may follow a complete operand.
+var infixKeywords = []string{"and", "or", "not", "in", "is_null", "is_not_null",
+	"contains", "starts_with", "ends_with", "like", "not_like", "then", "otherwise"}
+
+// Keywords lists the reserved words of the expression language, for
+// editors.
+func Keywords() []string {
+	return []string{"and", "or", "not", "in", "is_null", "is_not_null", "contains",
+		"starts_with", "ends_with", "like", "not_like", "when", "then", "otherwise",
+		"true", "false", "null"}
+}
+
+// Namespaces lists the method namespaces in display order.
+func Namespaces() []string {
+	return []string{"str", "dt", "list", "arr", "struct", "name", "bin", "cat"}
+}
+
+// IsNamespace reports whether s is one of the method namespaces.
+func IsNamespace(s string) bool {
+	_, found := namespaces[s]
+	return found
 }
 
 // --- tokens ------------------------------------------------------
@@ -62,110 +216,121 @@ const (
 	tokOp
 	tokLParen
 	tokRParen
+	tokLBrack
+	tokRBrack
 	tokComma
 	tokDot
 )
 
 type token struct {
-	kind  tokKind
-	text  string
-	start int
+	kind       tokKind
+	text       string // identifier, operator or number text; unescaped string value
+	start, end int
 }
 
-func tokenize(s string) []token {
+func tokenize(s string) ([]token, error) {
 	var toks []token
 	i := 0
+	add := func(k tokKind, text string, n int) {
+		toks = append(toks, token{k, text, i, i + n})
+		i += n
+	}
 	for i < len(s) {
 		c := s[i]
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 			i++
 		case c == '(':
-			toks = append(toks, token{tokLParen, "(", i})
-			i++
+			add(tokLParen, "(", 1)
 		case c == ')':
-			toks = append(toks, token{tokRParen, ")", i})
-			i++
+			add(tokRParen, ")", 1)
+		case c == '[':
+			add(tokLBrack, "[", 1)
+		case c == ']':
+			add(tokRBrack, "]", 1)
 		case c == ',':
-			toks = append(toks, token{tokComma, ",", i})
-			i++
+			add(tokComma, ",", 1)
 		case c == '.' && (i+1 >= len(s) || !isDigit(s[i+1])):
-			toks = append(toks, token{tokDot, ".", i})
-			i++
+			add(tokDot, ".", 1)
 		case c == '"' || c == '\'':
 			end, lit, ok := readString(s, i)
 			if !ok {
-				toks = append(toks, token{tokOp, "!badstring", i})
-				return toks
+				e := errSpan(i, len(s), "unterminated string")
+				return nil, e.withHint("close it with %c", c)
 			}
-			toks = append(toks, token{tokString, lit, i})
+			toks = append(toks, token{tokString, lit, i, end})
 			i = end
-		case isDigit(c) || (c == '-' && i+1 < len(s) && isDigit(s[i+1]) && (len(toks) == 0 || !lastIsOperand(toks))):
+		case isDigit(c) || (c == '.' && i+1 < len(s) && isDigit(s[i+1])):
 			end, lit := readNumber(s, i)
-			toks = append(toks, token{tokNumber, lit, i})
+			toks = append(toks, token{tokNumber, lit, i, end})
 			i = end
-		case isIdentStart(c):
+		case identStartAt(s, i) > 0:
 			end, lit := readIdent(s, i)
-			toks = append(toks, token{tokIdent, lit, i})
+			toks = append(toks, token{tokIdent, lit, i, end})
 			i = end
 		default:
-			// Multi-char operators first: ==, !=, <=, >=
 			if i+1 < len(s) {
-				two := s[i : i+2]
-				switch two {
-				case "==", "!=", "<=", ">=":
-					toks = append(toks, token{tokOp, two, i})
-					i += 2
+				switch two := s[i : i+2]; two {
+				case "==", "!=", "<=", ">=", "//", "**":
+					add(tokOp, two, 2)
 					continue
 				}
 			}
-			switch c {
-			case '+', '-', '*', '/', '<', '>', '=':
-				toks = append(toks, token{tokOp, string(c), i})
-				i++
-			default:
-				// Unknown byte: emit as stray op so the parser can
-				// report a useful error rather than hang.
-				toks = append(toks, token{tokOp, string(c), i})
-				i++
-			}
+			// Unknown characters become stray operators so the parser
+			// can report them in context.
+			_, size := utf8.DecodeRuneInString(s[i:])
+			add(tokOp, s[i:i+size], size)
 		}
 	}
-	toks = append(toks, token{tokEOF, "", len(s)})
-	return toks
+	toks = append(toks, token{tokEOF, "", len(s), len(s)})
+	return toks, nil
 }
 
-func isDigit(c byte) bool      { return c >= '0' && c <= '9' }
-func isIdentStart(c byte) bool { return unicode.IsLetter(rune(c)) || c == '_' }
-func isIdentCont(c byte) bool  { return isIdentStart(c) || isDigit(c) }
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// lastIsOperand reports whether the token stream currently ends at
-// an operand (literal / identifier / close paren), which lets the
-// tokenizer tell unary minus apart from binary minus.
-func lastIsOperand(toks []token) bool {
-	if len(toks) == 0 {
-		return false
+// identStartAt returns the byte length of the identifier-start rune
+// at s[i], or 0 when there is none. Letters of any script and '_'
+// start an identifier.
+func identStartAt(s string, i int) int {
+	c := s[i]
+	if c < utf8.RuneSelf {
+		if c == '_' || (c|0x20 >= 'a' && c|0x20 <= 'z') {
+			return 1
+		}
+		return 0
 	}
-	switch toks[len(toks)-1].kind {
-	case tokNumber, tokString, tokIdent, tokRParen:
-		return true
+	r, size := utf8.DecodeRuneInString(s[i:])
+	if r != utf8.RuneError && unicode.IsLetter(r) {
+		return size
 	}
-	return false
+	return 0
 }
 
 func readIdent(s string, i int) (int, string) {
 	j := i
-	for j < len(s) && isIdentCont(s[j]) {
-		j++
+	for j < len(s) {
+		if n := identStartAt(s, j); n > 0 {
+			j += n
+			continue
+		}
+		if isDigit(s[j]) {
+			j++
+			continue
+		}
+		if s[j] >= utf8.RuneSelf {
+			r, size := utf8.DecodeRuneInString(s[j:])
+			if r != utf8.RuneError && unicode.IsDigit(r) {
+				j += size
+				continue
+			}
+		}
+		break
 	}
 	return j, s[i:j]
 }
 
 func readNumber(s string, i int) (int, string) {
 	j := i
-	if s[j] == '-' {
-		j++
-	}
 	for j < len(s) && isDigit(s[j]) {
 		j++
 	}
@@ -173,6 +338,20 @@ func readNumber(s string, i int) (int, string) {
 		j++
 		for j < len(s) && isDigit(s[j]) {
 			j++
+		}
+	}
+	// An exponent needs at least one digit; otherwise `1e` is the
+	// number 1 followed by an identifier.
+	if j < len(s) && (s[j] == 'e' || s[j] == 'E') {
+		k := j + 1
+		if k < len(s) && (s[k] == '+' || s[k] == '-') {
+			k++
+		}
+		if k < len(s) && isDigit(s[k]) {
+			for k < len(s) && isDigit(s[k]) {
+				k++
+			}
+			j = k
 		}
 	}
 	return j, s[i:j]
@@ -210,29 +389,146 @@ func readString(s string, i int) (int, string, bool) {
 	return j, "", false
 }
 
-// --- parser ------------------------------------------------------
+// --- syntax tree -------------------------------------------------
 
-type parser struct {
-	src  string
-	toks []token
-	pos  int
+// NodeKind tags a syntax tree node.
+type NodeKind uint8
+
+// Node kinds.
+const (
+	KindLit    NodeKind = iota // Lit holds int64, float64, string, bool or nil
+	KindCol                    // Name is the column
+	KindList                   // Args are the elements
+	KindBinary                 // Name is the operator; Args are the operands
+	KindNot                    // Args[0]
+	KindNeg                    // Args[0]
+	KindCall                   // NS.Name(Recv?, Args..., Kw...)
+	KindWhen                   // Args are pred/then pairs; Final is the otherwise branch
+)
+
+// Node is one node of a parsed glr expression. Offsets are bytes into
+// the parsed text.
+type Node struct {
+	Kind NodeKind
+	// Pos and End span the node's source text, parentheses included.
+	Pos, End int
+	// Lit is the literal value of a KindLit node.
+	Lit any
+	// Raw is the source spelling of a literal (quotes included).
+	Raw string
+	// Name is the column, operator or function name.
+	Name string
+	// NamePos is the offset of Name for columns and calls (for binary
+	// nodes, of the operator).
+	NamePos int
+	// NS is the namespace of a call (str, dt, ...), "" for none.
+	NS    string
+	Recv  *Node
+	Args  []*Node
+	Kw    []KwArg
+	Final *Node
+	// Parens counts the parentheses written around the node.
+	Parens int
+	// CallParens is false for a method written without parentheses,
+	// as in `price.sum`.
+	CallParens bool
+	// Infix is the operator spelling of a call written infix: `in`,
+	// `is_null`, `contains`, ... For a KindNot node it is "not in"
+	// when the source was `x not in [...]`.
+	Infix string
+	// ambig marks `ns.fn(args)` where ns could also be a column name.
+	// The compiler falls back to `col(ns).fn(args)` when the
+	// namespace reading does not compile.
+	ambig bool
 }
 
-func (p *parser) peek() token {
-	return p.toks[p.pos]
+// NameEnd returns the end offset of the node's name.
+func (n *Node) NameEnd() int { return n.NamePos + len(n.Name) }
+
+// KwArg is a keyword argument `name=value`.
+type KwArg struct {
+	Name    string
+	NamePos int
+	Val     *Node
+}
+
+// Walk calls fn for n and every node below it in source order,
+// skipping the children of nodes for which fn returns false.
+func (n *Node) Walk(fn func(*Node) bool) {
+	if n == nil || !fn(n) {
+		return
+	}
+	n.Recv.Walk(fn)
+	for _, a := range n.Args {
+		a.Walk(fn)
+	}
+	for _, k := range n.Kw {
+		k.Val.Walk(fn)
+	}
+	n.Final.Walk(fn)
+}
+
+// litNode wraps a Go value (a table default) as a glr literal. A
+// []any becomes a list literal.
+func litNode(v any) *Node {
+	switch x := v.(type) {
+	case int:
+		v = int64(x)
+	case []any:
+		list := &Node{Kind: KindList}
+		for _, e := range x {
+			list.Args = append(list.Args, litNode(e))
+		}
+		return list
+	}
+	return &Node{Kind: KindLit, Lit: v}
+}
+
+// namespaces maps each glr namespace to its accessor on expr.Expr.
+var namespaces = map[string]string{
+	"str": "Str", "dt": "Dt", "list": "List", "arr": "Arr",
+	"struct": "Struct", "name": "Name", "bin": "Bin", "cat": "Cat",
+}
+
+// --- parser ------------------------------------------------------
+
+// maxDepth bounds nesting so hostile input cannot exhaust the stack.
+const maxDepth = 200
+
+type parser struct {
+	toks  []token
+	pos   int
+	src   string
+	depth int
+}
+
+func (p *parser) peek() token { return p.toks[p.pos] }
+func (p *parser) peekAt(k int) token {
+	if p.pos+k < len(p.toks) {
+		return p.toks[p.pos+k]
+	}
+	return p.toks[len(p.toks)-1]
 }
 
 func (p *parser) advance() token {
 	t := p.toks[p.pos]
-	p.pos++
+	if t.kind != tokEOF {
+		p.pos++
+	}
 	return t
 }
 
-func (p *parser) expect(kind tokKind) (token, error) {
+func (p *parser) expect(kind tokKind, context string) (token, error) {
 	t := p.peek()
 	if t.kind != kind {
-		return t, fmt.Errorf("expected %s, got %q at byte %d",
-			kindName(kind), t.text, t.start)
+		e := errSpan(t.start, t.end, "expected %s %s, got %s", kindName(kind), context, describe(t))
+		if kind == tokRParen || kind == tokRBrack {
+			e.Fix = kindName(kind)[1:2]
+			if t.kind == tokEOF {
+				e.Hint = "add the missing " + kindName(kind)
+			}
+		}
+		return t, e
 	}
 	p.pos++
 	return t, nil
@@ -241,857 +537,556 @@ func (p *parser) expect(kind tokKind) (token, error) {
 func kindName(k tokKind) string {
 	switch k {
 	case tokIdent:
-		return "identifier"
+		return "a name"
 	case tokNumber:
-		return "number"
+		return "a number"
 	case tokString:
-		return "string"
+		return "a string"
 	case tokOp:
-		return "operator"
+		return "an operator"
 	case tokLParen:
 		return "'('"
 	case tokRParen:
 		return "')'"
+	case tokLBrack:
+		return "'['"
+	case tokRBrack:
+		return "']'"
 	case tokComma:
 		return "','"
 	case tokDot:
 		return "'.'"
 	}
-	return "token"
+	return "a token"
 }
 
-func (p *parser) parseExpr() (expr.Expr, error) { return p.parseOr() }
+// isKeyword reports whether t is the identifier kw, ignoring case.
+func isKeyword(t token, kw string) bool {
+	return t.kind == tokIdent && strings.EqualFold(t.text, kw)
+}
 
-func (p *parser) parseOr() (expr.Expr, error) {
+func (p *parser) enter() error {
+	p.depth++
+	if p.depth > maxDepth {
+		t := p.peek()
+		return errSpan(t.start, t.end, "expression nested too deeply")
+	}
+	return nil
+}
+
+func (p *parser) parseExpr() (*Node, error) {
+	if err := p.enter(); err != nil {
+		return nil, err
+	}
+	defer func() { p.depth-- }()
+	return p.parseOr()
+}
+
+func (p *parser) binary(op token, left, right *Node) *Node {
+	return &Node{Kind: KindBinary, Pos: left.Pos, End: right.End, Name: strings.ToLower(op.text),
+		NamePos: op.start, Args: []*Node{left, right}}
+}
+
+func (p *parser) parseOr() (*Node, error) {
 	left, err := p.parseAnd()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
-	for p.peek().kind == tokIdent && p.peek().text == "or" {
-		p.advance()
-		right, err := p.parseAnd()
+	for isKeyword(p.peek(), "or") {
+		t := p.advance()
+		right, err := p.operand(t, p.parseAnd)
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = left.Or(right)
+		left = p.binary(t, left, right)
 	}
 	return left, nil
 }
 
-func (p *parser) parseAnd() (expr.Expr, error) {
+func (p *parser) parseAnd() (*Node, error) {
 	left, err := p.parseNot()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
-	for p.peek().kind == tokIdent && p.peek().text == "and" {
-		p.advance()
-		right, err := p.parseNot()
+	for isKeyword(p.peek(), "and") {
+		t := p.advance()
+		right, err := p.operand(t, p.parseNot)
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = left.And(right)
+		left = p.binary(t, left, right)
 	}
 	return left, nil
 }
 
-func (p *parser) parseNot() (expr.Expr, error) {
-	if p.peek().kind == tokIdent && p.peek().text == "not" {
+// operand parses the right-hand side of an operator, turning a
+// missing operand into an error that names the operator.
+func (p *parser) operand(op token, parse func() (*Node, error)) (*Node, error) {
+	if t := p.peek(); t.kind == tokEOF {
+		return nil, errSpan(op.start, op.end, "missing operand after %s", strings.ToLower(op.text)).
+			withHint("the expression ends here")
+	}
+	return parse()
+}
+
+func (p *parser) parseNot() (*Node, error) {
+	if t := p.peek(); isKeyword(t, "not") {
 		p.advance()
-		inner, err := p.parseNot()
-		if err != nil {
-			return expr.Expr{}, err
+		if err := p.enter(); err != nil {
+			return nil, err
 		}
-		return inner.Not(), nil
+		inner, err := p.operand(t, p.parseNot)
+		p.depth--
+		if err != nil {
+			return nil, err
+		}
+		return &Node{Kind: KindNot, Pos: t.start, End: inner.End, NamePos: t.start, Args: []*Node{inner}}, nil
 	}
 	return p.parseCmp()
 }
 
-func (p *parser) parseCmp() (expr.Expr, error) {
+// strInfix are the predicate keywords that desugar to str methods.
+var strInfix = []string{"contains", "starts_with", "ends_with", "like", "not_like"}
+
+func (p *parser) parseCmp() (*Node, error) {
 	left, err := p.parseAdd()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
 	t := p.peek()
-	if t.kind == tokOp {
+	switch {
+	case t.kind == tokOp:
 		switch t.text {
 		case "==", "!=", "<", "<=", ">", ">=":
 			p.advance()
-			right, err := p.parseAdd()
+			right, err := p.operand(t, p.parseAdd)
 			if err != nil {
-				return expr.Expr{}, err
+				return nil, err
 			}
-			return applyBinary(left, right, t.text), nil
+			return p.binary(t, left, right), nil
+		}
+	case isKeyword(t, "is_null"), isKeyword(t, "is_not_null"):
+		p.advance()
+		name := strings.ToLower(t.text)
+		return &Node{Kind: KindCall, Pos: left.Pos, End: t.end, Name: name, NamePos: t.start,
+			Recv: left, Infix: name, CallParens: true}, nil
+	case isKeyword(t, "in"):
+		p.advance()
+		return p.parseIn(left, t)
+	case isKeyword(t, "not") && isKeyword(p.peekAt(1), "in"):
+		p.advance()
+		in, err := p.parseIn(left, p.advance())
+		if err != nil {
+			return nil, err
+		}
+		return &Node{Kind: KindNot, Pos: left.Pos, End: in.End, NamePos: t.start, Args: []*Node{in}, Infix: "not in"}, nil
+	case t.kind == tokIdent:
+		for _, op := range strInfix {
+			if isKeyword(t, op) {
+				p.advance()
+				right, err := p.operand(t, p.parseAdd)
+				if err != nil {
+					return nil, err
+				}
+				return &Node{Kind: KindCall, Pos: left.Pos, End: right.End, NS: "str", Name: op, NamePos: t.start,
+					Recv: left, Args: []*Node{right}, Infix: op, CallParens: true}, nil
+			}
 		}
 	}
 	return left, nil
 }
 
-func (p *parser) parseAdd() (expr.Expr, error) {
+func (p *parser) parseIn(left *Node, t token) (*Node, error) {
+	if p.peek().kind != tokLBrack {
+		nt := p.peek()
+		return nil, errSpan(nt.start, nt.end, "`in` must be followed by a [list]").
+			withHint(`write it as x in ["a", "b"]`)
+	}
+	list, err := p.parseList()
+	if err != nil {
+		return nil, err
+	}
+	return &Node{Kind: KindCall, Pos: left.Pos, End: list.End, Name: "is_in", NamePos: t.start,
+		Recv: left, Args: []*Node{list}, Infix: "in", CallParens: true}, nil
+}
+
+func (p *parser) parseAdd() (*Node, error) {
 	left, err := p.parseMul()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
 	for {
 		t := p.peek()
 		if t.kind != tokOp || (t.text != "+" && t.text != "-") {
-			break
+			return left, nil
 		}
 		p.advance()
-		right, err := p.parseMul()
+		right, err := p.operand(t, p.parseMul)
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = applyBinary(left, right, t.text)
+		left = p.binary(t, left, right)
 	}
-	return left, nil
 }
 
-func (p *parser) parseMul() (expr.Expr, error) {
+func (p *parser) parseMul() (*Node, error) {
 	left, err := p.parseUnary()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
 	for {
 		t := p.peek()
-		if t.kind != tokOp || (t.text != "*" && t.text != "/") {
-			break
+		if t.kind != tokOp {
+			return left, nil
+		}
+		switch t.text {
+		case "*", "/", "//", "%":
+		default:
+			return left, nil
 		}
 		p.advance()
-		right, err := p.parseUnary()
+		right, err := p.operand(t, p.parseUnary)
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		left = applyBinary(left, right, t.text)
+		left = p.binary(t, left, right)
 	}
-	return left, nil
 }
 
-func (p *parser) parseUnary() (expr.Expr, error) {
+func (p *parser) parseUnary() (*Node, error) {
 	if t := p.peek(); t.kind == tokOp && t.text == "-" {
 		p.advance()
-		inner, err := p.parseUnary()
-		if err != nil {
-			return expr.Expr{}, err
+		if err := p.enter(); err != nil {
+			return nil, err
 		}
-		return inner.Neg(), nil
-	}
-	return p.parsePrimary()
-}
-
-func (p *parser) parsePrimary() (expr.Expr, error) {
-	t := p.peek()
-	switch t.kind {
-	case tokNumber:
-		p.advance()
-		if strings.Contains(t.text, ".") {
-			f, err := strconv.ParseFloat(t.text, 64)
-			if err != nil {
-				return expr.Expr{}, fmt.Errorf("invalid number %q: %w", t.text, err)
+		inner, err := p.operand(t, p.parseUnary)
+		p.depth--
+		if err != nil {
+			return nil, err
+		}
+		// Fold negative numeric literals so `shift(-1)` passes a
+		// literal rather than a negation expression.
+		if inner.Kind == KindLit && inner.Parens == 0 {
+			switch v := inner.Lit.(type) {
+			case int64:
+				return &Node{Kind: KindLit, Pos: t.start, End: inner.End, Lit: -v, Raw: "-" + inner.Raw}, nil
+			case float64:
+				return &Node{Kind: KindLit, Pos: t.start, End: inner.End, Lit: -v, Raw: "-" + inner.Raw}, nil
 			}
-			return expr.LitFloat64(f), nil
 		}
-		n, err := strconv.ParseInt(t.text, 10, 64)
-		if err != nil {
-			return expr.Expr{}, fmt.Errorf("invalid number %q: %w", t.text, err)
-		}
-		return expr.LitInt64(n), nil
-	case tokString:
-		p.advance()
-		return expr.LitString(t.text), nil
-	case tokIdent:
-		switch t.text {
-		case "true":
-			p.advance()
-			return expr.LitBool(true), nil
-		case "false":
-			p.advance()
-			return expr.LitBool(false), nil
-		case "null":
-			p.advance()
-			return expr.LitNull(dtype.Null()), nil
-		}
-		return p.parseMethodChain()
-	case tokLParen:
-		p.advance()
-		inner, err := p.parseExpr()
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		if _, err := p.expect(tokRParen); err != nil {
-			return expr.Expr{}, err
-		}
-		return inner, nil
+		return &Node{Kind: KindNeg, Pos: t.start, End: inner.End, NamePos: t.start, Args: []*Node{inner}}, nil
 	}
-	return expr.Expr{}, fmt.Errorf("unexpected token %q at byte %d", t.text, t.start)
+	return p.parsePower()
 }
 
-// parseMethodChain handles `ident (. ident (args?))*` where the
-// first ident is a column name and subsequent chained calls dispatch
-// to a namespace. Special-case the namespace itself so
-// `col.str.upper()` works (skip the intermediate "str" ident).
-func (p *parser) parseMethodChain() (expr.Expr, error) {
-	head, err := p.expect(tokIdent)
+func (p *parser) parsePower() (*Node, error) {
+	base, err := p.parsePrimary()
 	if err != nil {
-		return expr.Expr{}, err
+		return nil, err
 	}
-	// Function-style call at the head: allow `sum(col)` / `abs(col)`
-	// for aggregate / scalar ops that would otherwise require a bare
-	// column start.
-	if p.peek().kind == tokLParen {
-		return p.parseFreeFunction(head.text)
-	}
-	base := expr.Col(head.text)
-	for p.peek().kind == tokDot {
+	if t := p.peek(); t.kind == tokOp && t.text == "**" {
 		p.advance()
-		member, err := p.expect(tokIdent)
-		if err != nil {
-			return expr.Expr{}, err
+		if err := p.enter(); err != nil {
+			return nil, err
 		}
-		next, err := p.applyMember(base, member.text)
+		exp, err := p.operand(t, p.parseUnary)
+		p.depth--
 		if err != nil {
-			return expr.Expr{}, err
+			return nil, err
 		}
-		base = next
+		return p.binary(t, base, exp), nil
 	}
 	return base, nil
 }
 
-// applyMember turns `base.member(args?)` into the right Expr call.
-// Namespaces (`str`) consume the next dot+member pair.
-func (p *parser) applyMember(base expr.Expr, member string) (expr.Expr, error) {
-	if member == "str" {
-		// Consume the next method in the str namespace.
-		if p.peek().kind != tokDot {
-			return expr.Expr{}, fmt.Errorf(".str must be followed by a method")
-		}
+func (p *parser) parsePrimary() (*Node, error) {
+	t := p.peek()
+	switch t.kind {
+	case tokNumber:
 		p.advance()
-		methodTok, err := p.expect(tokIdent)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		args, err := p.parseCallArgs()
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return dispatchStr(base, methodTok.text, args)
-	}
-	// Non-namespaced method: allow both arg-less aggregates (sum,
-	// mean, ...) and param methods (fill_null, shift, ...).
-	if p.peek().kind == tokLParen {
-		args, err := p.parseCallArgs()
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return dispatchMethod(base, member, args)
-	}
-	// Property-like usage without parens: alias fast path for
-	// `col.sum`, etc.
-	return dispatchMethod(base, member, nil)
-}
-
-// parseFreeFunction handles `name(...)` calls where `name` is a
-// top-level function (not attached to a column). Supports the
-// handful of polars-style free constructors that make sense here:
-// col("x"), lit(v), sum("x"), etc.
-func (p *parser) parseFreeFunction(name string) (expr.Expr, error) {
-	args, err := p.parseCallArgs()
-	if err != nil {
-		return expr.Expr{}, err
-	}
-	return dispatchFreeFn(name, args)
-}
-
-// parseCallArgs parses `( e, e, ... )`. Leaves the parser positioned
-// after the close paren. Returns a nil slice for `()`.
-func (p *parser) parseCallArgs() ([]expr.Expr, error) {
-	if _, err := p.expect(tokLParen); err != nil {
-		return nil, err
-	}
-	if p.peek().kind == tokRParen {
-		p.advance()
-		return nil, nil
-	}
-	var args []expr.Expr
-	for {
-		a, err := p.parseExpr()
+		lit, err := parseNumber(t)
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, a)
-		if p.peek().kind == tokComma {
+		return p.parsePostfix(lit)
+	case tokString:
+		p.advance()
+		return p.parsePostfix(&Node{Kind: KindLit, Pos: t.start, End: t.end, Lit: t.text, Raw: p.src[t.start:t.end]})
+	case tokLBrack:
+		return p.parseList()
+	case tokLParen:
+		p.advance()
+		inner, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		cl, err := p.expect(tokRParen, "to close the '(' at column "+strconv.Itoa(utf8.RuneCountInString(p.src[:t.start])+1))
+		if err != nil {
+			return nil, err
+		}
+		inner.Parens++
+		inner.Pos, inner.End = t.start, cl.end
+		return p.parsePostfix(inner)
+	case tokIdent:
+		return p.parseIdent()
+	case tokEOF:
+		return nil, errSpan(t.start, t.end, "unexpected end of input").withHint("an expression is missing here")
+	}
+	e := errSpan(t.start, t.end, "unexpected %s", describe(t))
+	switch t.text {
+	case "=":
+		e.Fix = "=="
+		e.Hint = "did you mean '=='?"
+	case "&", "&&":
+		e.Fix = "and"
+		e.Hint = "use `and`"
+	case "|", "||":
+		e.Fix = "or"
+		e.Hint = "use `or`"
+	case "!":
+		e.Fix = "not"
+		e.Hint = "use `not`"
+	}
+	return nil, e
+}
+
+func parseNumber(t token) (*Node, error) {
+	if strings.ContainsAny(t.text, ".eE") {
+		f, err := strconv.ParseFloat(t.text, 64)
+		if err != nil {
+			return nil, errSpan(t.start, t.end, "invalid number %s", t.text)
+		}
+		return &Node{Kind: KindLit, Pos: t.start, End: t.end, Lit: f, Raw: t.text}, nil
+	}
+	n, err := strconv.ParseInt(t.text, 10, 64)
+	if err != nil {
+		return nil, errSpan(t.start, t.end, "integer %s is out of range", t.text).
+			withHint("write it as a float, as in %s.0", t.text)
+	}
+	return &Node{Kind: KindLit, Pos: t.start, End: t.end, Lit: n, Raw: t.text}, nil
+}
+
+func (p *parser) parseIdent() (*Node, error) {
+	t := p.advance()
+	lit := func(v any) (*Node, error) {
+		return p.parsePostfix(&Node{Kind: KindLit, Pos: t.start, End: t.end, Lit: v, Raw: strings.ToLower(t.text)})
+	}
+	switch strings.ToLower(t.text) {
+	case "true":
+		return lit(true)
+	case "false":
+		return lit(false)
+	case "null":
+		return lit(nil)
+	case "when":
+		return p.parseWhen(t)
+	}
+	// `ns.fn(args)`: a namespaced function whose first argument is
+	// the receiver. `ns.<namespace>...` is a column called ns instead
+	// (so a column named `name` still reads `name.str.upper()`).
+	if _, isNS := namespaces[t.text]; isNS && p.peek().kind == tokDot &&
+		p.peekAt(1).kind == tokIdent && p.peekAt(2).kind == tokLParen {
+		if _, memberIsNS := namespaces[p.peekAt(1).text]; !memberIsNS {
 			p.advance()
-			continue
+			fn := p.advance()
+			args, kw, end, err := p.parseCallArgs(fn.text)
+			if err != nil {
+				return nil, err
+			}
+			call := &Node{Kind: KindCall, Pos: t.start, End: end, NS: t.text, Name: fn.text, NamePos: fn.start,
+				Args: args, Kw: kw, CallParens: true, ambig: true}
+			return p.parsePostfix(call)
 		}
-		break
 	}
-	if _, err := p.expect(tokRParen); err != nil {
-		return nil, err
-	}
-	return args, nil
-}
-
-// --- dispatch ----------------------------------------------------
-
-func applyBinary(left, right expr.Expr, op string) expr.Expr {
-	switch op {
-	case "+":
-		return left.Add(right)
-	case "-":
-		return left.Sub(right)
-	case "*":
-		return left.Mul(right)
-	case "/":
-		return left.Div(right)
-	case "==":
-		return left.Eq(right)
-	case "!=":
-		return left.Ne(right)
-	case "<":
-		return left.Lt(right)
-	case "<=":
-		return left.Le(right)
-	case ">":
-		return left.Gt(right)
-	case ">=":
-		return left.Ge(right)
-	}
-	panic("unreachable: unknown operator " + op)
-}
-
-// dispatchStr routes a `col.str.METHOD(args...)` call. Argument
-// count mismatches return a descriptive error rather than panicking.
-func dispatchStr(base expr.Expr, method string, args []expr.Expr) (expr.Expr, error) {
-	switch method {
-	case "upper", "to_upper", "to_uppercase":
-		return base.Str().ToUpper(), nil
-	case "lower", "to_lower", "to_lowercase":
-		return base.Str().ToLower(), nil
-	case "trim":
-		return base.Str().Trim(), nil
-	case "len_bytes":
-		return base.Str().LenBytes(), nil
-	case "len_chars":
-		return base.Str().LenChars(), nil
-	case "contains":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Contains(s), nil
-	case "starts_with":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().StartsWith(s), nil
-	case "ends_with":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().EndsWith(s), nil
-	case "like":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Like(s), nil
-	case "not_like":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().NotLike(s), nil
-	case "contains_regex":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().ContainsRegex(s), nil
-	case "strip_prefix":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().StripPrefix(s), nil
-	case "strip_suffix":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().StripSuffix(s), nil
-	case "replace":
-		a, b, err := twoStrings(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Replace(a, b), nil
-	case "replace_all":
-		a, b, err := twoStrings(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().ReplaceAll(a, b), nil
-	case "slice":
-		start, length, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Slice(start, length), nil
-	case "head":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Head(n), nil
-	case "tail":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Tail(n), nil
-	case "count_matches":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().CountMatches(s), nil
-	case "find":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().Find(s), nil
-	case "split_exact":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Str().SplitExact(s), nil
-	}
-	return expr.Expr{}, fmt.Errorf("unknown str method %q", method)
-}
-
-// dispatchMethod handles non-namespaced methods on a column or
-// derived expression: aggregates (.sum, .mean, ...), casts, shape
-// ops (.shift, .reverse, ...).
-func dispatchMethod(base expr.Expr, method string, args []expr.Expr) (expr.Expr, error) {
-	switch method {
-	case "sum":
-		return base.Sum(), nil
-	case "mean":
-		return base.Mean(), nil
-	case "min":
-		return base.Min(), nil
-	case "max":
-		return base.Max(), nil
-	case "count":
-		return base.Count(), nil
-	case "null_count":
-		return base.NullCount(), nil
-	case "first":
-		return base.First(), nil
-	case "last":
-		return base.Last(), nil
-	case "std":
-		return base.Std(), nil
-	case "var":
-		return base.Var(), nil
-	case "median":
-		return base.Median(), nil
-	case "quantile":
-		q, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Quantile(q), nil
-	case "skew":
-		return base.Skew(), nil
-	case "kurtosis":
-		return base.Kurtosis(), nil
-	case "n_unique":
-		return base.NUnique(), nil
-	case "approx_n_unique":
-		return base.ApproxNUnique(), nil
-	case "is_null":
-		return base.IsNull(), nil
-	case "is_not_null":
-		return base.IsNotNull(), nil
-	case "abs":
-		return base.Abs(), nil
-	case "neg":
-		return base.Neg(), nil
-	case "not":
-		return base.Not(), nil
-	case "round":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Round(n), nil
-	case "floor":
-		return base.Floor(), nil
-	case "ceil":
-		return base.Ceil(), nil
-	case "sqrt":
-		return base.Sqrt(), nil
-	case "exp":
-		return base.Exp(), nil
-	case "log":
-		return base.Log(), nil
-	case "log10":
-		return base.Log10(), nil
-	case "log2":
-		return base.Log2(), nil
-	case "sign":
-		return base.Sign(), nil
-	case "reverse":
-		return base.Reverse(), nil
-	case "head":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Head(n), nil
-	case "tail":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Tail(n), nil
-	case "shift":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Shift(n), nil
-	case "diff":
-		n, err := oneInt(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Diff(n), nil
-	case "cum_sum":
-		return base.CumSum(), nil
-	case "cum_min":
-		return base.CumMin(), nil
-	case "cum_max":
-		return base.CumMax(), nil
-	case "fill_null":
-		if len(args) != 1 {
-			return expr.Expr{}, fmt.Errorf("fill_null takes 1 argument, got %d", len(args))
-		}
-		return base.FillNullExpr(args[0]), nil
-	case "alias":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Alias(s), nil
-	case "cast":
-		s, err := oneString(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		dt, err := dtypeByName(s)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Cast(dt), nil
-	case "rolling_sum":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingSum(w, mp), nil
-	case "rolling_mean":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingMean(w, mp), nil
-	case "rolling_min":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingMin(w, mp), nil
-	case "rolling_max":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingMax(w, mp), nil
-	case "rolling_std":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingStd(w, mp), nil
-	case "rolling_var":
-		w, mp, err := twoInts(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.RollingVar(w, mp), nil
-	case "ewm_mean":
-		a, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.EWMMean(a), nil
-	case "ewm_std":
-		a, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.EWMStd(a), nil
-	case "ewm_var":
-		a, err := oneFloat(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.EWMVar(a), nil
-	case "forward_fill":
-		n, err := oneIntOrZero(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.ForwardFill(n), nil
-	case "backward_fill":
-		n, err := oneIntOrZero(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.BackwardFill(n), nil
-	case "over":
-		keys, err := stringList(method, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return base.Over(keys...), nil
-	case "between":
-		if len(args) != 2 {
-			return expr.Expr{}, fmt.Errorf("between takes 2 arguments, got %d", len(args))
-		}
-		loV, err := literalValue(args[0])
-		if err != nil {
-			return expr.Expr{}, fmt.Errorf("between: lo %w", err)
-		}
-		hiV, err := literalValue(args[1])
-		if err != nil {
-			return expr.Expr{}, fmt.Errorf("between: hi %w", err)
-		}
-		return base.Between(loV, hiV), nil
-	}
-	return expr.Expr{}, fmt.Errorf("unknown method %q", method)
-}
-
-// dispatchFreeFn covers top-level constructors reachable without a
-// column receiver: `col(x)`, `lit(v)`, `sum("x")`, and the
-// when/then/otherwise chain.
-func dispatchFreeFn(name string, args []expr.Expr) (expr.Expr, error) {
-	switch name {
-	case "col":
-		s, err := oneString(name, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return expr.Col(s), nil
-	case "lit":
-		if len(args) != 1 {
-			return expr.Expr{}, fmt.Errorf("lit takes 1 argument, got %d", len(args))
-		}
-		v, err := literalValue(args[0])
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return expr.Lit(v), nil
-	case "sum", "mean", "min", "max", "count", "first", "last",
-		"median", "std", "var", "n_unique":
-		s, err := oneString(name, args)
-		if err != nil {
-			return expr.Expr{}, err
-		}
-		return aggByName(expr.Col(s), name)
-	case "abs", "sqrt", "exp", "log", "log2", "log10", "sign",
-		"floor", "ceil":
-		if len(args) != 1 {
-			return expr.Expr{}, fmt.Errorf("%s takes 1 argument, got %d", name, len(args))
-		}
-		return dispatchMethod(args[0], name, nil)
-	case "coalesce":
-		if len(args) == 0 {
-			return expr.Expr{}, fmt.Errorf("coalesce requires at least one argument")
-		}
-		return expr.Coalesce(args...), nil
-	}
-	return expr.Expr{}, fmt.Errorf("unknown function %q", name)
-}
-
-func aggByName(base expr.Expr, name string) (expr.Expr, error) {
-	return dispatchMethod(base, name, nil)
-}
-
-// --- arg helpers ------------------------------------------------
-
-func oneString(op string, args []expr.Expr) (string, error) {
-	if len(args) != 1 {
-		return "", fmt.Errorf("%s takes 1 argument, got %d", op, len(args))
-	}
-	return stringArg(op, args[0])
-}
-
-func twoStrings(op string, args []expr.Expr) (string, string, error) {
-	if len(args) != 2 {
-		return "", "", fmt.Errorf("%s takes 2 arguments, got %d", op, len(args))
-	}
-	a, err := stringArg(op, args[0])
-	if err != nil {
-		return "", "", err
-	}
-	b, err := stringArg(op, args[1])
-	if err != nil {
-		return "", "", err
-	}
-	return a, b, nil
-}
-
-func oneInt(op string, args []expr.Expr) (int, error) {
-	if len(args) != 1 {
-		return 0, fmt.Errorf("%s takes 1 argument, got %d", op, len(args))
-	}
-	return intArg(op, args[0])
-}
-
-func oneIntOrZero(op string, args []expr.Expr) (int, error) {
-	if len(args) == 0 {
-		return 0, nil
-	}
-	return oneInt(op, args)
-}
-
-func twoInts(op string, args []expr.Expr) (int, int, error) {
-	if len(args) != 2 {
-		return 0, 0, fmt.Errorf("%s takes 2 arguments, got %d", op, len(args))
-	}
-	a, err := intArg(op, args[0])
-	if err != nil {
-		return 0, 0, err
-	}
-	b, err := intArg(op, args[1])
-	if err != nil {
-		return 0, 0, err
-	}
-	return a, b, nil
-}
-
-func oneFloat(op string, args []expr.Expr) (float64, error) {
-	if len(args) != 1 {
-		return 0, fmt.Errorf("%s takes 1 argument, got %d", op, len(args))
-	}
-	return floatArg(op, args[0])
-}
-
-func stringInt(op string, args []expr.Expr) (string, int, error) {
-	if len(args) != 2 {
-		return "", 0, fmt.Errorf("%s takes 2 arguments, got %d", op, len(args))
-	}
-	s, err := stringArg(op, args[0])
-	if err != nil {
-		return "", 0, err
-	}
-	i, err := intArg(op, args[1])
-	if err != nil {
-		return "", 0, err
-	}
-	return s, i, nil
-}
-
-func stringList(op string, args []expr.Expr) ([]string, error) {
-	out := make([]string, len(args))
-	for i, a := range args {
-		s, err := stringArg(op, a)
+	if p.peek().kind == tokLParen {
+		args, kw, end, err := p.parseCallArgs(t.text)
 		if err != nil {
 			return nil, err
 		}
-		out[i] = s
+		return p.parsePostfix(&Node{Kind: KindCall, Pos: t.start, End: end, Name: t.text, NamePos: t.start,
+			Args: args, Kw: kw, CallParens: true})
 	}
-	return out, nil
+	return p.parsePostfix(&Node{Kind: KindCol, Pos: t.start, End: t.end, Name: t.text, NamePos: t.start})
 }
 
-func stringArg(op string, e expr.Expr) (string, error) {
-	lit, ok := asLiteral(e)
-	if !ok {
-		return "", fmt.Errorf("%s: expected string literal", op)
+func (p *parser) parseWhen(first token) (*Node, error) {
+	if err := p.enter(); err != nil {
+		return nil, err
 	}
-	s, ok := lit.(string)
-	if !ok {
-		return "", fmt.Errorf("%s: expected string, got %T", op, lit)
+	defer func() { p.depth-- }()
+	w := &Node{Kind: KindWhen, Pos: first.start, NamePos: first.start}
+	kw := first
+	for {
+		pred, err := p.operand(kw, p.parseOr)
+		if err != nil {
+			return nil, err
+		}
+		t := p.peek()
+		if !isKeyword(t, "then") {
+			e := errSpan(t.start, t.end, "expected `then` after the `when` condition, got %s", describe(t))
+			if t.kind == tokIdent && script.Closest(strings.ToLower(t.text), []string{"then"}) != "" {
+				e.Fix = "then"
+				return nil, e.withHint(`did you mean "then"?`)
+			}
+			return nil, e.withHint("write it as when COND then VALUE otherwise VALUE")
+		}
+		p.advance()
+		then, err := p.operand(t, p.parseOr)
+		if err != nil {
+			return nil, err
+		}
+		w.Args = append(w.Args, pred, then)
+		w.End = then.End
+		if !isKeyword(p.peek(), "when") {
+			break
+		}
+		kw = p.advance()
 	}
-	return s, nil
+	if t := p.peek(); isKeyword(t, "otherwise") {
+		p.advance()
+		other, err := p.operand(t, p.parseOr)
+		if err != nil {
+			return nil, err
+		}
+		w.Final = other
+		w.End = other.End
+	}
+	return w, nil
 }
 
-func intArg(op string, e expr.Expr) (int, error) {
-	lit, ok := asLiteral(e)
-	if !ok {
-		return 0, fmt.Errorf("%s: expected integer literal", op)
+func (p *parser) parseList() (*Node, error) {
+	open, err := p.expect(tokLBrack, "")
+	if err != nil {
+		return nil, err
 	}
-	switch v := lit.(type) {
-	case int64:
-		return int(v), nil
-	case int:
-		return v, nil
+	list := &Node{Kind: KindList, Pos: open.start}
+	if t := p.peek(); t.kind == tokRBrack {
+		p.advance()
+		list.End = t.end
+		return list, nil
 	}
-	return 0, fmt.Errorf("%s: expected integer, got %T", op, lit)
+	for {
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		list.Args = append(list.Args, e)
+		if p.peek().kind != tokComma {
+			break
+		}
+		p.advance()
+		if p.peek().kind == tokRBrack {
+			break // trailing comma
+		}
+	}
+	cl, err := p.expect(tokRBrack, "to close the list")
+	if err != nil {
+		return nil, err
+	}
+	list.End = cl.end
+	return list, nil
 }
 
-func floatArg(op string, e expr.Expr) (float64, error) {
-	lit, ok := asLiteral(e)
-	if !ok {
-		return 0, fmt.Errorf("%s: expected numeric literal", op)
+func (p *parser) parsePostfix(base *Node) (*Node, error) {
+	for p.peek().kind == tokDot {
+		dot := p.advance()
+		member := p.peek()
+		if member.kind != tokIdent {
+			return nil, errSpan(member.start, member.end, "expected a method name after '.', got %s", describe(member))
+		}
+		p.advance()
+		call := &Node{Kind: KindCall, Pos: base.Pos, End: member.end, Name: member.text, NamePos: member.start, Recv: base}
+		if _, isNS := namespaces[member.text]; isNS {
+			if p.peek().kind != tokDot {
+				return nil, errSpan(dot.start, member.end, ".%s must be followed by a method", member.text).
+					withHint("as in x.%s.%s()", member.text, sampleMethod(member.text))
+			}
+			p.advance()
+			method := p.peek()
+			if method.kind != tokIdent {
+				return nil, errSpan(method.start, method.end, "expected a %s method name, got %s", member.text, describe(method))
+			}
+			p.advance()
+			call.NS, call.Name, call.NamePos, call.End = member.text, method.text, method.start, method.end
+		}
+		// Parentheses are optional for a call without arguments:
+		// `price.sum` reads the same as `price.sum()`.
+		if p.peek().kind == tokLParen {
+			args, kw, end, err := p.parseCallArgs(call.Name)
+			if err != nil {
+				return nil, err
+			}
+			call.Args, call.Kw, call.End, call.CallParens = args, kw, end, true
+		}
+		base = call
 	}
-	switch v := lit.(type) {
-	case float64:
-		return v, nil
-	case int64:
-		return float64(v), nil
-	case int:
-		return float64(v), nil
-	}
-	return 0, fmt.Errorf("%s: expected numeric, got %T", op, lit)
+	return base, nil
 }
 
-func asLiteral(e expr.Expr) (any, bool) {
-	n, ok := e.Node().(expr.LitNode)
-	if !ok {
-		return nil, false
+func sampleMethod(ns string) string {
+	switch ns {
+	case "str":
+		return "to_uppercase"
+	case "dt":
+		return "year"
+	case "list", "arr":
+		return "len"
+	case "name":
+		return "suffix(\"_x\")"
 	}
-	return n.Value, true
+	return "method"
 }
 
-func literalValue(e expr.Expr) (any, error) {
-	v, ok := asLiteral(e)
-	if !ok {
-		return nil, fmt.Errorf("expected a literal")
+// parseCallArgs parses `( arg, name=arg, ... )` and leaves the parser
+// after the close paren, whose end offset it returns.
+func (p *parser) parseCallArgs(fn string) ([]*Node, []KwArg, int, error) {
+	open, err := p.expect(tokLParen, "")
+	if err != nil {
+		return nil, nil, 0, err
 	}
-	return v, nil
-}
-
-func dtypeByName(name string) (dtype.DType, error) {
-	switch strings.ToLower(name) {
-	case "i64", "int64":
-		return dtype.Int64(), nil
-	case "i32", "int32":
-		return dtype.Int32(), nil
-	case "f64", "float64":
-		return dtype.Float64(), nil
-	case "f32", "float32":
-		return dtype.Float32(), nil
-	case "bool":
-		return dtype.Bool(), nil
-	case "str", "string", "utf8":
-		return dtype.String(), nil
+	var args []*Node
+	var kw []KwArg
+	if t := p.peek(); t.kind == tokRParen {
+		p.advance()
+		return nil, nil, t.end, nil
 	}
-	return dtype.DType{}, fmt.Errorf("unknown dtype %q", name)
+	for {
+		if p.peek().kind == tokIdent && p.peekAt(1).kind == tokOp && p.peekAt(1).text == "=" {
+			name := p.advance()
+			eq := p.advance()
+			v, err := p.operand(eq, p.parseExpr)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			for _, prev := range kw {
+				if prev.Name == name.text {
+					return nil, nil, 0, errSpan(name.start, name.end, "keyword argument %q given twice", name.text)
+				}
+			}
+			kw = append(kw, KwArg{Name: name.text, NamePos: name.start, Val: v})
+		} else {
+			if len(kw) > 0 {
+				t := p.peek()
+				return nil, nil, 0, errSpan(t.start, t.end, "positional argument after keyword argument").
+					withHint("move it before %s=", kw[0].Name)
+			}
+			a, err := p.parseExpr()
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			args = append(args, a)
+		}
+		if p.peek().kind != tokComma {
+			break
+		}
+		p.advance()
+		if p.peek().kind == tokRParen {
+			break // trailing comma
+		}
+	}
+	cl, err := p.expect(tokRParen, "to close the call to "+fn+" at column "+strconv.Itoa(utf8.RuneCountInString(p.src[:open.start])+1))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return args, kw, cl.end, nil
 }

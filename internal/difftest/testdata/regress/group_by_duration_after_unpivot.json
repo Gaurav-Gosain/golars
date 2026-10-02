@@ -1,0 +1,97 @@
+{
+  "name": "group_by_duration_after_unpivot",
+  "status": "fixed",
+  "note": "duration keys 0 and -2^61 collided after unpivot (same root cause as group_by_duration_far_keys) (golars 1 rows, polars 2 rows)",
+  "plan": {
+    "seed": 200944,
+    "ops": [
+      {
+        "op": "unpivot",
+        "on": [
+          "c2"
+        ],
+        "index": [
+          "c0",
+          "c1"
+        ]
+      },
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "col",
+                "name": "value"
+              },
+              {
+                "k": "raw",
+                "val": "o2"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c1"
+        ],
+        "maintain_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "f32",
+      "values": [
+        null,
+        null
+      ]
+    },
+    {
+      "name": "c1",
+      "type": "duration[us]",
+      "values": [
+        0,
+        -2305843009213693952
+      ]
+    },
+    {
+      "name": "c2",
+      "type": "datetime[us]",
+      "values": [
+        null,
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "duration[us]",
+        "values": [
+          0,
+          -2305843009213693952
+        ]
+      },
+      {
+        "name": "o2",
+        "type": "list[datetime[us]]",
+        "values": [
+          [
+            null
+          ],
+          [
+            null
+          ]
+        ]
+      }
+    ]
+  }
+}

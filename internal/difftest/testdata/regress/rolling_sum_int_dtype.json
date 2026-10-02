@@ -1,0 +1,59 @@
+{
+  "name": "rolling_sum_int_dtype",
+  "status": "fixed",
+  "note": "rolling_sum on i32 returns f64; polars keeps i32 (golars {o1: f64})",
+  "plan": {
+    "seed": 200260,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "rolling_sum",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c4"
+                  },
+                  {
+                    "k": "raw",
+                    "val": 2
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c4",
+      "type": "i32",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "o1",
+        "type": "i32",
+        "values": []
+      }
+    ]
+  }
+}

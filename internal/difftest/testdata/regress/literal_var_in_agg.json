@@ -1,0 +1,70 @@
+{
+  "name": "literal_var_in_agg",
+  "status": "fixed",
+  "note": "var of a literal in group_by.agg: golars 0, polars null (literal broadcast to group length) (column \"o2\" row 0: golars 0, polars null)",
+  "plan": {
+    "seed": 200293,
+    "ops": [
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "var",
+                "args": [
+                  {
+                    "k": "lit",
+                    "val": -3
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o2"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c3"
+        ]
+      }
+    ],
+    "order": {
+      "mode": "unordered"
+    }
+  },
+  "left": [
+    {
+      "name": "c3",
+      "type": "i32",
+      "values": [
+        null,
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c3",
+        "type": "i32",
+        "values": [
+          null
+        ]
+      },
+      {
+        "name": "o2",
+        "type": "f64",
+        "values": [
+          null
+        ]
+      }
+    ]
+  }
+}

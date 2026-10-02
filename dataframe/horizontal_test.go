@@ -53,8 +53,9 @@ func TestSumHorizontalIgnoreNulls(t *testing.T) {
 	}
 	defer out.Release()
 
-	arr := out.Chunk(0).(*array.Float64)
-	want := []float64{6, 2, 9}
+	// polars keeps the integer supertype.
+	arr := out.Chunk(0).(*array.Int64)
+	want := []int64{6, 2, 9}
 	for i, v := range want {
 		if arr.Value(i) != v {
 			t.Fatalf("row %d: got %v want %v", i, arr.Value(i), v)
@@ -80,7 +81,7 @@ func TestSumHorizontalPropagateNulls(t *testing.T) {
 	}
 	defer out.Release()
 
-	arr := out.Chunk(0).(*array.Float64)
+	arr := out.Chunk(0).(*array.Int64)
 	if !arr.IsValid(0) || arr.Value(0) != 2 {
 		t.Fatalf("row 0: want valid 2, got valid=%v value=%v", arr.IsValid(0), arr.Value(0))
 	}
@@ -138,10 +139,10 @@ func TestMinMaxHorizontal(t *testing.T) {
 	}
 	defer mx.Release()
 
-	mnArr := mn.Chunk(0).(*array.Float64)
-	mxArr := mx.Chunk(0).(*array.Float64)
-	mnWant := []float64{1, 2, 3}
-	mxWant := []float64{4, 2, 6}
+	mnArr := mn.Chunk(0).(*array.Int64)
+	mxArr := mx.Chunk(0).(*array.Int64)
+	mnWant := []int64{1, 2, 3}
+	mxWant := []int64{4, 2, 6}
 	for i := range mnWant {
 		if mnArr.Value(i) != mnWant[i] {
 			t.Fatalf("min row %d: got %v want %v", i, mnArr.Value(i), mnWant[i])
@@ -253,16 +254,20 @@ func TestSumAllReturnsSingleRow(t *testing.T) {
 	if out.Height() != 1 {
 		t.Fatalf("height: got %d want 1", out.Height())
 	}
-	if out.Width() != 2 {
-		t.Fatalf("width: got %d want 2 (numeric columns only)", out.Width())
+	// polars keeps every column: a string sums to a null string.
+	if out.Width() != 3 {
+		t.Fatalf("width: got %d want 3", out.Width())
 	}
 	names := out.ColumnNames()
-	if names[0] != "a" || names[1] != "b" {
+	if names[0] != "a" || names[1] != "b" || names[2] != "s" {
 		t.Fatalf("names: got %v", names)
 	}
 	col, _ := out.Column("a")
-	if col.Chunk(0).(*array.Float64).Value(0) != 10 {
-		t.Fatalf("sum(a): got %v want 10", col.Chunk(0).(*array.Float64).Value(0))
+	if col.Chunk(0).(*array.Int64).Value(0) != 10 {
+		t.Fatalf("sum(a): got %v want 10", col.Chunk(0).(*array.Int64).Value(0))
+	}
+	if sc, _ := out.Column("s"); sc.NullCount() != 1 {
+		t.Fatalf("sum(s): want null")
 	}
 }
 
@@ -315,11 +320,11 @@ func TestCountAllAndNullCountAll(t *testing.T) {
 
 	ca, _ := cnt.Column("a")
 	cb, _ := cnt.Column("b")
-	if ca.Chunk(0).(*array.Int64).Value(0) != 3 {
-		t.Fatalf("count(a): got %v want 3", ca.Chunk(0).(*array.Int64).Value(0))
+	if ca.Chunk(0).(*array.Uint32).Value(0) != 3 {
+		t.Fatalf("count(a): got %v want 3", ca.Chunk(0).(*array.Uint32).Value(0))
 	}
-	if cb.Chunk(0).(*array.Int64).Value(0) != 3 {
-		t.Fatalf("count(b): got %v want 3", cb.Chunk(0).(*array.Int64).Value(0))
+	if cb.Chunk(0).(*array.Uint32).Value(0) != 3 {
+		t.Fatalf("count(b): got %v want 3", cb.Chunk(0).(*array.Uint32).Value(0))
 	}
 
 	nulls, err := df.NullCountAll(context.Background())
@@ -329,10 +334,10 @@ func TestCountAllAndNullCountAll(t *testing.T) {
 	defer nulls.Release()
 	na, _ := nulls.Column("a")
 	nb, _ := nulls.Column("b")
-	if na.Chunk(0).(*array.Int64).Value(0) != 1 {
-		t.Fatalf("nulls(a): got %v want 1", na.Chunk(0).(*array.Int64).Value(0))
+	if na.Chunk(0).(*array.Uint32).Value(0) != 1 {
+		t.Fatalf("nulls(a): got %v want 1", na.Chunk(0).(*array.Uint32).Value(0))
 	}
-	if nb.Chunk(0).(*array.Int64).Value(0) != 1 {
-		t.Fatalf("nulls(b): got %v want 1", nb.Chunk(0).(*array.Int64).Value(0))
+	if nb.Chunk(0).(*array.Uint32).Value(0) != 1 {
+		t.Fatalf("nulls(b): got %v want 1", nb.Chunk(0).(*array.Uint32).Value(0))
 	}
 }

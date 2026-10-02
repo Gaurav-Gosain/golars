@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
@@ -23,6 +24,11 @@ import (
 type EvalContext struct {
 	Alloc       memory.Allocator
 	Parallelism int
+
+	// inGroup is set while an expression runs on one group of a
+	// group_by().agg() or over(); a few functions follow polars'
+	// group semantics there (quantile of bools is null).
+	inGroup bool
 }
 
 // Default returns an EvalContext backed by memory.DefaultAllocator.
@@ -49,7 +55,7 @@ func evalNode(ctx context.Context, ec EvalContext, e expr.Expr, df *dataframe.Da
 		return col.Clone(), nil
 
 	case expr.LitNode:
-		return literalSeries(n, df.Height(), ec.Alloc)
+		return literalSeries(n, 1, ec.Alloc)
 
 	case expr.BinaryNode:
 		return evalBinary(ctx, ec, n, df)
@@ -101,23 +107,56 @@ func evalNode(ctx context.Context, ec EvalContext, e expr.Expr, df *dataframe.Da
 }
 
 func evalBinary(ctx context.Context, ec EvalContext, n expr.BinaryNode, df *dataframe.DataFrame) (*series.Series, error) {
+	if out, took, err := evalTemporalBinary(ctx, ec, n, df); took {
+		return out, err
+	}
 	// Fast path: one side is a scalar literal. Route to the Lit kernels
 	// so we skip materialising the literal as an n-row series and halve
 	// the memory traffic of the reduction.
 	if out, took, err := evalBinaryLiteralFast(ctx, ec, n, df); took || err != nil {
 		return out, err
 	}
-	left, err := evalNode(ctx, ec, n.Left, df)
+	left, err := evalOperand(ctx, ec, n.Left, n.Right, df)
 	if err != nil {
 		return nil, err
 	}
-	defer left.Release()
-	right, err := evalNode(ctx, ec, n.Right, df)
+	right, err := evalOperand(ctx, ec, n.Right, n.Left, df)
 	if err != nil {
+		left.Release()
 		return nil, err
 	}
-	defer right.Release()
+	ss := []*series.Series{left, right}
+	defer releaseAll(ss)
+	if !isLogicalOp(n.Op) {
+		if err := adoptDynLiterals(ctx, ec, []expr.Expr{n.Left, n.Right}, ss); err != nil {
+			return nil, err
+		}
+	}
+	return evalBinaryOperands(ctx, ec, n, ss[0], ss[1])
+}
 
+// evalBinaryOperands applies n to already evaluated operands. It borrows
+// left and right.
+func evalBinaryOperands(ctx context.Context, ec EvalContext, n expr.BinaryNode, left, right *series.Series) (*series.Series, error) {
+	// Broadcast a scalar side (an aggregation or a length-1 literal)
+	// to the other side, as polars does for `x - x.mean()`.
+	if left.Len() != right.Len() && (left.Len() == 1 || right.Len() == 1) {
+		lc, rc := left.Clone(), right.Clone()
+		bl, br, err := broadcastPair(lc, rc, ec)
+		if err != nil {
+			lc.Release()
+			rc.Release()
+			return nil, err
+		}
+		defer bl.Release()
+		defer br.Release()
+		left, right = bl, br
+	}
+
+	if n.Op == expr.OpAdd && left.DType().IsString() && right.DType().IsString() {
+		// polars: `+` on strings concatenates (null if either is null).
+		return concatStrings(left, right, ec)
+	}
 	lhs, rhs, err := promoteBinary(ctx, ec, left, right)
 	if err != nil {
 		return nil, err
@@ -130,6 +169,11 @@ func evalBinary(ctx context.Context, ec EvalContext, n expr.BinaryNode, df *data
 	}
 
 	opts := kernelOpts(ec)
+	if n.Op == expr.OpDiv && lhs.DType().IsInteger() {
+		// polars `/` is true division: integers divide as f64 (x / 0 is
+		// inf or NaN). FloorDiv keeps integer semantics.
+		return trueDivide(ctx, ec, lhs, rhs)
+	}
 	switch n.Op {
 	case expr.OpAdd:
 		return compute.Add(ctx, lhs, rhs, opts...)
@@ -159,6 +203,21 @@ func evalBinary(ctx context.Context, ec EvalContext, n expr.BinaryNode, df *data
 	return nil, fmt.Errorf("eval: unknown binary op %d", n.Op)
 }
 
+func trueDivide(ctx context.Context, ec EvalContext, lhs, rhs *series.Series) (*series.Series, error) {
+	opts := kernelOpts(ec)
+	lf, err := compute.Cast(ctx, lhs, dtype.Float64(), opts...)
+	if err != nil {
+		return nil, err
+	}
+	defer lf.Release()
+	rf, err := compute.Cast(ctx, rhs, dtype.Float64(), opts...)
+	if err != nil {
+		return nil, err
+	}
+	defer rf.Release()
+	return compute.Div(ctx, lf, rf, opts...)
+}
+
 func evalUnary(ctx context.Context, ec EvalContext, n expr.UnaryNode, df *dataframe.DataFrame) (*series.Series, error) {
 	inner, err := evalNode(ctx, ec, n.Arg, df)
 	if err != nil {
@@ -170,25 +229,20 @@ func evalUnary(ctx context.Context, ec EvalContext, n expr.UnaryNode, df *datafr
 	case expr.OpNot:
 		return compute.Not(ctx, inner, kernelOpts(ec)...)
 	case expr.OpNeg:
-		switch inner.DType().ID() {
-		case dtype.Int32().ID(), dtype.Int64().ID():
-			one, err := series.FromInt64("one", fillInt64(-1, inner.Len()), nil,
-				series.WithAllocator(ec.Alloc))
-			if err != nil {
-				return nil, err
-			}
-			defer one.Release()
-			return compute.Mul(ctx, inner, one, kernelOpts(ec)...)
-		case dtype.Float32().ID(), dtype.Float64().ID():
-			one, err := series.FromFloat64("one", fillFloat64(-1, inner.Len()), nil,
-				series.WithAllocator(ec.Alloc))
-			if err != nil {
-				return nil, err
-			}
-			defer one.Release()
-			return compute.Mul(ctx, inner, one, kernelOpts(ec)...)
+		if out, ok, err := negateTemporal(ctx, ec, inner); ok {
+			return out, err
 		}
-		return nil, fmt.Errorf("eval: Neg on %s not supported", inner.DType())
+		dt := inner.DType()
+		switch {
+		case dt.IsFloating():
+			// Scalar kernel: no n-row column of -1 to build.
+			return compute.MulLit(ctx, inner, float64(-1), kernelOpts(ec)...)
+		case dt.IsInteger() && !isUnsignedID(dt.ID()):
+			// Wraps like polars: -(-128 as i8) is -128.
+			return compute.MulLit(ctx, inner, int64(-1), kernelOpts(ec)...)
+		}
+		// polars: "`neg` operation not supported for dtype `u32`".
+		return nil, fmt.Errorf("eval: `neg` operation not supported for dtype %s", dt)
 	}
 	return nil, fmt.Errorf("eval: unknown unary op %d", n.Op)
 }
@@ -199,8 +253,47 @@ func evalAgg(ctx context.Context, ec EvalContext, n expr.AggNode, df *dataframe.
 		return nil, err
 	}
 	defer inner.Release()
+	if out, ok, err := temporalAgg(n, inner, ec); ok {
+		return out, err
+	}
+	if out, ok, err := minMaxNonNumeric(n, inner, ec); ok {
+		return out, err
+	}
+	out, err := evalAggValues(ctx, ec, n, inner)
+	if err != nil {
+		return nil, err
+	}
+	switch n.Op {
+	case expr.AggSum:
+		return castAggResult(ec, "sum", inner.DType(), out)
+	case expr.AggMin:
+		return castAggResult(ec, "min", inner.DType(), out)
+	case expr.AggMax:
+		return castAggResult(ec, "max", inner.DType(), out)
+	case expr.AggMean:
+		return castAggResult(ec, "mean", inner.DType(), out)
+	}
+	return out, nil
+}
+
+// evalAggValues computes an AggNode over an evaluated input: integer
+// results in i64, float results in f64 (evalAgg casts them to the
+// polars dtype).
+func evalAggValues(ctx context.Context, ec EvalContext, n expr.AggNode, inner *series.Series) (*series.Series, error) {
 	name := expr.OutputName(n.Inner)
 	opts := kernelOpts(ec)
+	switch inner.DType().ID() {
+	case arrow.INT8, arrow.INT16, arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.BOOL:
+		// The reduction kernels take i32, i64 and floats.
+		if n.Op == expr.AggSum || n.Op == expr.AggMin || n.Op == expr.AggMax {
+			wide, err := compute.Cast(ctx, inner, dtype.Int64(), opts...)
+			if err != nil {
+				return nil, err
+			}
+			defer wide.Release()
+			inner = wide
+		}
+	}
 
 	switch n.Op {
 	case expr.AggSum:
@@ -278,22 +371,24 @@ func evalAgg(ctx context.Context, ec EvalContext, n expr.AggNode, df *dataframe.
 		return series.FromInt64(name, vs, valid, series.WithAllocator(ec.Alloc))
 
 	case expr.AggCount:
-		v := int64(compute.Count(inner))
-		return series.FromInt64(name, []int64{v}, nil, series.WithAllocator(ec.Alloc))
+		// polars returns counts as u32.
+		v := uint32(compute.Count(inner))
+		return series.FromUint32(name, []uint32{v}, nil, series.WithAllocator(ec.Alloc))
 
 	case expr.AggNullCount:
-		v := int64(compute.NullCount(inner))
-		return series.FromInt64(name, []int64{v}, nil, series.WithAllocator(ec.Alloc))
+		v := uint32(compute.NullCount(inner))
+		return series.FromUint32(name, []uint32{v}, nil, series.WithAllocator(ec.Alloc))
 
 	case expr.AggFirst:
 		if inner.Len() == 0 {
-			return nil, fmt.Errorf("eval: First on empty input")
+			// polars returns null for the first value of an empty column.
+			return series.FullNull(name, inner.Chunked().DataType(), 1, series.WithAllocator(ec.Alloc))
 		}
 		return inner.Slice(0, 1)
 
 	case expr.AggLast:
 		if inner.Len() == 0 {
-			return nil, fmt.Errorf("eval: Last on empty input")
+			return series.FullNull(name, inner.Chunked().DataType(), 1, series.WithAllocator(ec.Alloc))
 		}
 		return inner.Slice(inner.Len()-1, 1)
 	}
@@ -301,8 +396,24 @@ func evalAgg(ctx context.Context, ec EvalContext, n expr.AggNode, df *dataframe.
 }
 
 func literalSeries(l expr.LitNode, n int, alloc memory.Allocator) (*series.Series, error) {
+	s, err := literalSeriesRaw(l, n, alloc)
+	if err != nil || l.Value == nil || !l.DType.IsNumeric() || s.DType().Equal(l.DType) {
+		return s, err
+	}
+	// Numeric values are held as int64 or float64; materialize them in
+	// the literal's dtype (i32 for a small untyped int, f32 for a
+	// float32 literal).
+	defer s.Release()
+	return compute.Cast(context.Background(), s, l.DType, compute.WithAllocator(alloc))
+}
+
+func literalSeriesRaw(l expr.LitNode, n int, alloc memory.Allocator) (*series.Series, error) {
+	if s, ok, err := temporalLiteralSeries(l, n, EvalContext{Alloc: alloc}); ok {
+		return s, err
+	}
 	if l.Value == nil {
-		return series.Empty(l.DType.String(), l.DType), nil
+		// A typed null literal broadcasts like any other literal.
+		return series.FullNull("literal", l.DType.Arrow(), n, series.WithAllocator(alloc))
 	}
 	switch v := l.Value.(type) {
 	case int64:
@@ -351,6 +462,15 @@ func fillFloat64(v float64, n int) []float64 {
 
 func promoteBinary(ctx context.Context, ec EvalContext, left, right *series.Series) (*series.Series, *series.Series, error) {
 	if left.DType().Equal(right.DType()) {
+		return left, right, nil
+	}
+	if l, r, ok, err := promoteExtra(ctx, ec, left, right); ok {
+		return l, r, err
+	}
+	if (left.DType().IsDictionary() || right.DType().IsDictionary()) &&
+		(left.DType().IsString() || right.DType().IsString() || (left.DType().IsDictionary() && right.DType().IsDictionary())) {
+		// Categorical against str (or another categorical) compares by
+		// category string; compute decodes the dictionary side.
 		return left, right, nil
 	}
 	lInt := left.DType().IsInteger()
@@ -418,4 +538,50 @@ func kernelOpts(ec EvalContext) []compute.Option {
 		opts = append(opts, compute.WithParallelism(ec.Parallelism))
 	}
 	return opts
+}
+
+// minMaxNonNumeric handles min and max of string and bool inputs:
+// strings compare bytewise, and for bools min is all and max is any.
+// Nulls are skipped; an all-null input gives null.
+func minMaxNonNumeric(n expr.AggNode, inner *series.Series, ec EvalContext) (*series.Series, bool, error) {
+	if n.Op != expr.AggMin && n.Op != expr.AggMax {
+		return nil, false, nil
+	}
+	dt := inner.DType()
+	if !dt.IsString() && !dt.IsBool() {
+		return nil, false, nil
+	}
+	name := expr.OutputName(n.Inner)
+	var best any
+	for _, v := range inner.ToList() {
+		if v == nil {
+			continue
+		}
+		if best == nil {
+			best = v
+			continue
+		}
+		switch x := v.(type) {
+		case string:
+			b := best.(string)
+			if (n.Op == expr.AggMin && x < b) || (n.Op == expr.AggMax && x > b) {
+				best = x
+			}
+		case bool:
+			b := best.(bool)
+			if (n.Op == expr.AggMin && !x && b) || (n.Op == expr.AggMax && x && !b) {
+				best = x
+			}
+		}
+	}
+	if best == nil {
+		out, err := series.FullNull(name, dt.Arrow(), 1, seriesAlloc(ec))
+		return out, true, err
+	}
+	if s, ok := best.(string); ok {
+		out, err := series.FromString(name, []string{s}, nil, seriesAlloc(ec))
+		return out, true, err
+	}
+	out, err := series.FromBool(name, []bool{best.(bool)}, nil, seriesAlloc(ec))
+	return out, true, err
 }

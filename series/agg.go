@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 )
 
@@ -114,25 +115,40 @@ func (s *Series) Min() (float64, error) {
 		return float64(m), nil
 	case *array.Float64:
 		raw := a.Float64Values()
-		m := math.Inf(1)
+		m, seen := math.Inf(1), false
 		for i, v := range raw {
-			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(v) && v < m {
-				m = v
+			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(v) {
+				seen = true
+				if v < m {
+					m = v
+				}
 			}
 		}
-		return m, nil
+		return nanIfUnseen(m, seen), nil
 	case *array.Float32:
 		raw := a.Float32Values()
-		m := math.Inf(1)
+		m, seen := math.Inf(1), false
 		for i, v := range raw {
 			f := float64(v)
-			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(f) && f < m {
-				m = f
+			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(f) {
+				seen = true
+				if f < m {
+					m = f
+				}
 			}
 		}
-		return m, nil
+		return nanIfUnseen(m, seen), nil
 	}
 	return 0, fmt.Errorf("series: Min unsupported for dtype %s", s.DType())
+}
+
+// nanIfUnseen returns NaN when every non-null value was NaN, which is
+// the polars min/max result for such input.
+func nanIfUnseen(m float64, seen bool) float64 {
+	if !seen {
+		return math.NaN()
+	}
+	return m
 }
 
 // Max is the symmetric counterpart of Min.
@@ -162,23 +178,29 @@ func (s *Series) Max() (float64, error) {
 		return float64(m), nil
 	case *array.Float64:
 		raw := a.Float64Values()
-		m := math.Inf(-1)
+		m, seen := math.Inf(-1), false
 		for i, v := range raw {
-			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(v) && v > m {
-				m = v
+			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(v) {
+				seen = true
+				if v > m {
+					m = v
+				}
 			}
 		}
-		return m, nil
+		return nanIfUnseen(m, seen), nil
 	case *array.Float32:
 		raw := a.Float32Values()
-		m := math.Inf(-1)
+		m, seen := math.Inf(-1), false
 		for i, v := range raw {
 			f := float64(v)
-			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(f) && f > m {
-				m = f
+			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(f) {
+				seen = true
+				if f > m {
+					m = f
+				}
 			}
 		}
-		return m, nil
+		return nanIfUnseen(m, seen), nil
 	}
 	return 0, fmt.Errorf("series: Max unsupported for dtype %s", s.DType())
 }
@@ -270,7 +292,7 @@ func (s *Series) Quantile(q float64) (float64, error) {
 		}
 	case *array.Float64:
 		for i, v := range a.Float64Values() {
-			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(v) {
+			if a.NullN() == 0 || a.IsValid(i) {
 				vals = append(vals, v)
 			}
 		}
@@ -283,7 +305,7 @@ func (s *Series) Quantile(q float64) (float64, error) {
 	case *array.Float32:
 		for i, v := range a.Float32Values() {
 			f := float64(v)
-			if (a.NullN() == 0 || a.IsValid(i)) && !math.IsNaN(f) {
+			if a.NullN() == 0 || a.IsValid(i) {
 				vals = append(vals, f)
 			}
 		}
@@ -293,7 +315,7 @@ func (s *Series) Quantile(q float64) (float64, error) {
 	if len(vals) == 0 {
 		return math.NaN(), nil
 	}
-	sort.Float64s(vals)
+	sortNaNLast(vals)
 	pos := q * float64(len(vals)-1)
 	lo := int(math.Floor(pos))
 	hi := int(math.Ceil(pos))
@@ -302,6 +324,23 @@ func (s *Series) Quantile(q float64) (float64, error) {
 	}
 	frac := pos - float64(lo)
 	return vals[lo]*(1-frac) + vals[hi]*frac, nil
+}
+
+// sortNaNLast sorts ascending with NaN after every number, the polars
+// order, so a quantile that lands on a NaN is NaN like in polars
+// ([1, NaN].median() is NaN, [1, NaN, 3].median() is 3).
+func sortNaNLast(vals []float64) {
+	n := 0
+	for _, v := range vals {
+		if v == v {
+			vals[n] = v
+			n++
+		}
+	}
+	sort.Float64s(vals[:n])
+	for i := n; i < len(vals); i++ {
+		vals[i] = math.NaN()
+	}
 }
 
 // Any returns true when at least one non-null element is truthy. For
@@ -382,10 +421,65 @@ func (s *Series) Product() (float64, error) {
 				prod *= v
 			}
 		}
+	case *array.Float32:
+		for i, v := range a.Float32Values() {
+			if a.NullN() == 0 || a.IsValid(i) {
+				prod *= float64(v)
+			}
+		}
 	default:
+		if s.DType().IsInteger() {
+			p, err := s.ProductInt64()
+			return float64(p), err
+		}
 		return 0, fmt.Errorf("series: Product unsupported for dtype %s", s.DType())
 	}
 	return prod, nil
+}
+
+// ProductInt64 returns the product of the non-null values of an integer
+// Series as i64, the polars result dtype for integer products. Like
+// polars it wraps on overflow. Empty or all-null input returns 1.
+func (s *Series) ProductInt64() (int64, error) {
+	if !s.DType().IsInteger() {
+		return 0, fmt.Errorf("series: ProductInt64 needs an integer dtype, got %s", s.DType())
+	}
+	prod := int64(1)
+	for _, chunk := range s.Chunks() {
+		for i := range chunk.Len() {
+			if chunk.IsNull(i) {
+				continue
+			}
+			v, ok := intValueAt(chunk, i)
+			if !ok {
+				return 0, fmt.Errorf("series: ProductInt64 unsupported for dtype %s", s.DType())
+			}
+			prod *= v
+		}
+	}
+	return prod, nil
+}
+
+func intValueAt(a arrow.Array, i int) (int64, bool) {
+	switch x := a.(type) {
+	case *array.Int8:
+		return int64(x.Value(i)), true
+	case *array.Int16:
+		return int64(x.Value(i)), true
+	case *array.Int32:
+		return int64(x.Value(i)), true
+	case *array.Int64:
+		return x.Value(i), true
+	case *array.Uint8:
+		return int64(x.Value(i)), true
+	case *array.Uint16:
+		return int64(x.Value(i)), true
+	case *array.Uint32:
+		return int64(x.Value(i)), true
+	case *array.Uint64:
+		return int64(x.Value(i)), true
+	}
+	return 0, false
 }
 
 // HasNulls is a convenience predicate: NullCount() > 0.

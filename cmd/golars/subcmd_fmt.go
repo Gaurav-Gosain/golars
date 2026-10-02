@@ -7,23 +7,26 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Gaurav-Gosain/golars/script"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
-// newFmtCmd rewrites a .glr file into canonical form:
-//   - strip leading `.` (scripts use the bare form)
-//   - collapse runs of whitespace inside commands
-//   - normalize unknown-command detection to a lint warning
+// newFmtCmd rewrites a .glr file into canonical form. The rules live
+// in script/syntax.Format, shared with the language server.
 func newFmtCmd() *cobra.Command {
-	var write, printDiff bool
+	var write, printDiff, check bool
 	cmd := &cobra.Command{
-		Use:     "fmt FILE.glr [FILE.glr...]",
-		Short:   "canonicalize a .glr script",
-		Example: "golars fmt -w script.glr",
+		Use:   "fmt FILE.glr [FILE.glr...]",
+		Short: "canonicalize a .glr script",
+		Long: "Print each script in canonical form: lower-case commands without the\n" +
+			"leading dot, single spaces, `, ` in lists, formatted expressions, aligned\n" +
+			"`with NAME = ...` and `load PATH as NAME` runs and trailing comments.\n" +
+			"Lines with syntax errors are kept as written.",
+		Example: "golars fmt -w script.glr\ngolars fmt --check examples/*.glr",
 		Args:    cobra.MinimumNArgs(1),
 	}
 	cmd.Flags().BoolVarP(&write, "write", "w", false, "write result back to each file instead of stdout")
 	cmd.Flags().BoolVarP(&printDiff, "diff", "d", false, "print a unified diff of the formatting change")
+	cmd.Flags().BoolVarP(&check, "check", "c", false, "list files that are not formatted and exit 1 if any")
 	cmd.ValidArgsFunction = glrFileCompletion
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
 		failed := false
@@ -36,7 +39,15 @@ func newFmtCmd() *cobra.Command {
 			}
 			out := formatGlr(string(src))
 			switch {
+			case check:
+				if string(src) != out {
+					fmt.Println(p)
+					failed = true
+				}
 			case write:
+				if string(src) == out {
+					continue
+				}
 				if err := os.WriteFile(p, []byte(out), 0o644); err != nil {
 					fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
 					failed = true
@@ -50,108 +61,99 @@ func newFmtCmd() *cobra.Command {
 			}
 		}
 		if failed {
-			return errSubcommandFailed
+			return errSilent
 		}
 		return nil
 	}
 	return cmd
 }
 
-// formatGlr returns the canonical form of a .glr script. Leading dot
-// prefixes are stripped from lines that contain a recognised command
-// (so `.load x` becomes `load x`: the bare form is the one favoured
-// by script files; REPL still accepts both). Comments and blank lines
-// are preserved verbatim. Multiple spaces inside an argument list
-// collapse to a single space (string literals keep their interior
-// intact).
-func formatGlr(src string) string {
-	var buf strings.Builder
-	for raw := range strings.SplitSeq(src, "\n") {
-		line := raw
-		trimmed := strings.TrimSpace(line)
-		// Empty or comment line: preserve original whitespace.
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			buf.WriteString(line)
-			buf.WriteByte('\n')
-			continue
-		}
-		stripped := strings.TrimPrefix(trimmed, ".")
-		parts := splitKeepQuoted(stripped)
-		if len(parts) == 0 {
-			buf.WriteString(line)
-			buf.WriteByte('\n')
-			continue
-		}
-		first := strings.ToLower(parts[0])
-		if script.FindCommand(first) != nil {
-			parts[0] = first
-		}
-		buf.WriteString(strings.Join(parts, " "))
-		buf.WriteByte('\n')
-	}
-	// Avoid doubling the final newline if the original lacked one.
-	out := buf.String()
-	if !strings.HasSuffix(src, "\n") {
-		out = strings.TrimSuffix(out, "\n")
-	}
-	return out
-}
+// formatGlr returns the canonical form of a .glr script.
+func formatGlr(src string) string { return syntax.Format(src) }
 
-// splitKeepQuoted splits on whitespace but keeps "quoted strings" as a
-// single token. Crude but adequate for .glr's argument grammar.
-func splitKeepQuoted(s string) []string {
-	var out []string
-	var cur strings.Builder
-	inQuote := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '"' {
-			inQuote = !inQuote
-			cur.WriteByte(c)
-			continue
-		}
-		if !inQuote && (c == ' ' || c == '\t') {
-			if cur.Len() > 0 {
-				out = append(out, cur.String())
-				cur.Reset()
-			}
-			continue
-		}
-		cur.WriteByte(c)
-	}
-	if cur.Len() > 0 {
-		out = append(out, cur.String())
-	}
-	return out
-}
-
-// unifiedDiff produces a minimal unified-diff style output for two
-// strings. Just enough for `golars fmt -d` to show a user what
-// changed; not a full replacement for diff(1).
+// unifiedDiff renders the change from a to b as a unified diff with
+// three lines of context, computed from a longest common subsequence
+// of lines.
 func unifiedDiff(path, a, b string) string {
+	al := strings.Split(strings.TrimSuffix(a, "\n"), "\n")
+	bl := strings.Split(strings.TrimSuffix(b, "\n"), "\n")
+	// lcs[i][j] is the LCS length of al[i:] and bl[j:].
+	lcs := make([][]int, len(al)+1)
+	for i := range lcs {
+		lcs[i] = make([]int, len(bl)+1)
+	}
+	for i := len(al) - 1; i >= 0; i-- {
+		for j := len(bl) - 1; j >= 0; j-- {
+			if al[i] == bl[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else {
+				lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+			}
+		}
+	}
+	type op struct {
+		kind byte // ' ', '-', '+'
+		text string
+		ai   int
+		bi   int
+	}
+	var ops []op
+	i, j := 0, 0
+	for i < len(al) || j < len(bl) {
+		switch {
+		case i < len(al) && j < len(bl) && al[i] == bl[j]:
+			ops = append(ops, op{' ', al[i], i, j})
+			i++
+			j++
+		case i < len(al) && (j == len(bl) || lcs[i+1][j] >= lcs[i][j+1]):
+			ops = append(ops, op{'-', al[i], i, j})
+			i++
+		default:
+			ops = append(ops, op{'+', bl[j], i, j})
+			j++
+		}
+	}
 	var buf strings.Builder
-	aLines := strings.Split(a, "\n")
-	bLines := strings.Split(b, "\n")
-	fmt.Fprintf(&buf, "--- %s (original)\n+++ %s (formatted)\n", path, path)
-	// Line-by-line walk; for equal-length pairs we check line equality.
-	n := max(len(bLines), len(aLines))
-	for i := range n {
-		var av, bv string
-		if i < len(aLines) {
-			av = aLines[i]
-		}
-		if i < len(bLines) {
-			bv = bLines[i]
-		}
-		if av == bv {
+	fmt.Fprintf(&buf, "--- %s\n+++ %s (formatted)\n", path, path)
+	const context = 3
+	for k := 0; k < len(ops); {
+		if ops[k].kind == ' ' {
+			k++
 			continue
 		}
-		if av != "" {
-			fmt.Fprintf(&buf, "-%s\n", av)
+		start := max(k-context, 0)
+		end := k
+		for end < len(ops) {
+			if ops[end].kind != ' ' {
+				end++
+				continue
+			}
+			run := end
+			for run < len(ops) && ops[run].kind == ' ' {
+				run++
+			}
+			if run-end > 2*context || run == len(ops) {
+				end = min(end+context, len(ops))
+				break
+			}
+			end = run
 		}
-		if bv != "" {
-			fmt.Fprintf(&buf, "+%s\n", bv)
+		aLen, bLen := 0, 0
+		for _, o := range ops[start:end] {
+			if o.kind != '+' {
+				aLen++
+			}
+			if o.kind != '-' {
+				bLen++
+			}
 		}
+		fmt.Fprintf(&buf, "@@ -%d,%d +%d,%d @@\n", ops[start].ai+1, aLen, ops[start].bi+1, bLen)
+		for _, o := range ops[start:end] {
+			buf.WriteByte(o.kind)
+			buf.WriteString(o.text)
+			buf.WriteByte('\n')
+		}
+		k = end
 	}
 	return buf.String()
 }

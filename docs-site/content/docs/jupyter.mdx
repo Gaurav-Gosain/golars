@@ -1,0 +1,230 @@
+---
+title: Jupyter integration
+description: "golars-kernel runs .glr notebooks; jupyter/render and DataFrame.MimeBundle render frames in Go notebooks."
+icon: FileText
+---
+
+golars ships two ways into the notebook ecosystem:
+
+1. **`golars-kernel`** - a native Jupyter kernel for the `.glr`
+   scripting language. Each cell is a glr pipeline, the kernel runs
+   it, and frames render as HTML tables. No Go knowledge needed.
+
+2. **`jupyter/render` package** - HTML/markdown/text renderers for
+   `*dataframe.DataFrame`. Drop into [GoNB](https://github.com/janpfeifer/gonb)
+   so DataFrames show up as proper tables in a Go notebook.
+
+## golars-kernel: a kernel for .glr
+
+### Install
+
+After `golars` and `golars-kernel` are on your PATH (release tarball,
+`go install`, AUR `golars-bin`):
+
+```sh
+golars-kernel install
+# installed golars kernel
+#   binary: /home/you/.local/bin/golars-kernel
+#   spec:   /home/you/.local/share/jupyter/kernels/golars/kernel.json
+```
+
+Confirm Jupyter sees it:
+
+```sh
+jupyter kernelspec list
+# golars  /home/you/.local/share/jupyter/kernels/golars
+```
+
+Open JupyterLab, pick **golars (.glr)** from the launcher, and start
+typing:
+
+```
+load examples/script/data/orders.csv
+filter discount is_not_null
+groupby region revenue:sum:total
+sort total desc
+show
+```
+
+### What you get
+
+- HTML tables for every materialised frame (`show`, `head`, implicit
+  end-of-cell display).
+- Persistent state across cells: `load` in cell 1, `filter` in cell 2,
+  `groupby` in cell 3 - same model as the REPL.
+- `stash NAME` / `use NAME` for branching pipelines.
+- Tab completion on command names.
+- Hover docs on commands (Shift+Tab in classic notebook, hover panel
+  in JupyterLab).
+- `interrupt` button kills the in-flight cell by restarting the
+  embedded host process.
+
+### How it works
+
+The kernel binary (`cmd/golars-kernel`) speaks the Jupyter v5.3 wire
+protocol over ZeroMQ (pure-Go, no `libzmq`). Cell execution is
+delegated to a long-lived `golars kernel-host` subprocess via a tiny
+NDJSON protocol on stdin/stdout, which means the kernel uses the same
+dispatcher (`state.handle`) as the interactive REPL - no second
+implementation to drift.
+
+```
+JupyterLab ──── ZMQ(5) ───► golars-kernel ──── NDJSON ───► golars kernel-host
+                                                              (stateful REPL)
+```
+
+The host's `os.Stdout` and `os.Stderr` are piped per cell, so any
+table the dispatcher prints lands in the cell output as a `stream`
+message. Materialised frames also land as a `display_data` message
+with both `text/plain` (ASCII box) and `text/html` (styled table)
+mimetypes; Jupyter picks the richest one.
+
+A client can send `"structured": true` with a request to get tables
+as data instead of ASCII text. The reply then adds `outputs` (stdout
+text and tables in the order the cell produced them) and `table` (the
+auto-displayed frame). Each table is an
+`application/vnd.golars.table+json` object with `columns`, `dtypes`,
+`rows` (cell strings, `null` for nulls), `shape` and optional
+`row_gap` / `col_gap` where rows or columns were left out. The fields
+are optional, so older clients and hosts keep working. A terminal
+notebook built on a fork of
+[gopyter](https://github.com/Gaurav-Gosain/gopyter) uses them to draw
+themed tables; that fork is the planned home for Go notebooks but is
+not published yet. `DataFrame.MimeBundle()` and `Series.MimeBundle()`
+return the same table next to `text/plain` and `text/html`, and
+`DataFrame.HTML()` / `Series.HTML()` return just the HTML table.
+
+### Install flags
+
+```sh
+# default - per-user
+golars-kernel install
+
+# venv / conda prefix
+golars-kernel install --prefix "$VIRTUAL_ENV"
+
+# rename / customise
+golars-kernel install --name golars-py-py --display-name "golars (alt)"
+```
+
+### Locating the host binary
+
+`golars-kernel` finds the `golars` binary, in order:
+
+1. `$GOLARS_BIN` if set
+2. Sibling of the kernel binary (so release tarballs Just Work)
+3. `$PATH`
+
+Set `$GOLARS_BIN` if you want the kernel to use a specific build.
+
+### LSP integration (diagnostics, hover, completion)
+
+`golars-lsp` ships with the same release tarball. Wire it to
+JupyterLab via [jupyterlab-lsp](https://github.com/jupyter-lsp/jupyterlab-lsp):
+
+```sh
+pip install --user jupyterlab-lsp jupyter-lsp
+```
+
+Then add a server registration to
+`~/.jupyter/jupyter_server_config.py` (creates the file if missing):
+
+```python
+c = get_config()  # noqa: F821
+
+c.LanguageServerManager.language_servers = {
+    "golars-lsp": {
+        "version": 2,
+        "argv": ["golars-lsp"],
+        "languages": ["golars", "glr"],
+        "mime_types": ["text/x-glr"],
+        "display_name": "golars-lsp",
+    },
+}
+```
+
+Restart the Jupyter server. Open a `.glr` notebook cell: diagnostics
+land in the gutter, hover shows command docs, completion suggests
+commands + frame names. golars-lsp speaks the same JSON-RPC over stdio
+it speaks to Neovim and Zed, so feature parity is automatic.
+
+### Themes
+
+JupyterLab's official themes are pretty plain. Two community options
+cover the "tokyo night / rose pine" niche:
+
+```sh
+pip install --user catppuccin-jupyterlab jupyterlab-night
+```
+
+- **catppuccin-jupyterlab**: Mocha (closest to tokyo-night), Macchiato,
+  Frappe (rose-pine vibe), Latte. Pick one in Settings → Theme.
+- **jupyterlab-night**: straight dark theme with neutral blues.
+
+Reload JupyterLab and pick one in **Settings → Theme**.
+
+### Syntax highlighting
+
+The kernel declares CodeMirror mode `shell` so braces, strings and
+numbers read sensibly without extra setup. For real `.glr`
+highlighting (commands, keywords, operators) install the JupyterLab
+extension in [`editors/jupyterlab-golars`](https://github.com/Gaurav-Gosain/golars/tree/main/editors/jupyterlab-golars),
+which registers a CodeMirror language for the `text/x-glr` mime type.
+
+## GoNB: golars in a Go notebook
+
+[GoNB](https://github.com/janpfeifer/gonb) is the reference Go
+kernel: each cell is real Go code, recompiled incrementally. golars
+provides a multi-mimetype renderer so DataFrames render as proper
+HTML tables.
+
+```go
+import (
+    "github.com/Gaurav-Gosain/golars"
+    jrender "github.com/Gaurav-Gosain/golars/jupyter/render"
+    "github.com/janpfeifer/gonb/gonbui"
+)
+
+df, err := golars.ReadCSV("orders.csv")
+if err != nil { panic(err) }
+defer df.Release()
+
+gonbui.DisplayHTML(jrender.HTML(df))
+```
+
+The `jupyter/render` package exposes:
+
+| Function | Returns |
+|----------|---------|
+| `HTML(df)` | self-contained HTML fragment with inline styles |
+| `Markdown(df)` | GFM pipe-table |
+| `Text(df)` | the same ASCII repr `fmt.Println(df)` produces |
+| `MimeBundle(df)` | `map[mimetype]string` with all three |
+
+`MimeBundle` is the right call when the consumer takes a multi-format
+dict - pass it to `gonbui.DisplayMIMEData` for Jupyter's "richest
+available" routing.
+
+### Limits
+
+```go
+jrender.HTMLWith(df, jrender.Limits{
+    MaxRows:     50,  // -1 to disable
+    MaxCols:     -1,
+    MaxCellRune: 200,
+})
+```
+
+Defaults: head 5 + tail 5 rows, 8 columns, 64 runes per cell. Matches
+polars-py's default `repr` ergonomics.
+
+## Roadmap
+
+- [ ] Forward `kernel-host` stdout/stderr line-by-line to iopub during
+      a long-running cell instead of buffering until the cell completes.
+- [ ] Column-name completion: today only command names are suggested.
+      Need an extra `complete` opcode in the NDJSON protocol so the
+      kernel can ask the host for live schema names.
+- [ ] Inline plotting: `golars` doesn't render charts yet, but once
+      it does (e.g. via gg, vegolite, or a wasm hook) the kernel will
+      route them as `image/png` or `application/vnd.vega.v5+json`.

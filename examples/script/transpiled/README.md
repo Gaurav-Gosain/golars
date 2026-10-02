@@ -30,7 +30,7 @@ go build ./examples/script/transpiled/...
 
 ## Coverage
 
-All ten bundled scripts round-trip end-to-end:
+All eleven bundled scripts round-trip end-to-end:
 
 | Script | What it shows |
 |--------|---------------|
@@ -38,6 +38,7 @@ All ten bundled scripts round-trip end-to-end:
 | `branching/` | `stash` / `use` frame switching, sort reversal |
 | `demo/` | basic load + filter + show |
 | `derived/` | `with NAME = EXPR` arithmetic + string methods |
+| `expressions/` | namespaced functions, `cut`, `when`, `join_asof`, `group_by_dynamic`, `to_dummies` |
 | `join/` | `load ... as NAME` + `join NAME on KEY` |
 | `multisource/` | multiple stashed frames with parked state |
 | `nulls/` | `fill_null` + `is_not_null` filter on a CSV with empty fields |
@@ -50,8 +51,11 @@ All ten bundled scripts round-trip end-to-end:
 * `.tree`, `.graph`, `.mermaid`, `.explain_tree` leave a `TODO(glr):`
   comment in the output because the tree/graph views are REPL
   affordances with no standalone analogue.
-* `.reset` is a REPL bookkeeping op; transpiled scripts rebuild the
-  focus var from scratch at each `load`.
+* `.reset` returns to the last `load`, `use` or `stash`, as in the
+  REPL.
+* Reshape commands without a lazy form (`to_dummies`, `unnest`,
+  `top_k`, `bottom_k`) collect the focus, call the DataFrame method
+  and continue lazily from the result.
 * `.frames` is informational and intentionally ignored.
 
 Any script using commands outside the supported set still transpiles

@@ -5,11 +5,21 @@
 
 use polars::lazy::frame::OptFlags;
 use polars::prelude::*;
+use polars_ops::series::{RankMethod, RankOptions};
 use rand::distributions::Uniform;
 use rand::prelude::*;
 use rand_pcg::Pcg64;
 use serde::Serialize;
 use std::time::Instant;
+
+mod extra;
+mod mem;
+use extra::add_extra_workloads;
+mod joins_extra;
+use joins_extra::add_join_workloads;
+
+#[global_allocator]
+static GLOBAL: mem::Counting = mem::Counting;
 
 const WARMUP: usize = 3;
 const REPEAT: usize = 25;
@@ -45,6 +55,7 @@ fn time_ns<F: FnMut()>(mut f: F) -> u128 {
         samples.push(t0.elapsed().as_nanos());
     }
     samples.sort_unstable();
+    mem::measure(&mut f);
     samples[REPEAT / 2]
 }
 
@@ -406,6 +417,30 @@ fn bench_groupby_sum(n: usize, groups: i64) -> Result {
     }
 }
 
+fn bench_groupby_sum_multikey(n: usize) -> Result {
+    const REGIONS: [&str; 8] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
+    let regions: Vec<&str> = (0..n).map(|i| REGIONS[i % 8]).collect();
+    let years: Vec<i64> = (0..n).map(|i| 2020 + (i % 5) as i64).collect();
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("region" => regions, "year" => years, "v" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .group_by([col("region"), col("year")])
+            .agg([col("v").sum().alias("s")])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "GroupBySumMultiKey".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 24, t),
+    }
+}
+
 fn bench_groupby_mean(n: usize, groups: i64) -> Result {
     let mut r = rng(SEED);
     let d = Uniform::new(0i64, groups);
@@ -580,6 +615,87 @@ fn bench_rolling_sum(n: usize) -> Result {
     }
 }
 
+fn bench_rolling_min(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let opts = RollingOptionsFixedWindow {
+        window_size: 32,
+        min_periods: 32,
+        weights: None,
+        center: false,
+        fn_params: None,
+    };
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rolling_min(opts.clone())])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RollingMin(w=32)".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
+fn bench_rolling_max(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let opts = RollingOptionsFixedWindow {
+        window_size: 32,
+        min_periods: 32,
+        weights: None,
+        center: false,
+        fn_params: None,
+    };
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rolling_max(opts.clone())])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RollingMax(w=32)".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
+fn bench_rolling_mean(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let opts = RollingOptionsFixedWindow {
+        window_size: 32,
+        min_periods: 32,
+        weights: None,
+        center: false,
+        fn_params: None,
+    };
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rolling_mean(opts.clone())])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RollingMean(w=32)".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
 fn bench_when_then(n: usize) -> Result {
     let a = rand_i64(n, 1 << 20);
     let mut r = rng(SEED ^ 1);
@@ -623,6 +739,29 @@ fn bench_over_sum(n: usize) -> Result {
     });
     Result {
         name: "SumOverGroup".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 16, t),
+    }
+}
+
+fn bench_cumsum_over_group(n: usize) -> Result {
+    let mut r = rng(SEED);
+    let d = Uniform::new(0i64, 64);
+    let keys: Vec<i64> = (0..n).map(|_| r.sample(d)).collect();
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("k" => keys, "v" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("v").cum_sum(false).over([col("k")]).alias("cum")])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "CumSumOverGroup".into(),
         rows: n,
         median_ns: t,
         throughput_mbps: mbps(n * 16, t),
@@ -724,6 +863,52 @@ fn bench_unique_int64(n: usize) -> Result {
     }
 }
 
+fn bench_top_k(n: usize, k: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").top_k(lit(k as u32))])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: format!("TopK(k={})", k),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
+fn bench_rank(n: usize) -> Result {
+    let vals = rand_i64(n, 1 << 20);
+    let df = df!("x" => vals).unwrap();
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("x").rank(
+                RankOptions {
+                    method: RankMethod::Average,
+                    descending: false,
+                },
+                None,
+            )])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "RankInt64".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(n * 8, t),
+    }
+}
+
 fn bench_cumsum_int64(n: usize) -> Result {
     let vals = rand_i64(n, 1 << 16);
     let df = df!("x" => vals).unwrap();
@@ -800,96 +985,221 @@ fn bench_drop_nulls(n: usize) -> Result {
     }
 }
 
+// ---------- string namespace (mirrors cmd/bench/strings.go) ----------
+
+fn str_bench_values(n: usize) -> (DataFrame, usize) {
+    let vals: Vec<String> = (0..n)
+        .map(|i| format!("k{}-v{}-x{}", i % 997, i % 13, i))
+        .collect();
+    let bytes = vals.iter().map(|v| v.len()).sum();
+    (df!("s" => vals).unwrap(), bytes)
+}
+
+fn bench_str_contains(n: usize) -> Result {
+    let (df, bytes) = str_bench_values(n);
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("s").str().contains_literal(lit("v7"))])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "StrContainsShort".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(bytes, t),
+    }
+}
+
+fn bench_str_split(n: usize) -> Result {
+    let (df, bytes) = str_bench_values(n);
+    let t = time_ns(|| {
+        let _ = df
+            .clone()
+            .lazy()
+            .with_optimizations(eager_flags())
+            .select_seq([col("s").str().split(lit("-"))])
+            .collect()
+            .unwrap();
+    });
+    Result {
+        name: "StrSplit".into(),
+        rows: n,
+        median_ns: t,
+        throughput_mbps: mbps(bytes, t),
+    }
+}
+
 // ---------- driver ----------
+
+/// Parses `--only <regexp>` from argv. None runs every workload.
+fn parse_only() -> Option<regex::Regex> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--only" && i + 1 < args.len() {
+            return Some(regex::Regex::new(&args[i + 1]).expect("--only: bad regexp"));
+        }
+        if let Some(v) = args[i].strip_prefix("--only=") {
+            return Some(regex::Regex::new(v).expect("--only: bad regexp"));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Runs f only when name matches the filter. f builds its own inputs,
+/// so filtered-out workloads cost nothing.
+pub(crate) fn add<F: FnOnce() -> Result>(
+    out: &mut Vec<Result>,
+    only: &Option<regex::Regex>,
+    name: &str,
+    f: F,
+) {
+    if let Some(re) = only {
+        if !re.is_match(name) {
+            return;
+        }
+    }
+    out.push(f());
+}
 
 fn main() {
     let sizes = [16_384usize, 262_144, 1_048_576];
     let mut out: Vec<Result> = Vec::new();
+    let only = parse_only();
 
     for &n in &sizes {
-        out.push(bench_sum_int64(n));
-        out.push(bench_sum_float64(n));
-        out.push(bench_mean_float64(n));
-        out.push(bench_min_float64(n));
-        out.push(bench_add_int64(n));
-        out.push(bench_add_float64(n));
-        out.push(bench_mul_int64(n));
-        out.push(bench_gt_int64(n));
-        out.push(bench_filter_int64(n));
-        out.push(bench_filter_float64(n));
-        out.push(bench_sort_int64(n));
-        out.push(bench_sort_float64(n));
-        out.push(bench_cast_i64_f64(n));
-        out.push(bench_take(n));
+        add(&mut out, &only, "SumInt64", || bench_sum_int64(n));
+        add(&mut out, &only, "SumFloat64", || bench_sum_float64(n));
+        add(&mut out, &only, "MeanFloat64", || bench_mean_float64(n));
+        add(&mut out, &only, "MinFloat64", || bench_min_float64(n));
+        add(&mut out, &only, "AddInt64", || bench_add_int64(n));
+        add(&mut out, &only, "AddFloat64", || bench_add_float64(n));
+        add(&mut out, &only, "MulInt64", || bench_mul_int64(n));
+        add(&mut out, &only, "GtInt64", || bench_gt_int64(n));
+        add(&mut out, &only, "FilterInt64", || bench_filter_int64(n));
+        add(&mut out, &only, "FilterFloat64", || bench_filter_float64(n));
+        add(&mut out, &only, "SortInt64", || bench_sort_int64(n));
+        add(&mut out, &only, "SortFloat64", || bench_sort_float64(n));
+        add(&mut out, &only, "CastI64ToF64", || bench_cast_i64_f64(n));
+        add(&mut out, &only, "Take", || bench_take(n));
     }
 
     for &n in &[16_384usize, 262_144] {
-        out.push(bench_sort_two_keys(n));
+        add(&mut out, &only, "SortTwoKeys", || bench_sort_two_keys(n));
     }
 
     for &n in &[16_384usize, 262_144] {
         for &g in &[8i64, 1024] {
-            out.push(bench_groupby_sum(n, g));
+            add(&mut out, &only, &format!("GroupBySum(groups={})", g), || bench_groupby_sum(n, g));
         }
         for &g in &[64i64] {
-            out.push(bench_groupby_mean(n, g));
-            out.push(bench_groupby_multi_agg(n, g));
+            add(&mut out, &only, &format!("GroupByMean(groups={})", g), || bench_groupby_mean(n, g));
+            add(&mut out, &only, &format!("GroupByMultiAgg(groups={})", g), || bench_groupby_multi_agg(n, g));
         }
+        add(&mut out, &only, "GroupBySumMultiKey", || bench_groupby_sum_multikey(n));
     }
 
     for &n in &[16_384usize, 262_144] {
-        out.push(bench_inner_join(n));
-        out.push(bench_left_join(n));
+        add(&mut out, &only, "InnerJoin", || bench_inner_join(n));
+        add(&mut out, &only, "LeftJoin", || bench_left_join(n));
     }
 
     for &n in &[16_384usize, 262_144] {
-        out.push(bench_pipeline(n));
+        add(&mut out, &only, "Pipeline(filter>gb>sort)", || bench_pipeline(n));
     }
 
     for &n in &sizes {
-        out.push(bench_sum_horizontal(n));
+        add(&mut out, &only, "SumHorizontal(3cols)", || bench_sum_horizontal(n));
     }
 
     for &n in &sizes {
-        out.push(bench_max_horizontal(n));
+        add(&mut out, &only, "MaxHorizontal(3cols)", || bench_max_horizontal(n));
     }
 
     for &n in &[16_384usize, 262_144] {
-        out.push(bench_unique_int64(n));
+        add(&mut out, &only, "UniqueInt64", || bench_unique_int64(n));
+        add(&mut out, &only, "TopK(k=10)", || bench_top_k(n, 10));
+        add(&mut out, &only, "RankInt64", || bench_rank(n));
     }
 
     for &n in &sizes {
-        out.push(bench_cumsum_int64(n));
-        out.push(bench_shift_int64(n));
-        out.push(bench_fill_null_value(n));
-        out.push(bench_drop_nulls(n));
+        add(&mut out, &only, "CumSumInt64", || bench_cumsum_int64(n));
+        add(&mut out, &only, "ShiftInt64", || bench_shift_int64(n));
+        add(&mut out, &only, "FillNullValue", || bench_fill_null_value(n));
+        add(&mut out, &only, "DropNulls", || bench_drop_nulls(n));
     }
 
     for &n in &sizes {
-        out.push(bench_forward_fill(n));
+        add(&mut out, &only, "ForwardFillInt64", || bench_forward_fill(n));
     }
 
     for &n in &sizes {
-        out.push(bench_rolling_sum(n));
+        add(&mut out, &only, "RollingSum(w=32)", || bench_rolling_sum(n));
+        add(&mut out, &only, "RollingMin(w=32)", || bench_rolling_min(n));
+        add(&mut out, &only, "RollingMax(w=32)", || bench_rolling_max(n));
+        add(&mut out, &only, "RollingMean(w=32)", || bench_rolling_mean(n));
     }
 
     for &n in &[16_384usize, 262_144] {
-        out.push(bench_when_then(n));
-        out.push(bench_over_sum(n));
+        add(&mut out, &only, "WhenThenOtherwise", || bench_when_then(n));
+        add(&mut out, &only, "SumOverGroup", || bench_over_sum(n));
+        add(&mut out, &only, "CumSumOverGroup", || bench_cumsum_over_group(n));
     }
+
+    add(&mut out, &only, "StrContainsShort", || bench_str_contains(1_048_576));
+    add(&mut out, &only, "StrSplit", || bench_str_split(1_048_576));
+
+    // Workloads beyond the original numeric suite (strings, IO, lazy).
+    add_extra_workloads(&mut out, &only);
+    add_join_workloads(&mut out, &only);
+
+    // Every Result comes from exactly one time_ns call, so the memory
+    // log lines up with out by position. If it ever does not, the
+    // results are emitted without memory figures.
+    #[derive(Serialize)]
+    struct WithMem<'a> {
+        #[serde(flatten)]
+        r: &'a Result,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alloc_bytes: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        allocs: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peak_bytes: Option<i64>,
+    }
+    let log = mem::MEM_LOG.lock().unwrap().clone();
+    let aligned = log.len() == out.len();
+    let rows: Vec<WithMem> = out
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let m = if aligned { Some(log[i]) } else { None };
+            WithMem {
+                r,
+                alloc_bytes: m.map(|m| m.alloc_bytes),
+                allocs: m.map(|m| m.allocs),
+                peak_bytes: m.map(|m| m.peak_bytes),
+            }
+        })
+        .collect();
 
     #[derive(Serialize)]
     struct Envelope<'a> {
         engine: &'a str,
         version: &'a str,
-        runs: &'a [Result],
+        runs: &'a [WithMem<'a>],
     }
     // Pin the reported version to the polars crate version we link against.
     // Kept in sync with Cargo.toml; bump when the polars dep bumps.
     let env = Envelope {
         engine: "polars-rust",
         version: "0.53.0",
-        runs: &out,
+        runs: &rows,
     };
     println!("{}", serde_json::to_string_pretty(&env).unwrap());
 }

@@ -49,9 +49,13 @@ show
 - Persistent state across cells: `load` in cell 1, `filter` in cell 2,
   `groupby` in cell 3 - same model as the REPL.
 - `stash NAME` / `use NAME` for branching pipelines.
-- Tab completion on command names.
-- Hover docs on commands (Shift+Tab in classic notebook, hover panel
-  in JupyterLab).
+- Tab completion from the same analysis golars-lsp uses, against the
+  live session: commands, the columns of the loaded frames (with
+  dtypes), functions and methods per namespace, keyword arguments,
+  option words and file paths.
+- Inspect (Shift+Tab in classic notebook, the contextual help panel in
+  JupyterLab) documents commands, functions (signature and Go doc
+  comment) and columns (dtype and frame shape).
 - `interrupt` button kills the in-flight cell by restarting the
   embedded host process.
 
@@ -74,6 +78,34 @@ table the dispatcher prints lands in the cell output as a `stream`
 message. Materialised frames also land as a `display_data` message
 with both `text/plain` (ASCII box) and `text/html` (styled table)
 mimetypes; Jupyter picks the richest one.
+
+A client can send `"structured": true` with a request to get tables
+as data instead of ASCII text. The reply then adds `outputs` (stdout
+text and tables in the order the cell produced them) and `table` (the
+auto-displayed frame). Each table is an
+`application/vnd.golars.table+json` object with `columns`, `dtypes`,
+`rows` (cell strings, `null` for nulls), `shape` and optional
+`row_gap` / `col_gap` where rows or columns were left out. The fields
+are optional, so older clients and hosts keep working. A terminal
+notebook built on a fork of
+[gopyter](https://github.com/Gaurav-Gosain/gopyter) uses them to draw
+themed tables; that fork is the planned home for Go notebooks but is
+not published yet. `DataFrame.MimeBundle()` and `Series.MimeBundle()`
+return the same table next to `text/plain` and `text/html`, and
+`DataFrame.HTML()` / `Series.HTML()` return just the HTML table.
+
+Besides running cells, a request can set `op`:
+
+- `"complete"` with `code` and a byte offset `cursor`: the reply's
+  `ide` holds `matches`, the replaced byte range `start`/`end`, and
+  `types` (text, Jupyter type, signature) for each match.
+- `"inspect"` with `code` and `cursor`: `ide.markdown` documents what
+  is under the cursor.
+- `"table"` with `max_rows`: `table` is the first rows of the focused
+  frame with every column.
+
+`golars-kernel` uses the first two for complete_request and
+inspect_request; `golars-mcp` uses `table` for `run_glr`.
 
 ### Install flags
 
@@ -124,7 +156,7 @@ c.LanguageServerManager.language_servers = {
 }
 ```
 
-Restart the Jupyter server. Open a `.glr` notebook cell — diagnostics
+Restart the Jupyter server. Open a `.glr` notebook cell: diagnostics
 land in the gutter, hover shows command docs, completion suggests
 commands + frame names. golars-lsp speaks the same JSON-RPC over stdio
 it speaks to Neovim and Zed, so feature parity is automatic.
@@ -138,19 +170,19 @@ cover the "tokyo night / rose pine" niche:
 pip install --user catppuccin-jupyterlab jupyterlab-night
 ```
 
-- **catppuccin-jupyterlab** — Mocha (closest to tokyo-night), Macchiato,
+- **catppuccin-jupyterlab**: Mocha (closest to tokyo-night), Macchiato,
   Frappe (rose-pine vibe), Latte. Pick one in Settings → Theme.
-- **jupyterlab-night** — straight dark theme with neutral blues.
+- **jupyterlab-night**: straight dark theme with neutral blues.
 
 Reload JupyterLab and pick one in **Settings → Theme**.
 
 ### Syntax highlighting
 
-The kernel declares CodeMirror mode `shell` so braces/strings/numbers
-read sensibly. A proper glr CodeMirror language extension (highlighting
-`load`, `filter`, `groupby`, ... as keywords) is on the roadmap as a
-separate JupyterLab extension package — needs an npm + TypeScript
-build pipeline that doesn't fit the main repo.
+The kernel declares CodeMirror mode `shell` so braces, strings and
+numbers read sensibly without extra setup. For real `.glr`
+highlighting (commands, keywords, operators) install the JupyterLab
+extension in [`editors/jupyterlab-golars`](../editors/jupyterlab-golars/),
+which registers a CodeMirror language for the `text/x-glr` mime type.
 
 ## GoNB: golars in a Go notebook
 
@@ -201,14 +233,8 @@ polars-py's default `repr` ergonomics.
 
 ## Roadmap
 
-- [ ] Display the *focused* frame (post-pipeline), not just the
-      original source. Today the auto-display HTML reflects `s.df`
-      which is the loaded source; pipeline ops only mutate `s.lf`.
 - [ ] Forward `kernel-host` stdout/stderr line-by-line to iopub during
       a long-running cell instead of buffering until the cell completes.
-- [ ] Column-name completion: today only command names are suggested.
-      Need an extra `complete` opcode in the NDJSON protocol so the
-      kernel can ask the host for live schema names.
 - [ ] Inline plotting: `golars` doesn't render charts yet, but once
       it does (e.g. via gg, vegolite, or a wasm hook) the kernel will
       route them as `image/png` or `application/vnd.vega.v5+json`.

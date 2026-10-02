@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/series"
 )
 
@@ -71,13 +74,15 @@ func (df *DataFrame) Transpose(_ context.Context, headerCol, colPrefix string) (
 	return New(out...)
 }
 
-// Unpivot reshapes df from wide to long form. idVars stay as-is; each
-// other column becomes two rows of a long frame: a "variable" column
-// holding the original column name and a "value" column holding the
-// cell value. Mirrors polars' DataFrame.unpivot (melt in pandas).
-func (df *DataFrame) Unpivot(_ context.Context, idVars []string, valueVars []string) (*DataFrame, error) {
+// Unpivot reshapes df from wide to long form. idVars stay as row
+// identifiers (repeated once per value column); every value column
+// contributes one block of rows to a "variable" column holding its name
+// and a "value" column holding its cells. valueVars defaults to every
+// non-id column. The value column takes the common dtype of the value
+// columns: equal dtypes are kept, integers widen to i64, any float makes
+// f64 and any string makes str. Mirrors polars' DataFrame.unpivot.
+func (df *DataFrame) Unpivot(ctx context.Context, idVars []string, valueVars []string) (*DataFrame, error) {
 	if len(valueVars) == 0 {
-		// Default: every non-id column is a value column.
 		seen := make(map[string]struct{}, len(idVars))
 		for _, v := range idVars {
 			seen[v] = struct{}{}
@@ -88,17 +93,27 @@ func (df *DataFrame) Unpivot(_ context.Context, idVars []string, valueVars []str
 			}
 		}
 	}
-	if len(valueVars) == 0 {
-		return nil, fmt.Errorf("dataframe.Unpivot: no value columns")
-	}
-	// Resolve columns.
-	idCols := make([]*series.Series, len(idVars))
-	for i, v := range idVars {
-		c, err := df.Column(v)
-		if err != nil {
-			return nil, err
+	// polars resolves the output schema from the whole input schema
+	// plus "variable" and "value", so an input column with either name
+	// is a DuplicateError even when it is not kept.
+	for _, n := range []string{"variable", "value"} {
+		if _, ok := df.sch.Index(n); ok {
+			return nil, fmt.Errorf("dataframe.Unpivot: duplicate column name %q", n)
 		}
-		idCols[i] = c
+	}
+	seenID := map[string]bool{}
+	for _, n := range idVars {
+		if seenID[n] {
+			return nil, fmt.Errorf("dataframe.Unpivot: duplicate column name %q", n)
+		}
+		seenID[n] = true
+	}
+	idCols, err := df.subsetColumns(idVars)
+	if err != nil {
+		return nil, err
+	}
+	if len(idVars) == 0 {
+		idCols = nil
 	}
 	valCols := make([]*series.Series, len(valueVars))
 	for i, v := range valueVars {
@@ -108,93 +123,111 @@ func (df *DataFrame) Unpivot(_ context.Context, idVars []string, valueVars []str
 		}
 		valCols[i] = c
 	}
-	height := df.Height()
-	out := len(valueVars) * height
-	// Build the id columns (replicated), the "variable" column, and
-	// the "value" column (float64 to accept mixed numeric types).
-	idOut := make([][]float64, len(idVars))
-	idOutValid := make([][]bool, len(idVars))
-	idIsStr := make([]bool, len(idVars))
-	idStrOut := make([][]string, len(idVars))
-	idStrValid := make([][]bool, len(idVars))
-	for i, c := range idCols {
-		if _, isStr := c.Chunk(0).(*array.String); isStr {
-			idIsStr[i] = true
-			idStrOut[i] = make([]string, out)
-			idStrValid[i] = make([]bool, out)
-		} else {
-			idOut[i] = make([]float64, out)
-			idOutValid[i] = make([]bool, out)
+	h := df.height
+	total := h * len(valueVars)
+	rep := make([]int, total)
+	for i := range rep {
+		rep[i] = i % max(h, 1)
+	}
+	out := make([]*series.Series, 0, len(idCols)+2)
+	for _, c := range idCols {
+		s, err := takeOptional(ctx, c, rep, memory.DefaultAllocator)
+		if err != nil {
+			releaseAll(out)
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	names := make([]string, total)
+	for i, v := range valueVars {
+		for r := range h {
+			names[i*h+r] = v
 		}
 	}
-	variable := make([]string, out)
-	value := make([]float64, out)
-	valid := make([]bool, out)
-	row := 0
+	varCol, err := series.FromString("variable", names, nil)
+	if err != nil {
+		releaseAll(out)
+		return nil, err
+	}
+	out = append(out, varCol)
+
+	target, err := unpivotDType(valCols)
+	if err != nil {
+		releaseAll(out)
+		return nil, err
+	}
+	var parts []arrow.Array
+	defer func() {
+		for _, a := range parts {
+			a.Release()
+		}
+	}()
 	for _, c := range valCols {
-		for r := range height {
-			variable[row] = c.Name()
-			if v, ok := floatCell(c.Chunk(0), r); ok {
-				value[row] = v
-				valid[row] = true
-			}
-			for i, ic := range idCols {
-				if idIsStr[i] {
-					sa := ic.Chunk(0).(*array.String)
-					if sa.IsValid(r) {
-						idStrOut[i][row] = sa.Value(r)
-						idStrValid[i][row] = true
-					}
-				} else {
-					if v, ok := floatCell(ic.Chunk(0), r); ok {
-						idOut[i][row] = v
-						idOutValid[i][row] = true
-					}
-				}
-			}
-			row++
+		casted, err := castSeries(ctx, c, target, false)
+		if err != nil {
+			releaseAll(out)
+			return nil, err
+		}
+		a, err := casted.Consolidated()
+		casted.Release()
+		if err != nil {
+			releaseAll(out)
+			return nil, err
+		}
+		parts = append(parts, a)
+	}
+	var values arrow.Array
+	if len(parts) == 0 {
+		values = array.MakeArrayOfNull(memory.DefaultAllocator, target.Arrow(), 0)
+	} else {
+		values, err = array.Concatenate(parts, memory.DefaultAllocator)
+		if err != nil {
+			releaseAll(out)
+			return nil, err
 		}
 	}
-	// Compose the output frame: idVars, variable, value.
-	outCols := make([]*series.Series, 0, len(idVars)+2)
-	for i, v := range idVars {
-		if idIsStr[i] {
-			s, err := series.FromString(v, idStrOut[i], idStrValid[i])
-			if err != nil {
-				for _, p := range outCols {
-					p.Release()
-				}
-				return nil, err
-			}
-			outCols = append(outCols, s)
-		} else {
-			s, err := series.FromFloat64(v, idOut[i], idOutValid[i])
-			if err != nil {
-				for _, p := range outCols {
-					p.Release()
-				}
-				return nil, err
-			}
-			outCols = append(outCols, s)
-		}
-	}
-	varCol, err := series.FromString("variable", variable, nil)
+	valSeries, err := seriesFromArray("value", values)
 	if err != nil {
-		for _, p := range outCols {
-			p.Release()
-		}
+		releaseAll(out)
 		return nil, err
 	}
-	outCols = append(outCols, varCol)
-	valCol, err := series.FromFloat64("value", value, valid)
-	if err != nil {
-		for _, p := range outCols {
-			p.Release()
-		}
-		return nil, err
+	out = append(out, valSeries)
+	return New(out...)
+}
+
+// unpivotDType is the common dtype of the value columns of an unpivot.
+func unpivotDType(cols []*series.Series) (dtype.DType, error) {
+	if len(cols) == 0 {
+		return dtype.Null(), nil
 	}
-	outCols = append(outCols, valCol)
-	return New(outCols...)
+	dt := cols[0].DType()
+	same, anyStr, anyFloat, allNum := true, false, false, true
+	for _, c := range cols {
+		d := c.DType()
+		if !d.Equal(dt) {
+			same = false
+		}
+		switch {
+		case d.IsString():
+			anyStr = true
+		case d.IsFloating():
+			anyFloat = true
+		case d.IsInteger(), d.IsNull():
+		default:
+			allNum = false
+		}
+	}
+	switch {
+	case same:
+		return dt, nil
+	case anyStr:
+		return dtype.String(), nil
+	case allNum && anyFloat:
+		return dtype.Float64(), nil
+	case allNum:
+		return dtype.Int64(), nil
+	}
+	return dtype.DType{}, fmt.Errorf("dataframe.Unpivot: value columns have incompatible dtypes")
 }
 
 func floatCell(chunk any, i int) (float64, bool) {

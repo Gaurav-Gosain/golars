@@ -14,6 +14,7 @@
 #   make fmt           # gofmt + goimports
 #   make examples      # compile every ./examples/*
 #   make clean         # drop ./bin and pprof files
+#   make verify        # rebuild the Lean proofs and regenerate testdata/verified
 
 GO       ?= go
 BIN      ?= ./bin
@@ -21,33 +22,34 @@ PKGS      = ./...
 TESTFLAGS = -count=1
 CMDS     := $(notdir $(wildcard ./cmd/*))
 LDFLAGS  ?= -s -w
+BUILDFLAGS ?= -trimpath
 SIMD_ENV ?= GOEXPERIMENT=simd
 
-.PHONY: all help build build-simd install test test-race test-noasm test-simd test-all bench vet lint fmt examples docs-site docker tidy clean check
+.PHONY: all help build build-simd install test test-race test-noasm test-simd test-all bench vet lint fmt examples docs-site docker tidy clean check verify
 
 all: check
 
 help: ## Print this help
-	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/:/' | awk -F: '{printf "  %-14s %s\n", $$1, $$3}'
+	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*## */:/' | awk -F: '{printf "  %-14s %s\n", $$1, $$2}'
 
 build: ## Build every binary under cmd/ into ./bin
 	@mkdir -p $(BIN)
 	@for cmd in $(CMDS); do \
 		echo "  build   $$cmd"; \
-		$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd ./cmd/$$cmd; \
+		$(GO) build $(BUILDFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd ./cmd/$$cmd; \
 	done
 
 build-simd: ## Build every binary with GOEXPERIMENT=simd (amd64 only)
 	@mkdir -p $(BIN)
 	@for cmd in $(CMDS); do \
 		echo "  build-simd  $$cmd"; \
-		$(SIMD_ENV) $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd-simd ./cmd/$$cmd; \
+		$(SIMD_ENV) $(GO) build $(BUILDFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/$$cmd-simd ./cmd/$$cmd; \
 	done
 
 install: ## go install every command to $GOBIN
 	@for cmd in $(CMDS); do \
 		echo "  install $$cmd"; \
-		$(GO) install -ldflags "$(LDFLAGS)" ./cmd/$$cmd; \
+		$(GO) install $(BUILDFLAGS) -ldflags "$(LDFLAGS)" ./cmd/$$cmd; \
 	done
 
 test: ## Run unit tests across every package
@@ -98,5 +100,9 @@ tidy: ## go mod tidy
 
 clean: ## Remove ./bin and pprof files
 	rm -rf $(BIN) *.prof *.pprof
+
+verify: ## Rebuild the Lean proofs (verify/) and regenerate testdata/verified
+	sh verify/verify.sh
+	git diff --stat -- testdata/verified
 
 check: vet test ## Quick gate: vet + test

@@ -166,6 +166,13 @@ type LitNode struct {
 	// Value is a typed Go value. Supported types: int64, float64, bool,
 	// string. Use the Lit* constructors to build a LitNode safely.
 	Value any
+	// Dyn marks an untyped numeric literal (polars' dynamic int and
+	// float literals, pl.lit(3) and pl.lit(1.5)). DType is the dtype it
+	// materializes as on its own (i32 for small ints, f64 for floats),
+	// but next to a numeric operand it adopts that operand's dtype when
+	// the value fits: col(i8) + 1 stays i8 and col(f32) * 1.5 stays f32.
+	// See dtype.DynIntTarget and dtype.DynFloatTarget.
+	Dyn bool
 }
 
 func (LitNode) isNode() {}
@@ -321,6 +328,22 @@ func LitInt64(v int64) Expr { return Expr{LitNode{DType: dtype.Int64(), Value: v
 // for when to prefer this over [Lit].
 func LitFloat64(v float64) Expr { return Expr{LitNode{DType: dtype.Float64(), Value: v}} }
 
+// LitInt returns an untyped integer literal, the equivalent of
+// polars pl.lit(v). On its own it materializes as i32 when v fits and
+// i64 otherwise; next to a numeric operand it takes that operand's
+// dtype when v fits (col(i8) + LitInt(1) is i8). Use [LitInt64] to pin
+// the dtype to i64.
+func LitInt(v int64) Expr {
+	return Expr{LitNode{DType: dtype.DefaultIntLiteral(v), Value: v, Dyn: true}}
+}
+
+// LitFloat returns an untyped float literal, the equivalent of polars
+// pl.lit(v): f64 on its own, f32 next to an f32 operand. Use
+// [LitFloat64] to pin the dtype to f64.
+func LitFloat(v float64) Expr {
+	return Expr{LitNode{DType: dtype.Float64(), Value: v, Dyn: true}}
+}
+
 // LitBool returns a typed bool scalar literal.
 func LitBool(v bool) Expr { return Expr{LitNode{DType: dtype.Bool(), Value: v}} }
 
@@ -338,11 +361,13 @@ func LitNull(dt dtype.DType) Expr { return Expr{LitNode{DType: dt, Value: nil}} 
 
 // Lit is a type-inferring literal constructor.
 //
-// The Go type of v decides the dtype: `int` / `int32` / `int64`
-// become i64, `float32` / `float64` become f64, plus `bool`,
-// `string`, and `nil` (typed null). Anything else panics, so reach
-// for [LitInt64] / [LitFloat64] / [LitString] when the exact dtype
-// matters for a mixed-type comparison.
+// The Go type of v decides the dtype, following polars: a Go `int`
+// or `float64` is an untyped literal like pl.lit(3) or pl.lit(1.5)
+// (see [LitInt] and [LitFloat]): alone it is i32 (i64 when the value
+// does not fit) or f64, and next to a column it takes the column's
+// dtype. `int64`, `int32` and `float32` pin the dtype. `bool`,
+// `string`, and `nil` (typed null) are also accepted. Anything else
+// panics.
 //
 // # Parameters
 //
@@ -356,7 +381,7 @@ func LitNull(dt dtype.DType) Expr { return Expr{LitNode{DType: dt, Value: nil}} 
 //
 // Scalar literals inline:
 //
-//	expr.Col("qty").Mul(expr.Lit(2))           // int inferred as i64
+//	expr.Col("qty").Mul(expr.Lit(2))           // keeps the dtype of qty
 //	expr.Col("tag").Eq(expr.Lit("priority"))   // string literal
 //	expr.Lit(nil)                              // typed null
 //
@@ -366,21 +391,24 @@ func LitNull(dt dtype.DType) Expr { return Expr{LitNode{DType: dt, Value: nil}} 
 func Lit(v any) Expr {
 	switch x := v.(type) {
 	case int:
-		return LitInt64(int64(x))
+		return LitInt(int64(x))
 	case int32:
-		return LitInt64(int64(x))
+		return Expr{LitNode{DType: dtype.Int32(), Value: int64(x)}}
 	case int64:
 		return LitInt64(x)
 	case float32:
-		return LitFloat64(float64(x))
+		return Expr{LitNode{DType: dtype.Float32(), Value: float64(x)}}
 	case float64:
-		return LitFloat64(x)
+		return LitFloat(x)
 	case bool:
 		return LitBool(x)
 	case string:
 		return LitString(x)
 	case nil:
 		return Expr{LitNode{DType: dtype.Null(), Value: nil}}
+	}
+	if e, ok := litTemporal(v); ok {
+		return e
 	}
 	panic(fmt.Sprintf("expr.Lit: unsupported literal type %T", v))
 }
@@ -446,26 +474,26 @@ func (e Expr) Add(other Expr) Expr { return binary(OpAdd, e, other) }
 
 // AddLit is sugar for e.Add([Lit](v)). Use it when the RHS is a
 // plain Go value so you don't have to write the constructor twice.
-func (e Expr) AddLit(v any) Expr { return binary(OpAdd, e, Lit(v)) }
+func (e Expr) AddLit(v any) Expr { return binary(OpAdd, e, scalarLit(v)) }
 
 // Sub returns e - other. See [Expr.Add] for null semantics.
 func (e Expr) Sub(other Expr) Expr { return binary(OpSub, e, other) }
 
 // SubLit is sugar for e.Sub([Lit](v)).
-func (e Expr) SubLit(v any) Expr { return binary(OpSub, e, Lit(v)) }
+func (e Expr) SubLit(v any) Expr { return binary(OpSub, e, scalarLit(v)) }
 
 // Mul returns e * other.
 func (e Expr) Mul(other Expr) Expr { return binary(OpMul, e, other) }
 
 // MulLit is sugar for e.Mul([Lit](v)).
-func (e Expr) MulLit(v any) Expr { return binary(OpMul, e, Lit(v)) }
+func (e Expr) MulLit(v any) Expr { return binary(OpMul, e, scalarLit(v)) }
 
 // Div returns e / other. Integer operands divide as integers; mix a
 // float operand to force float output.
 func (e Expr) Div(other Expr) Expr { return binary(OpDiv, e, other) }
 
 // DivLit is sugar for e.Div([Lit](v)).
-func (e Expr) DivLit(v any) Expr { return binary(OpDiv, e, Lit(v)) }
+func (e Expr) DivLit(v any) Expr { return binary(OpDiv, e, scalarLit(v)) }
 
 // Eq returns the element-wise equality test (`e == other`).
 //
@@ -492,25 +520,25 @@ func (e Expr) DivLit(v any) Expr { return binary(OpDiv, e, Lit(v)) }
 func (e Expr) Eq(other Expr) Expr { return binary(OpEq, e, other) }
 
 // EqLit is sugar for e.Eq([Lit](v)).
-func (e Expr) EqLit(v any) Expr { return binary(OpEq, e, Lit(v)) }
+func (e Expr) EqLit(v any) Expr { return binary(OpEq, e, scalarLit(v)) }
 
 // Ne returns the element-wise inequality test (`e != other`).
 func (e Expr) Ne(other Expr) Expr { return binary(OpNe, e, other) }
 
 // NeLit is sugar for e.Ne([Lit](v)).
-func (e Expr) NeLit(v any) Expr { return binary(OpNe, e, Lit(v)) }
+func (e Expr) NeLit(v any) Expr { return binary(OpNe, e, scalarLit(v)) }
 
 // Lt returns the element-wise less-than test (`e < other`).
 func (e Expr) Lt(other Expr) Expr { return binary(OpLt, e, other) }
 
 // LtLit is sugar for e.Lt([Lit](v)).
-func (e Expr) LtLit(v any) Expr { return binary(OpLt, e, Lit(v)) }
+func (e Expr) LtLit(v any) Expr { return binary(OpLt, e, scalarLit(v)) }
 
 // Le returns the element-wise less-than-or-equal test (`e <= other`).
 func (e Expr) Le(other Expr) Expr { return binary(OpLe, e, other) }
 
 // LeLit is sugar for e.Le([Lit](v)).
-func (e Expr) LeLit(v any) Expr { return binary(OpLe, e, Lit(v)) }
+func (e Expr) LeLit(v any) Expr { return binary(OpLe, e, scalarLit(v)) }
 
 // Gt returns the element-wise greater-than test (`e > other`).
 //
@@ -532,13 +560,13 @@ func (e Expr) LeLit(v any) Expr { return binary(OpLe, e, Lit(v)) }
 func (e Expr) Gt(other Expr) Expr { return binary(OpGt, e, other) }
 
 // GtLit is sugar for e.Gt([Lit](v)).
-func (e Expr) GtLit(v any) Expr { return binary(OpGt, e, Lit(v)) }
+func (e Expr) GtLit(v any) Expr { return binary(OpGt, e, scalarLit(v)) }
 
 // Ge returns the element-wise greater-than-or-equal test (`e >= other`).
 func (e Expr) Ge(other Expr) Expr { return binary(OpGe, e, other) }
 
 // GeLit is sugar for e.Ge([Lit](v)).
-func (e Expr) GeLit(v any) Expr { return binary(OpGe, e, Lit(v)) }
+func (e Expr) GeLit(v any) Expr { return binary(OpGe, e, scalarLit(v)) }
 
 // And returns the element-wise logical AND of two boolean
 // expressions. Null in either operand yields null.
@@ -750,12 +778,16 @@ func OutputName(e Expr) string {
 	if e.node == nil {
 		return ""
 	}
-	if a, ok := e.node.(AliasNode); ok {
-		return a.Name
+	// Fixed-name functions (len, repeat, cum_sum_horizontal, ...) win
+	// first. Then aliases, name.* renames and struct field access are
+	// resolved in name.go; otherwise the left-most named input wins.
+	if f, ok := e.node.(FunctionNode); ok {
+		if name, ok := functionOutputName(f); ok {
+			return name
+		}
 	}
-	cols := Columns(e)
-	if len(cols) > 0 {
-		return cols[0]
+	if name, ok := outputNameOf(e); ok {
+		return name
 	}
 	// For literals, use the literal value as the default name.
 	if l, ok := e.node.(LitNode); ok {
@@ -821,6 +853,9 @@ func writeExprHash(h interface {
 		sb.WriteString(n.Name)
 	case LitNode:
 		sb.WriteString(n.DType.String())
+		if n.Dyn {
+			sb.WriteString("~")
+		}
 		sb.WriteString("=")
 		sb.WriteString(n.String())
 	case BinaryNode:

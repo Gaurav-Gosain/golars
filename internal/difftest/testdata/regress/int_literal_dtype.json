@@ -1,0 +1,51 @@
+{
+  "name": "int_literal_dtype",
+  "status": "fixed",
+  "note": "a bare integer literal materializes as i64 in golars and i32 in polars (golars {o1: i64})",
+  "plan": {
+    "seed": 200136,
+    "ops": [
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "lit",
+                "val": -1
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c2",
+      "type": "str",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "o1",
+        "type": "i32",
+        "values": [
+          -1
+        ]
+      }
+    ]
+  }
+}

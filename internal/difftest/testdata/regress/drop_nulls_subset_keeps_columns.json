@@ -1,0 +1,50 @@
+{
+  "name": "drop_nulls_subset_keeps_columns",
+  "status": "fixed",
+  "note": "drop_nulls with a subset dropped every other column (golars {c3: i64})",
+  "plan": {
+    "seed": 200085,
+    "ops": [
+      {
+        "op": "drop_nulls",
+        "keys": [
+          "c3"
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "cat",
+      "values": [
+        null
+      ]
+    },
+    {
+      "name": "c3",
+      "type": "i64",
+      "values": [
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c0",
+        "type": "cat",
+        "values": []
+      },
+      {
+        "name": "c3",
+        "type": "i64",
+        "values": []
+      }
+    ]
+  }
+}

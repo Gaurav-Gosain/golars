@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 )
 
@@ -129,6 +130,9 @@ func (SimplifyPass) Apply(plan Node) (Node, bool, error) {
 					changed = true
 				}
 			}
+			if fused, ok := fuseWithColumns(WithColumns{Input: node.Input, Exprs: exprs}); ok {
+				return fused, true, nil
+			}
 			if changed {
 				return WithColumns{Input: node.Input, Exprs: exprs}, true, nil
 			}
@@ -207,7 +211,9 @@ func (SlicePushdownPass) Apply(plan Node) (Node, bool, error) {
 		//   Slice -> Projection => Projection(Slice) when exprs are row-local.
 		switch inner := slice.Input.(type) {
 		case DataFrameScan:
-			if inner.Length >= 0 {
+			// Length < 0 marks an unsliced scan, so a to-the-end slice
+			// (negative length) cannot be expressed there.
+			if inner.Length >= 0 || slice.Length < 0 {
 				return n, false, nil // already sliced
 			}
 			ds := inner
@@ -225,14 +231,14 @@ func (SlicePushdownPass) Apply(plan Node) (Node, bool, error) {
 				Columns: inner.Columns,
 			}, true, nil
 		case Projection:
-			if allRowLocal(inner.Exprs) {
+			if allElementwise(inner.Exprs) && anyColumnRef(inner.Exprs) {
 				return Projection{
 					Input: SliceNode{Input: inner.Input, Offset: slice.Offset, Length: slice.Length},
 					Exprs: inner.Exprs,
 				}, true, nil
 			}
 		case WithColumns:
-			if allRowLocal(inner.Exprs) {
+			if allElementwise(inner.Exprs) {
 				return WithColumns{
 					Input: SliceNode{Input: inner.Input, Offset: slice.Offset, Length: slice.Length},
 					Exprs: inner.Exprs,
@@ -261,9 +267,19 @@ func (PredicatePushdownPass) Apply(plan Node) (Node, bool, error) {
 
 		switch inner := filter.Input.(type) {
 		case DataFrameScan:
-			// Push into the scan.
+			// The scan applies its predicate before its slice, so a
+			// filter must never merge into a scan that already carries a
+			// pushed-down slice (head(2).filter(...) would filter first).
+			if inner.Length >= 0 {
+				return n, false, nil
+			}
 			ds := inner
 			if ds.Predicate != nil {
+				// A predicate that reads other rows (a > a.mean()) must
+				// see only the rows the earlier predicate kept.
+				if !expr.IsElementwise(filter.Predicate) {
+					return n, false, nil
+				}
 				merged := ds.Predicate.And(filter.Predicate)
 				ds.Predicate = &merged
 			} else {
@@ -274,14 +290,18 @@ func (PredicatePushdownPass) Apply(plan Node) (Node, bool, error) {
 		case Projection:
 			// Only push below projection when all refs are plain columns from
 			// the input (not aliases or computed outputs).
-			if projPassesThrough(inner.Exprs, refs) {
+			// A projection of literals only has one row whatever its
+			// input; like polars, only an elementwise predicate moves
+			// below it (and then filters the input rows instead).
+			if allElementwise(inner.Exprs) && projPassesThrough(inner.Exprs, refs) &&
+				(anyColumnRef(inner.Exprs) || expr.IsElementwise(filter.Predicate)) {
 				return Projection{
 					Input: Filter{Input: inner.Input, Predicate: filter.Predicate},
 					Exprs: inner.Exprs,
 				}, true, nil
 			}
 		case WithColumns:
-			if withColsPassesThrough(inner, refs) {
+			if allElementwise(inner.Exprs) && withColsPassesThrough(inner, refs) {
 				return WithColumns{
 					Input: Filter{Input: inner.Input, Predicate: filter.Predicate},
 					Exprs: inner.Exprs,
@@ -314,6 +334,12 @@ func (PredicatePushdownPass) Apply(plan Node) (Node, bool, error) {
 		case SliceNode:
 			// Filter before Slice changes semantics: don't push.
 			return n, false, nil
+		case Filter:
+			out, did := mergeFilters(filter, inner)
+			return out, did, nil
+		case Join:
+			out, did := pushFilterIntoJoin(filter, inner)
+			return out, did, nil
 		}
 		return n, false, nil
 	})
@@ -328,28 +354,35 @@ type ProjectionPushdownPass struct{}
 func (ProjectionPushdownPass) Name() string { return "projection-pushdown" }
 
 func (p ProjectionPushdownPass) Apply(plan Node) (Node, bool, error) {
-	needed := neededAtRoot(plan)
-	if needed == nil {
-		return plan, false, nil
-	}
-	out, changed := p.push(plan, needed)
+	out, changed := p.push(plan, nil)
 	return out, changed, nil
 }
 
+// push rewrites n so it produces at least the columns in needed. A nil
+// needed set means "every column": nodes that pin down their own input
+// set (Projection, Aggregate) start a fresh set, everything else passes
+// nil through so pushdown still reaches scans below them.
 func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, bool) {
 	switch node := n.(type) {
 	case DataFrameScan:
+		if needed == nil {
+			return node, false
+		}
 		// If the scan already produces a subset, keep it; otherwise set the
 		// projection to the needed columns in schema order.
 		src := node.Source.Schema()
 		proj := orderedIntersect(src.Names(), needed)
+		if len(proj) == 0 {
+			// Selecting zero columns would lose the row count.
+			return node, false
+		}
 		if len(node.Projection) == len(proj) && sameSet(node.Projection, proj) {
 			return node, false
 		}
 		if len(node.Projection) > 0 {
 			// Scan already has its own projection; intersect with needed.
 			keep := orderedIntersect(node.Projection, needed)
-			if len(keep) == len(node.Projection) {
+			if len(keep) == len(node.Projection) || len(keep) == 0 {
 				return node, false
 			}
 			node.Projection = keep
@@ -357,21 +390,26 @@ func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, 
 		}
 		node.Projection = proj
 		return node, true
+	case SourceFunc:
+		return pushIntoSource(node, needed)
 	case Projection:
 		// Recompute the needed set for the child: columns referenced by our
 		// expressions.
-		childNeeded := map[string]struct{}{}
-		for _, e := range node.Exprs {
-			for _, c := range expr.Columns(e) {
-				childNeeded[c] = struct{}{}
-			}
-		}
-		newChild, changed := p.push(node.Input, childNeeded)
+		newChild, changed := p.push(node.Input, exprColumnSet(node.Exprs, nil))
 		if !changed {
 			return node, false
 		}
 		return Projection{Input: newChild, Exprs: node.Exprs}, true
+	case Aggregate:
+		newChild, changed := p.push(node.Input, exprColumnSet(node.Aggs, node.Keys))
+		if !changed {
+			return node, false
+		}
+		return Aggregate{Input: newChild, Keys: node.Keys, Aggs: node.Aggs}, true
 	case WithColumns:
+		if needed == nil {
+			break
+		}
 		// Child must produce everything needed (by the surrounding plan)
 		// minus the outputs this node redefines, plus whatever the new
 		// expressions reference.
@@ -397,25 +435,27 @@ func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, 
 		}
 		return WithColumns{Input: newChild, Exprs: node.Exprs}, true
 	case Filter:
-		childNeeded := map[string]struct{}{}
-		for k := range needed {
-			childNeeded[k] = struct{}{}
-		}
-		for _, c := range expr.Columns(node.Predicate) {
-			childNeeded[c] = struct{}{}
+		childNeeded := copyNeeded(needed)
+		if childNeeded != nil {
+			for _, c := range expr.Columns(node.Predicate) {
+				childNeeded[c] = struct{}{}
+			}
 		}
 		newChild, changed := p.push(node.Input, childNeeded)
+		f := Filter{Input: newChild, Predicate: node.Predicate}
+		if pruned, ok := pruneFilterOnlyColumns(f, needed); ok {
+			return pruned, true
+		}
 		if !changed {
 			return node, false
 		}
-		return Filter{Input: newChild, Predicate: node.Predicate}, true
+		return f, true
 	case Sort:
-		childNeeded := map[string]struct{}{}
-		for k := range needed {
-			childNeeded[k] = struct{}{}
-		}
-		for _, k := range node.Keys {
-			childNeeded[k] = struct{}{}
+		childNeeded := copyNeeded(needed)
+		if childNeeded != nil {
+			for _, k := range node.Keys {
+				childNeeded[k] = struct{}{}
+			}
 		}
 		newChild, changed := p.push(node.Input, childNeeded)
 		if !changed {
@@ -429,13 +469,16 @@ func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, 
 		}
 		return SliceNode{Input: newChild, Offset: node.Offset, Length: node.Length}, true
 	case Rename:
-		// Child needs old name where root needs new name; others pass.
-		childNeeded := map[string]struct{}{}
-		for k := range needed {
-			if k == node.New {
-				childNeeded[node.Old] = struct{}{}
-			} else {
-				childNeeded[k] = struct{}{}
+		var childNeeded map[string]struct{}
+		if needed != nil {
+			// Child needs old name where root needs new name; others pass.
+			childNeeded = map[string]struct{}{}
+			for k := range needed {
+				if k == node.New {
+					childNeeded[node.Old] = struct{}{}
+				} else {
+					childNeeded[k] = struct{}{}
+				}
 			}
 		}
 		newChild, changed := p.push(node.Input, childNeeded)
@@ -443,6 +486,20 @@ func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, 
 			return node, false
 		}
 		return Rename{Input: newChild, Old: node.Old, New: node.New}, true
+	case Join:
+		if needed == nil {
+			break
+		}
+		leftNeed, rightNeed, ok := joinChildNeeds(node, needed)
+		if !ok {
+			break
+		}
+		newLeft, lc := p.push(node.Left, leftNeed)
+		newRight, rc := p.push(node.Right, rightNeed)
+		if !lc && !rc {
+			return node, false
+		}
+		return node.WithChildren([]Node{newLeft, newRight}), true
 	case Drop:
 		// Dropped columns are not needed anyway.
 		newChild, changed := p.push(node.Input, needed)
@@ -451,24 +508,96 @@ func (p ProjectionPushdownPass) push(n Node, needed map[string]struct{}) (Node, 
 		}
 		return Drop{Input: newChild, Columns: node.Columns}, true
 	}
-	return n, false
+	// Unknown or column-set-sensitive node (join, unique, cache, ...):
+	// its children must produce every column, but a Projection or
+	// Aggregate further down can still prune.
+	kids := n.Children()
+	if len(kids) == 0 {
+		return n, false
+	}
+	newKids := make([]Node, len(kids))
+	anyChanged := false
+	for i, k := range kids {
+		nk, did := p.push(k, nil)
+		newKids[i] = nk
+		anyChanged = anyChanged || did
+	}
+	if !anyChanged {
+		return n, false
+	}
+	return n.WithChildren(newKids), true
 }
 
-// neededAtRoot returns the set of columns the top-level plan reads. For a
-// Projection this is the set of root outputs; for any other node we leave
-// the needed set nil, which means "all columns" and disables pushdown.
-func neededAtRoot(plan Node) map[string]struct{} {
-	switch n := plan.(type) {
-	case Projection:
-		out := map[string]struct{}{}
-		for _, e := range n.Exprs {
-			for _, c := range expr.Columns(e) {
-				out[c] = struct{}{}
+// pushIntoSource records the needed columns on a SourceFunc. With a
+// known schema the projection follows schema order and ignores names
+// the source does not have; without one the names are sorted, and a
+// name the source lacks surfaces as a load error just as it would have
+// further up the plan.
+func pushIntoSource(node SourceFunc, needed map[string]struct{}) (Node, bool) {
+	if len(needed) == 0 {
+		return node, false
+	}
+	var proj []string
+	if node.KnownSchema != nil {
+		proj = orderedIntersect(node.KnownSchema.Names(), needed)
+		if len(proj) == 0 || len(proj) == node.KnownSchema.Len() {
+			return node, false
+		}
+	} else {
+		proj = make([]string, 0, len(needed))
+		for k := range needed {
+			proj = append(proj, k)
+		}
+		slices.Sort(proj)
+	}
+	if len(node.Projection) > 0 {
+		keep := make([]string, 0, len(node.Projection))
+		for _, c := range node.Projection {
+			if _, ok := needed[c]; ok {
+				keep = append(keep, c)
 			}
 		}
-		return out
+		if len(keep) == len(node.Projection) || len(keep) == 0 {
+			return node, false
+		}
+		proj = keep
 	}
-	return nil
+	node.Projection = proj
+	return node, true
+}
+
+// exprColumnSet collects the columns referenced by exprs plus extra.
+// It returns nil (all columns) when nothing is referenced, e.g. a
+// select of only literals or a bare count, because projecting to zero
+// columns would lose the input height.
+func exprColumnSet(exprs []expr.Expr, extra []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, e := range exprs {
+		if referencesAllColumns(e) {
+			return nil
+		}
+		for _, c := range expr.Columns(e) {
+			out[c] = struct{}{}
+		}
+	}
+	for _, c := range extra {
+		out[c] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func copyNeeded(needed map[string]struct{}) map[string]struct{} {
+	if needed == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(needed))
+	for k := range needed {
+		out[k] = struct{}{}
+	}
+	return out
 }
 
 // transformPlan rewrites the tree post-order: children first, then the node
@@ -522,6 +651,14 @@ func simplifyExpr(e expr.Expr) (expr.Expr, bool) {
 
 func simplifyNode(e expr.Expr) (expr.Expr, bool) {
 	switch n := e.Node().(type) {
+	case expr.FunctionNode:
+		if n.Name == "is_between" {
+			// A bound that is not a plain literal (-lit(2)) is not
+			// rewritten; e itself must come back then, not a nil Expr.
+			if out, ok := rewriteIsBetween(n); ok {
+				return out, true
+			}
+		}
 	case expr.BinaryNode:
 		// Constant folding on two literals.
 		if ll, ok := n.Left.Node().(expr.LitNode); ok {
@@ -575,6 +712,28 @@ func simplifyNode(e expr.Expr) (expr.Expr, bool) {
 			}
 		}
 	case expr.UnaryNode:
+		if n.Op == expr.OpNeg {
+			// -lit folds to a literal of the same kind (an untyped
+			// literal stays untyped: -lit(2) next to an i8 is i8).
+			if lit, ok := n.Arg.Node().(expr.LitNode); ok {
+				switch v := lit.Value.(type) {
+				case int64:
+					if lit.Dyn {
+						return expr.LitInt(-v), true
+					}
+					if lit.DType.Equal(dtype.Int64()) {
+						return expr.LitInt64(-v), true
+					}
+				case float64:
+					if lit.Dyn {
+						return expr.LitFloat(-v), true
+					}
+					if lit.DType.Equal(dtype.Float64()) {
+						return expr.LitFloat64(-v), true
+					}
+				}
+			}
+		}
 		if n.Op == expr.OpNot {
 			// not(not(x)) → x
 			if inner, ok := n.Arg.Node().(expr.UnaryNode); ok && inner.Op == expr.OpNot {
@@ -594,7 +753,34 @@ func simplifyNode(e expr.Expr) (expr.Expr, bool) {
 // foldBinary folds a binary op over two literals into a single literal when
 // possible.
 func foldBinary(op expr.BinaryOp, l, r expr.LitNode) (expr.Expr, bool) {
-	// Only handle same-type numeric or same-type bool folding.
+	// Arithmetic folds only literals of one kind, and keeps that kind:
+	// two untyped literals give an untyped literal (lit(3) + lit(4) is
+	// still i32), two i64 or f64 literals give the same dtype. Anything
+	// else would change the result dtype, so it is left to the
+	// evaluator. Comparisons fold for any pair of numbers.
+	sameKind := l.Dyn == r.Dyn && l.DType.Equal(r.DType)
+	intLit := func(v int64) (expr.Expr, bool) {
+		switch {
+		case !sameKind:
+			return expr.Expr{}, false
+		case l.Dyn:
+			return expr.LitInt(v), true
+		case l.DType.Equal(dtype.Int64()):
+			return expr.LitInt64(v), true
+		}
+		return expr.Expr{}, false
+	}
+	floatLit := func(v float64) (expr.Expr, bool) {
+		switch {
+		case !sameKind:
+			return expr.Expr{}, false
+		case l.Dyn:
+			return expr.LitFloat(v), true
+		case l.DType.Equal(dtype.Float64()):
+			return expr.LitFloat64(v), true
+		}
+		return expr.Expr{}, false
+	}
 	switch la := l.Value.(type) {
 	case int64:
 		ra, ok := r.Value.(int64)
@@ -603,16 +789,11 @@ func foldBinary(op expr.BinaryOp, l, r expr.LitNode) (expr.Expr, bool) {
 		}
 		switch op {
 		case expr.OpAdd:
-			return expr.LitInt64(la + ra), true
+			return intLit(la + ra)
 		case expr.OpSub:
-			return expr.LitInt64(la - ra), true
+			return intLit(la - ra)
 		case expr.OpMul:
-			return expr.LitInt64(la * ra), true
-		case expr.OpDiv:
-			if ra == 0 {
-				return expr.Expr{}, false
-			}
-			return expr.LitInt64(la / ra), true
+			return intLit(la * ra)
 		case expr.OpEq:
 			return expr.LitBool(la == ra), true
 		case expr.OpNe:
@@ -633,13 +814,13 @@ func foldBinary(op expr.BinaryOp, l, r expr.LitNode) (expr.Expr, bool) {
 		}
 		switch op {
 		case expr.OpAdd:
-			return expr.LitFloat64(la + ra), true
+			return floatLit(la + ra)
 		case expr.OpSub:
-			return expr.LitFloat64(la - ra), true
+			return floatLit(la - ra)
 		case expr.OpMul:
-			return expr.LitFloat64(la * ra), true
+			return floatLit(la * ra)
 		case expr.OpDiv:
-			return expr.LitFloat64(la / ra), true
+			return floatLit(la / ra)
 		case expr.OpEq:
 			return expr.LitBool(la == ra), true
 		case expr.OpNe:
@@ -686,8 +867,10 @@ func projPassesThrough(exprs []expr.Expr, refs []string) bool {
 		}
 	}
 	for _, r := range refs {
+		// The filter must see the same column below: an alias (b := a)
+		// does not exist under the projection.
 		src, ok := produced[r]
-		if !ok || src == "" {
+		if !ok || src != r {
 			return false
 		}
 	}
@@ -708,7 +891,7 @@ func withColsPassesThrough(w WithColumns, refs []string) bool {
 		}
 	}
 	for _, r := range refs {
-		if src, ok := redefined[r]; ok && src == "" {
+		if src, ok := redefined[r]; ok && src != r {
 			return false
 		}
 	}
@@ -727,10 +910,29 @@ func bareCol(e expr.Expr) (string, bool) {
 	return "", false
 }
 
-// allRowLocal reports whether every expression operates row-locally
-// (equivalent: contains no aggregation).
-func allRowLocal(exprs []expr.Expr) bool {
-	return !slices.ContainsFunc(exprs, expr.ContainsAgg)
+// allElementwise reports whether every expression maps row i of the
+// input to row i of the output. Only then may a filter or a slice move
+// below the node: cum_sum, shift, rank, over and aggregations all read
+// other rows, so filtering or slicing first changes their values.
+func allElementwise(exprs []expr.Expr) bool {
+	for _, e := range exprs {
+		if !expr.IsElementwise(e) {
+			return false
+		}
+	}
+	return true
+}
+
+// anyColumnRef reports whether some expression reads a column. A
+// projection of only literals yields one row whatever the input height,
+// so a slice cannot move below it.
+func anyColumnRef(exprs []expr.Expr) bool {
+	for _, e := range exprs {
+		if len(expr.Columns(e)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func stringSet(xs []string) map[string]struct{} {
@@ -776,4 +978,17 @@ func FormatTraces(ts []Trace) string {
 		fmt.Fprintf(&b, "%-24s %s\n", t.Name, state)
 	}
 	return b.String()
+}
+
+// referencesAllColumns reports whether e reads the whole input frame
+// rather than a fixed set of named columns (a "*" column reference).
+func referencesAllColumns(e expr.Expr) bool {
+	found := false
+	expr.Walk(e, func(x expr.Expr) bool {
+		if c, ok := x.Node().(expr.ColNode); ok && c.Name == "*" {
+			found = true
+		}
+		return !found
+	})
+	return found
 }

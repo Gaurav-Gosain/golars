@@ -1,0 +1,49 @@
+{
+  "name": "literal_is_first_distinct",
+  "status": "fixed",
+  "note": "literal.is_first_distinct() broadcast before evaluation (literal semantics) (golars 1 rows, polars 2 rows)",
+  "plan": {
+    "seed": 200437,
+    "ops": [
+      {
+        "op": "filter",
+        "pred": {
+          "k": "call",
+          "name": "is_first_distinct",
+          "args": [
+            {
+              "k": "lit",
+              "val": false
+            }
+          ]
+        }
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "struct{a: i64, b: f64}",
+      "values": [
+        null,
+        null
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c0",
+        "type": "struct{a: i64, b: f64}",
+        "values": [
+          null,
+          null
+        ]
+      }
+    ]
+  }
+}

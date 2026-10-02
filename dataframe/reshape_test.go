@@ -42,6 +42,46 @@ func TestDataFrameTopK(t *testing.T) {
 	}
 }
 
+func TestDataFrameTopKTiesAndNulls(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer alloc.AssertSize(t, 0)
+
+	v, _ := series.FromInt64("v", []int64{5, 0, 5, 3, 5, 1},
+		[]bool{true, false, true, true, true, true}, series.WithAllocator(alloc))
+	id, _ := series.FromInt64("id", []int64{0, 1, 2, 3, 4, 5}, nil, series.WithAllocator(alloc))
+	df, _ := dataframe.New(v, id)
+	defer df.Release()
+
+	top, err := df.TopK(context.Background(), 3, "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer top.Release()
+	got, _ := top.Column("id")
+	arr := got.Chunk(0).(*array.Int64)
+	// Stable ties: 5s at input rows 0, 2, 4.
+	for i, w := range []int64{0, 2, 4} {
+		if arr.Value(i) != w {
+			t.Fatalf("top id[%d] = %d, want %d", i, arr.Value(i), w)
+		}
+	}
+
+	// polars: null keys rank after every value and only appear when k
+	// exceeds the non-null count.
+	all, err := df.TopK(context.Background(), 99, "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer all.Release()
+	if all.Height() != 6 {
+		t.Fatalf("height = %d, want 6", all.Height())
+	}
+	ids, _ := all.Column("id")
+	if last := ids.Chunk(0).(*array.Int64).Value(5); last != 1 {
+		t.Fatalf("last id = %d, want 1 (the null key)", last)
+	}
+}
+
 func TestDataFramePartitionBy(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer alloc.AssertSize(t, 0)

@@ -1,0 +1,83 @@
+{
+  "name": "quantile_with_in_agg",
+  "status": "fixed",
+  "note": "quantile with an interpolation in group_by.agg is not recognized as an aggregation and returns a list (golars {c4: cat, o1: list[f64]})",
+  "plan": {
+    "seed": 200013,
+    "ops": [
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "quantile",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "c0"
+                  },
+                  {
+                    "k": "raw",
+                    "val": 1,
+                    "f": true
+                  }
+                ],
+                "kw": [
+                  {
+                    "name": "interpolation",
+                    "val": {
+                      "k": "raw",
+                      "val": "midpoint"
+                    }
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c4"
+        ],
+        "maintain_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "u32",
+      "values": []
+    },
+    {
+      "name": "c4",
+      "type": "cat",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c4",
+        "type": "cat",
+        "values": []
+      },
+      {
+        "name": "o1",
+        "type": "f64",
+        "values": []
+      }
+    ]
+  }
+}

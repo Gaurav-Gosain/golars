@@ -21,8 +21,15 @@ type QueryFn func(dataDir string) (lazy.LazyFrame, error)
 
 // registry indexes queries by their 1-based PDS-H number.
 var registry = map[int]QueryFn{
-	1: Q1,
-	6: Q6,
+	1:  Q1,
+	3:  Q3,
+	4:  Q4,
+	5:  Q5,
+	6:  Q6,
+	10: Q10,
+	12: Q12,
+	14: Q14,
+	19: Q19,
 }
 
 // Get returns the builder for query number n, or an error when the

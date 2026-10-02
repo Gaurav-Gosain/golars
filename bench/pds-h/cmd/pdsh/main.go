@@ -16,11 +16,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Gaurav-Gosain/golars/bench/pds-h/queries"
+	"github.com/Gaurav-Gosain/golars/io/parquet"
 )
 
 func main() {
@@ -31,8 +34,36 @@ func main() {
 		repeats     = flag.Int("repeats", 1, "run each query N times and report each timing")
 		outPath     = flag.String("out", "bench/pds-h/output/timings.csv", "csv path (appended)")
 		printOutput = flag.Bool("print", false, "print the result frame after each query (slow on large SFs)")
+		cpuProfile  = flag.String("cpuprofile", "", "write a CPU profile covering all runs to this file")
+		memProfile  = flag.String("memprofile", "", "write an allocation profile covering all runs to this file")
+		explain     = flag.Bool("explain", false, "print the logical and optimized plan of each query and exit")
+		dumpDir     = flag.String("dump", "", "write each query result to DIR/q<N>.parquet (for answer checks)")
 	)
 	flag.Parse()
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			fatalf("cpu profile: %v", err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fatalf("cpu profile: %v", err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			f.Close()
+		}()
+	}
+	if *memProfile != "" {
+		runtime.MemProfileRate = 64 << 10
+		defer func() {
+			f, err := os.Create(*memProfile)
+			if err != nil {
+				fatalf("mem profile: %v", err)
+			}
+			_ = pprof.Lookup("allocs").WriteTo(f, 0)
+			f.Close()
+		}()
+	}
 	if *qFlag == "" || *dataDir == "" {
 		flag.Usage()
 		os.Exit(2)
@@ -53,6 +84,20 @@ func main() {
 	defer csv.Close()
 
 	ctx := context.Background()
+	if *explain {
+		for _, id := range ids {
+			fn, err := queries.Get(id)
+			if err != nil {
+				fatalf("q%d: %v", id, err)
+			}
+			lf, err := fn(*dataDir)
+			if err != nil {
+				fatalf("q%d: %v", id, err)
+			}
+			fmt.Printf("-- q%d\n%s\n", id, lf.ExplainString())
+		}
+		return
+	}
 	for _, id := range ids {
 		fn, err := queries.Get(id)
 		if err != nil {
@@ -60,7 +105,7 @@ func main() {
 			continue
 		}
 		for rep := 0; rep < *repeats; rep++ {
-			if err := runOne(ctx, id, rep, fn, *dataDir, *sfFlag, *printOutput, csv); err != nil {
+			if err := runOne(ctx, id, rep, fn, *dataDir, *sfFlag, *printOutput, *dumpDir, csv); err != nil {
 				fmt.Fprintf(os.Stderr, "q%d rep %d: %v\n", id, rep, err)
 			}
 		}
@@ -69,7 +114,7 @@ func main() {
 
 // runOne executes one query+repetition, prints its timing, and
 // appends one row to the timings csv.
-func runOne(ctx context.Context, id, rep int, fn queries.QueryFn, dataDir, sf string, printOut bool, csv *csvAppender) error {
+func runOne(ctx context.Context, id, rep int, fn queries.QueryFn, dataDir, sf string, printOut bool, dumpDir string, csv *csvAppender) error {
 	lf, err := fn(dataDir)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
@@ -83,9 +128,14 @@ func runOne(ctx context.Context, id, rep int, fn queries.QueryFn, dataDir, sf st
 	defer df.Release()
 
 	fmt.Printf("q%-2d  rep=%d  %s  %d×%d\n", id, rep,
-		elapsed.Truncate(time.Microsecond), df.Height(), df.Width())
+		fmt.Sprintf("%.6fs", elapsed.Seconds()), df.Height(), df.Width())
 	if printOut {
 		fmt.Println(df.Summary())
+	}
+	if dumpDir != "" && rep == 0 {
+		if err := parquet.WriteFile(ctx, filepath.Join(dumpDir, fmt.Sprintf("q%d.parquet", id)), df); err != nil {
+			return fmt.Errorf("dump: %w", err)
+		}
 	}
 	return csv.Append(id, elapsed.Seconds(), sf)
 }

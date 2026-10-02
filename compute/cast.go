@@ -2,7 +2,9 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"sync"
 
@@ -29,8 +31,21 @@ import (
 // Casting to the same dtype returns a clone of the input.
 func Cast(ctx context.Context, s *series.Series, to dtype.DType, opts ...Option) (*series.Series, error) {
 	cfg := resolve(opts)
+	// Dictionary dtypes (Categorical, Enum) go first: two Enum dtypes
+	// with different categories share one arrow type, so the Equal
+	// shortcut below would skip a needed remap.
+	if s.DType().IsDictionary() || to.IsDictionary() {
+		return castCategorical(ctx, s, to, cfg)
+	}
 	if s.DType().Equal(to) {
 		return s.Clone(), nil
+	}
+	if s.DType().IsNull() {
+		// A Null-typed column (lit(None)) casts to all nulls of any dtype.
+		return series.FullNull(cfg.outName(s.Name()), to.Arrow(), s.Len(), series.WithAllocator(cfg.alloc))
+	}
+	if out, ok, err := castExtra(ctx, s, to, cfg); ok {
+		return out, err
 	}
 
 	arr, err := extractChunk(s, cfg.alloc)
@@ -41,7 +56,17 @@ func Cast(ctx context.Context, s *series.Series, to dtype.DType, opts ...Option)
 
 	name := cfg.outName(s.Name())
 
-	// Dispatch on (fromID, toID) pair.
+	out, err := castDispatch(name, arr, to, cfg)
+	if err != nil && errors.Is(err, ErrUnsupportedDType) {
+		if g, ok, gerr := castGeneric(arr, to, name, cfg); ok {
+			return g, gerr
+		}
+	}
+	return out, err
+}
+
+// castDispatch runs the typed kernel for the target dtype.
+func castDispatch(name string, arr arrow.Array, to dtype.DType, cfg config) (*series.Series, error) {
 	switch to.ID() {
 	case arrow.INT32:
 		return castToInt32(name, arr, cfg)
@@ -380,6 +405,15 @@ func castToFloat64(name string, arr arrow.Array, cfg config) (*series.Series, er
 		return series.BuildFloat64DirectWithValidity(name, n, cfg.alloc, func(out []float64) {
 			castUint64ToFloat64(out, raw)
 		}, nullBuf, arr.NullN())
+	case *array.Uint32:
+		// Counts and lengths are u32; sum(x) / count(x) needs this.
+		raw := x.Uint32Values()
+		nullBuf := series.CopyValidityBitmap(arr, cfg.alloc)
+		return series.BuildFloat64DirectWithValidity(name, n, cfg.alloc, func(out []float64) {
+			for i, v := range raw {
+				out[i] = float64(v)
+			}
+		}, nullBuf, arr.NullN())
 	case *array.Float32:
 		raw := x.Float32Values()
 		nullBuf := series.CopyValidityBitmap(arr, cfg.alloc)
@@ -547,7 +581,7 @@ func castToString(name string, arr arrow.Array, cfg config) (*series.Series, err
 			if arr.IsNull(i) {
 				continue
 			}
-			out[i] = strconv.FormatFloat(raw[i], 'g', -1, 64)
+			out[i] = FormatFloatPolars(raw[i], 64)
 			valid[i] = true
 		}
 	case *array.Boolean:
@@ -592,7 +626,7 @@ func castInt64ToFloat64(out []float64, src []int64) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	// Large-N path: AVX2 uses streaming stores (VMOVNTPD) to bypass
@@ -617,8 +651,8 @@ func castInt64ToFloat64(out []float64, src []int64) {
 			defer wg.Done()
 			start := w * chunkSize
 			end := min(start+chunkSize, n)
-			for i := start; i < end; i++ {
-				out[i] = float64(src[i])
+			if start < end {
+				simdCastInt64ToFloat64AVX2(out[start:end], src[start:end])
 			}
 		}(w)
 	}
@@ -633,7 +667,7 @@ func castInt32ToFloat64(out []float64, src []int32) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	for w := range k {
@@ -658,7 +692,7 @@ func castUint64ToFloat64(out []float64, src []uint64) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	for w := range k {
@@ -683,7 +717,7 @@ func castFloat32ToFloat64(out []float64, src []float32) {
 		}
 		return
 	}
-	k := 8
+	k := min(8, runtime.GOMAXPROCS(0))
 	chunkSize := (n + k - 1) / k
 	var wg sync.WaitGroup
 	for w := range k {

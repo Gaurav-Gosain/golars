@@ -136,8 +136,8 @@ func TestDataFrameWithRowIndex(t *testing.T) {
 		t.Errorf("first column = %q, want idx", names[0])
 	}
 	idxCol, _ := out.Column("idx")
-	idxArr := idxCol.Chunk(0).(*array.Int64)
-	for i, w := range []int64{10, 11, 12} {
+	idxArr := idxCol.Chunk(0).(*array.Uint32)
+	for i, w := range []uint32{10, 11, 12} {
 		if idxArr.Value(i) != w {
 			t.Errorf("idx[%d] = %d, want %d", i, idxArr.Value(i), w)
 		}

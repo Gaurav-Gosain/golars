@@ -171,12 +171,15 @@ func TestStrHeadTailFind(t *testing.T) {
 
 	find, _ := s.Str().Find("a", series.WithAllocator(alloc))
 	defer find.Release()
-	// "alpha" -> 0, "beta" -> 3, "ga" -> 1, "" -> -1
-	wantF := []int64{0, 3, 1, -1}
-	farr := find.Chunk(0).(*array.Int64)
+	// polars: "alpha" -> 0, "beta" -> 3, "ga" -> 1, "" -> null (u32).
+	wantF := []uint32{0, 3, 1}
+	farr := find.Chunk(0).(*array.Uint32)
 	for i, w := range wantF {
 		if farr.Value(i) != w {
 			t.Errorf("Find('a')[%d] = %d, want %d", i, farr.Value(i), w)
 		}
+	}
+	if farr.IsValid(3) {
+		t.Errorf("Find('a')[3] = %d, want null", farr.Value(3))
 	}
 }

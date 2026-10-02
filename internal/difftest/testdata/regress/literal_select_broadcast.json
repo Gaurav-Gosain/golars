@@ -1,0 +1,38 @@
+{
+  "name": "literal_select_broadcast",
+  "status": "fixed",
+  "note": "select of only a literal returns frame height rows; polars returns one row (literals are length one until broadcast) (golars 2 rows, polars 1 rows)",
+  "plan": {
+    "seed": 200205,
+    "ops": [
+      {
+        "op": "unique"
+      }
+    ],
+    "order": {
+      "mode": "unordered"
+    }
+  },
+  "left": [
+    {
+      "name": "c1",
+      "type": "time",
+      "values": [
+        43200000000000,
+        43200000000000
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "time",
+        "values": [
+          43200000000000
+        ]
+      }
+    ]
+  }
+}

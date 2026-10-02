@@ -8,7 +8,9 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -67,25 +69,72 @@ func evalCoalesce(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		return nil, fmt.Errorf("eval: coalesce requires at least one argument")
 	}
 	// Evaluate all args upfront; they share the frame's height.
-	parts := make([]*series.Series, len(n.Args))
-	for i, a := range n.Args {
-		s, err := evalNode(ctx, ec, a, df)
-		if err != nil {
-			for _, prev := range parts[:i] {
-				if prev != nil {
-					prev.Release()
-				}
-			}
-			return nil, err
-		}
-		parts[i] = s
+	// Broadcast unit-length arguments (literals, aggregates) and use
+	// one chunk each: the row loops below index every part by row
+	// through its first chunk (found by internal/difftest).
+	parts, err := evalSingleChunkBroadcast(ctx, ec, n.Args, df)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		for _, p := range parts {
 			p.Release()
 		}
 	}()
-	return coalesceSeries(parts)
+	if err := adoptDynLiterals(ctx, ec, n.Args, parts); err != nil {
+		return nil, err
+	}
+	if err := stringSupertype(ctx, ec, parts); err != nil {
+		return nil, err
+	}
+	// Every argument takes the common supertype (polars: coalesce of
+	// two u8 columns is u8, of i8 and u8 is i16), then nulls fill left
+	// to right.
+	var target dtype.DType
+	for _, p := range parts {
+		d := p.DType()
+		if d.IsNull() {
+			continue
+		}
+		if !target.IsValid() {
+			target = d
+			continue
+		}
+		if st, ok := dtype.NumericSupertype(target, d); ok {
+			target = st
+		}
+	}
+	if !target.IsValid() {
+		return parts[0].Clone(), nil
+	}
+	acc, err := castTypedNull(ctx, ec, parts[0], target)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range parts[1:] {
+		next, err := castTypedNull(ctx, ec, p, target)
+		if err != nil {
+			acc.Release()
+			return nil, err
+		}
+		filled, err := fillNullFrom(ctx, ec, acc, next)
+		next.Release()
+		acc.Release()
+		if err != nil {
+			return nil, err
+		}
+		acc = filled
+	}
+	return acc, nil
+}
+
+// castTypedNull casts s to target; a Null-typed s becomes all nulls of
+// target.
+func castTypedNull(ctx context.Context, ec EvalContext, s *series.Series, target dtype.DType) (*series.Series, error) {
+	if s.DType().Equal(target) {
+		return s.Clone(), nil
+	}
+	return compute.Cast(ctx, s, target, kernelOpts(ec)...)
 }
 
 func coalesceSeries(parts []*series.Series) (*series.Series, error) {
@@ -175,18 +224,12 @@ func evalConcatStr(ctx context.Context, ec EvalContext, n expr.FunctionNode, df 
 			sep = s
 		}
 	}
-	parts := make([]*series.Series, len(n.Args))
-	for i, a := range n.Args {
-		s, err := evalNode(ctx, ec, a, df)
-		if err != nil {
-			for _, prev := range parts[:i] {
-				if prev != nil {
-					prev.Release()
-				}
-			}
-			return nil, err
-		}
-		parts[i] = s
+	// Broadcast unit-length arguments (literals, aggregates) and use
+	// one chunk each: the row loops below index every part by row
+	// through its first chunk (found by internal/difftest).
+	parts, err := evalSingleChunkBroadcast(ctx, ec, n.Args, df)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		for _, p := range parts {
@@ -237,4 +280,20 @@ func cellString(c any, i int) string {
 		return "false"
 	}
 	return ""
+}
+
+// evalSingleChunkBroadcast is evalBroadcast with every result
+// consolidated into a single chunk.
+func evalSingleChunkBroadcast(ctx context.Context, ec EvalContext, args []expr.Expr, df *dataframe.DataFrame) ([]*series.Series, error) {
+	parts, err := evalBroadcast(ctx, ec, args, df)
+	if err != nil {
+		return nil, err
+	}
+	for i, p := range parts {
+		if p.NumChunks() != 1 {
+			parts[i] = p.Rechunk()
+			p.Release()
+		}
+	}
+	return parts, nil
 }

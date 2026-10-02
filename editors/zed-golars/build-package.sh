@@ -63,7 +63,7 @@ wasm-tools component new \
   -o "$PKG_DIR/extension.wasm"
 
 echo "[*] generating + building tree-sitter grammar wasm"
-(cd "$GRAMMAR_DIR" && tree-sitter generate >/dev/null && tree-sitter build --wasm -o "$PKG_DIR/grammars/golars.wasm")
+(cd "$GRAMMAR_DIR" && tree-sitter generate --abi 14 >/dev/null && tree-sitter build --wasm -o "$PKG_DIR/grammars/golars.wasm")
 
 echo "[*] copying language assets"
 cp "$HERE/extension.toml" "$PKG_DIR/extension.toml"

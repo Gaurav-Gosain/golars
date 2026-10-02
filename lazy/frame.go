@@ -66,6 +66,7 @@ func (lf LazyFrame) Schema() (*schema.Schema, error) { return lf.plan.Schema() }
 //
 //	lf.Select(expr.Col("name"), expr.Col("salary").Alias("pay"))
 func (lf LazyFrame) Select(exprs ...expr.Expr) LazyFrame {
+	exprs = expandExprs(lf.plan, expandSelectors(lf.plan, exprs, nil), nil)
 	return LazyFrame{plan: Projection{Input: lf.plan, Exprs: exprs}}
 }
 
@@ -87,6 +88,7 @@ func (lf LazyFrame) Select(exprs ...expr.Expr) LazyFrame {
 //	    expr.Col("name").Str().ToUpper().Alias("name_upper"),
 //	)
 func (lf LazyFrame) WithColumns(exprs ...expr.Expr) LazyFrame {
+	exprs = expandExprs(lf.plan, expandSelectors(lf.plan, exprs, nil), nil)
 	return LazyFrame{plan: WithColumns{Input: lf.plan, Exprs: exprs}}
 }
 
@@ -165,6 +167,9 @@ func (lf LazyFrame) Drop(cols ...string) LazyFrame {
 type LazyGroupBy struct {
 	input Node
 	keys  []string
+	// ext carries expression-key renames and maintain_order; see
+	// groupby_methods.go.
+	ext groupByExt
 }
 
 // GroupBy starts a group-by on lf. Close it with
@@ -205,6 +210,11 @@ func (lf LazyFrame) GroupBy(keys ...string) LazyGroupBy {
 //
 // Bare-column inputs (the fast path) pass through unchanged.
 func (g LazyGroupBy) Agg(exprs ...expr.Expr) LazyFrame {
+	exprs = resolveNameOps(expandExprs(g.input, expandSelectors(g.input, exprs, g.keys), g.keys))
+	if g.ext.active() {
+		return g.aggExt(exprs)
+	}
+	exprs, post := liftAggWrappers(exprs, g.keys)
 	hoisted := make([]expr.Expr, 0, len(exprs))
 	rewritten := make([]expr.Expr, len(exprs))
 	nextID := 0
@@ -219,7 +229,11 @@ func (g LazyGroupBy) Agg(exprs ...expr.Expr) LazyFrame {
 	if len(hoisted) > 0 {
 		input = WithColumns{Input: input, Exprs: hoisted}
 	}
-	return LazyFrame{plan: Aggregate{Input: input, Keys: g.keys, Aggs: rewritten}}
+	var plan Node = Aggregate{Input: input, Keys: g.keys, Aggs: rewritten}
+	if post != nil {
+		plan = Projection{Input: plan, Exprs: post}
+	}
+	return LazyFrame{plan: plan}
 }
 
 // rewriteAggInput returns (rewritten agg expr, hoisted WithColumns
@@ -248,6 +262,17 @@ func rewriteAggInput(e expr.Expr, nextID *int) (expr.Expr, expr.Expr, bool) {
 	}
 	// Already a bare column: nothing to hoist.
 	if _, isCol := agg.Inner.Node().(expr.ColNode); isCol {
+		return e, expr.Expr{}, false
+	}
+	// Only row-wise inputs can be computed before grouping. Inputs such
+	// as filter or sort_by depend on the group's rows and are left for
+	// the per-group evaluator.
+	if !expr.IsElementwise(agg.Inner) {
+		return e, expr.Expr{}, false
+	}
+	// A literal input is one value, not one per row: lit(1).count() is
+	// 1 in every group. Hoisting it would broadcast it to the frame.
+	if expr.IsLiteralOnly(agg.Inner) {
 		return e, expr.Expr{}, false
 	}
 	// Hoist the inner expression.
@@ -299,33 +324,12 @@ func rebuildAgg(op expr.AggOp, inner expr.Expr) (expr.Expr, bool) {
 	return expr.Expr{}, false
 }
 
-// Join merges lf with other on a set of key columns.
-//
-// # Parameters
-//
-//   - other: right-hand side [LazyFrame].
-//   - on: shared key column names (must exist in both frames).
-//   - how: one of [dataframe.InnerJoin], [dataframe.LeftJoin],
-//     [dataframe.CrossJoin]. Inner drops rows with no match on
-//     either side; left keeps all rows from lf; cross produces the
-//     Cartesian product (ignores `on`).
-//
-// # Returns
-//
-// A [LazyFrame] whose output has the union of both schemas; key
-// columns appear once, collisions on non-key columns surface as an
-// error at execute time.
-//
-// # Examples
-//
-//	// Merge salaries onto people by name:
-//	people := lazy.FromDataFrame(peopleDF)
-//	salaries := lazy.FromDataFrame(salariesDF)
-//	out, _ := people.Join(salaries, []string{"name"}, dataframe.InnerJoin).
-//	    Filter(expr.Col("salary").Gt(expr.LitFloat64(50_000))).
-//	    Collect(ctx)
-func (lf LazyFrame) Join(other LazyFrame, on []string, how dataframe.JoinType) LazyFrame {
-	return LazyFrame{plan: Join{Left: lf.plan, Right: other.plan, On: on, How: how}}
+// JoinOn joins on one key column that has a different name on each
+// side, like polars join(left_on=..., right_on=...). It is shorthand
+// for Join with [dataframe.WithJoinKeys].
+func (lf LazyFrame) JoinOn(other LazyFrame, leftOn, rightOn string, how dataframe.JoinType, opts ...dataframe.JoinOption) LazyFrame {
+	opts = append([]dataframe.JoinOption{dataframe.WithJoinKeys([]string{leftOn}, []string{rightOn})}, opts...)
+	return lf.Join(other, nil, how, opts...)
 }
 
 // keep dataframe import referenced via JoinType.

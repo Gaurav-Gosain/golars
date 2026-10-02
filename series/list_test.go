@@ -68,7 +68,7 @@ func TestListLen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer out.Release()
-	arr := out.Chunk(0).(*array.Int64)
+	arr := out.Chunk(0).(*array.Uint32)
 	if arr.Len() != 4 {
 		t.Fatalf("len=%d want 4", arr.Len())
 	}
@@ -92,12 +92,12 @@ func TestListSum(t *testing.T) {
 	}
 	defer out.Release()
 	arr := out.Chunk(0).(*array.Int64)
-	// Expected: [6, null(empty), null(null), 30]
+	// Expected (polars): [6, 0 (empty), null (null row), 30]
 	if arr.Value(0) != 6 {
 		t.Errorf("sum[0]=%d want 6", arr.Value(0))
 	}
-	if !arr.IsNull(1) || !arr.IsNull(2) {
-		t.Errorf("empty/null rows should be null")
+	if arr.IsNull(1) || arr.Value(1) != 0 || !arr.IsNull(2) {
+		t.Errorf("empty list should sum to 0 and the null row stay null")
 	}
 	if arr.Value(3) != 30 {
 		t.Errorf("sum[3]=%d want 30", arr.Value(3))
@@ -155,7 +155,7 @@ func TestListContains(t *testing.T) {
 func TestListJoin(t *testing.T) {
 	s := buildListString(t)
 	defer s.Release()
-	out, err := s.List().Join("|")
+	out, err := s.List().Join("|", true)
 	if err != nil {
 		t.Fatal(err)
 	}

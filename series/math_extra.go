@@ -88,11 +88,12 @@ func (s *Series) Arctan2(other *Series, opts ...Option) (*Series, error) {
 		return nil, err
 	}
 	n := len(a)
-	return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
+	valid := mergeValid(validFromChunk(s.Chunk(0)), validFromChunk(other.Chunk(0)))
+	return BuildFloat64DirectNullable(s.Name(), n, cfg.alloc, func(out []float64) {
 		for i := range n {
 			out[i] = math.Atan2(a[i], b[i])
 		}
-	})
+	}, valid)
 }
 
 // asFloat64Values extracts a []float64 view/copy from a numeric chunk.
@@ -124,4 +125,19 @@ func asFloat64Values(arr any) ([]float64, error) {
 		return out, nil
 	}
 	return nil, fmt.Errorf("series: asFloat64Values unsupported for %T", arr)
+}
+
+// mergeValid ANDs two validity slices; nil means all valid.
+func mergeValid(a, b []bool) []bool {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	out := make([]bool, len(a))
+	for i := range out {
+		out[i] = a[i] && b[i]
+	}
+	return out
 }

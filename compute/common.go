@@ -101,6 +101,11 @@ func checkBinary(a, b *series.Series) error {
 // already a single chunk, the chunk is retained and returned directly.
 func extractChunk(s *series.Series, mem memory.Allocator) (arrow.Array, error) {
 	chunks := s.Chunks()
+	if len(chunks) > 1 {
+		// arrow's Concatenate fails on some empty chunks (an empty
+		// dictionary chunk panics), and they add nothing.
+		chunks = nonEmptyChunks(chunks)
+	}
 	switch len(chunks) {
 	case 0:
 		return array.MakeArrayOfNull(mem, s.DType().Arrow(), 0), nil
@@ -108,8 +113,23 @@ func extractChunk(s *series.Series, mem memory.Allocator) (arrow.Array, error) {
 		chunks[0].Retain()
 		return chunks[0], nil
 	default:
-		return array.Concatenate(chunks, mem)
+		return series.ConcatArrays(chunks, mem)
 	}
+}
+
+// nonEmptyChunks drops zero-length chunks, keeping one when all are
+// empty so the dtype survives.
+func nonEmptyChunks(chunks []arrow.Array) []arrow.Array {
+	out := make([]arrow.Array, 0, len(chunks))
+	for _, c := range chunks {
+		if c.Len() > 0 {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return chunks[:1]
+	}
+	return out
 }
 
 // inferParallelism picks a row-level parallelism bound. For small n we force

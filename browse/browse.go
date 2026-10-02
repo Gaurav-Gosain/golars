@@ -52,10 +52,10 @@ func RunWithContext(ctx context.Context, df *dataframe.DataFrame, title string) 
 type mode uint8
 
 const (
-	modeNormal mode = iota
-	modeVisual         // row/range selection
-	modeCommand        // `:` prompt
-	modeFilter         // `/` prompt
+	modeNormal  mode = iota
+	modeVisual       // row/range selection
+	modeCommand      // `:` prompt
+	modeFilter       // `/` prompt
 )
 
 // sortKey describes the active sort. idx is the column's position in
@@ -113,9 +113,8 @@ type model struct {
 	commandError   bool
 
 	// Pending motions.
-	gotoPending   bool
-	gotoBuffer    string
-	deletePending bool
+	gotoPending bool
+	gotoBuffer  string
 }
 
 func newModel(df *dataframe.DataFrame, title string) *model {

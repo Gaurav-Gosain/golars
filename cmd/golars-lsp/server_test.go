@@ -1,22 +1,164 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
-// fileURI turns a local filesystem path into a `file:///` URI that
-// the LSP's url.Parse understands on every OS. Windows paths use
-// backslashes and need `file:///C:/...` form; POSIX paths are
-// already absolute and produce `file:///tmp/...`. Keeps per-test
-// setup free of platform branching.
+// client drives a server over real LSP framing on in-memory pipes.
+type client struct {
+	t      *testing.T
+	w      io.WriteCloser
+	nextID int
+	mu     sync.Mutex
+	resp   map[int]chan json.RawMessage
+	notes  chan map[string]any
+	done   chan error
+}
+
+func newClient(t *testing.T, debounceMs int) *client {
+	t.Helper()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	c := &client{t: t, w: inW, resp: map[int]chan json.RawMessage{}, notes: make(chan map[string]any, 64), done: make(chan error, 1)}
+	srv := newServer(inR, outW, io.Discard)
+	go func() {
+		err := srv.Run()
+		outW.Close()
+		c.done <- err
+	}()
+	go c.readLoop(bufio.NewReader(outR))
+	t.Cleanup(func() {
+		c.w.Close()
+		select {
+		case <-c.done:
+		case <-time.After(2 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+	c.request("initialize", map[string]any{"initializationOptions": map[string]any{"debounceMs": debounceMs}})
+	c.notify("initialized", map[string]any{})
+	return c
+}
+
+func (c *client) readLoop(r *bufio.Reader) {
+	for {
+		n := 0
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				close(c.notes)
+				return
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				break
+			}
+			if v, found := strings.CutPrefix(line, "Content-Length: "); found {
+				n, _ = strconv.Atoi(v)
+			}
+		}
+		body := make([]byte, n)
+		if _, err := io.ReadFull(r, body); err != nil {
+			close(c.notes)
+			return
+		}
+		var msg struct {
+			ID     *int            `json:"id"`
+			Method string          `json:"method"`
+			Result json.RawMessage `json:"result"`
+			Error  *rpcError       `json:"error"`
+			Params map[string]any  `json:"params"`
+		}
+		if err := json.Unmarshal(body, &msg); err != nil {
+			continue
+		}
+		if msg.ID != nil {
+			c.mu.Lock()
+			ch := c.resp[*msg.ID]
+			c.mu.Unlock()
+			if msg.Error != nil {
+				ch <- json.RawMessage(`{"__error":` + strconv.Quote(msg.Error.Message) + `}`)
+			} else {
+				ch <- msg.Result
+			}
+			continue
+		}
+		c.notes <- map[string]any{"method": msg.Method, "params": msg.Params}
+	}
+}
+
+func (c *client) send(v any) {
+	body, _ := json.Marshal(v)
+	fmt.Fprintf(c.w, "Content-Length: %d\r\n\r\n%s", len(body), body)
+}
+
+func (c *client) notify(method string, params any) {
+	c.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+// request sends a request and decodes its result into a generic value.
+func (c *client) request(method string, params any) any {
+	c.t.Helper()
+	raw := c.requestRaw(method, params)
+	var out any
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+func (c *client) requestRaw(method string, params any) json.RawMessage {
+	c.t.Helper()
+	c.mu.Lock()
+	c.nextID++
+	id := c.nextID
+	ch := make(chan json.RawMessage, 1)
+	c.resp[id] = ch
+	c.mu.Unlock()
+	c.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(5 * time.Second):
+		c.t.Fatalf("%s: no response", method)
+		return nil
+	}
+}
+
+// diagnostics waits for the next publishDiagnostics for uri.
+func (c *client) diagnostics(uri string) []any {
+	c.t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case n, open := <-c.notes:
+			if !open {
+				c.t.Fatal("server closed")
+			}
+			if n["method"] != "textDocument/publishDiagnostics" {
+				continue
+			}
+			p := n["params"].(map[string]any)
+			if p["uri"] == uri {
+				return p["diagnostics"].([]any)
+			}
+		case <-timeout:
+			c.t.Fatal("no diagnostics published")
+			return nil
+		}
+	}
+}
+
 func fileURI(p string) string {
 	slashed := filepath.ToSlash(p)
 	if strings.HasPrefix(slashed, "/") {
@@ -25,747 +167,369 @@ func fileURI(p string) string {
 	return "file:///" + slashed
 }
 
-// framedPipe is a duplex io.Reader/Writer used to drive the server
-// end-to-end in-process. Requests written by the test land on the
-// server's stdin; responses written by the server land in a buffer
-// the test reads back with readFrame.
-type framedPipe struct {
-	toServer   *bytes.Buffer
-	fromServer *bytes.Buffer
-	mu         sync.Mutex
-}
-
-func newFramedPipe() *framedPipe {
-	return &framedPipe{
-		toServer:   &bytes.Buffer{},
-		fromServer: &bytes.Buffer{},
+// openDoc writes src to a temp dir with the example data and opens it.
+func (c *client) open(src string) string {
+	c.t.Helper()
+	dir := c.t.TempDir()
+	data := filepath.Join(dir, "data")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		c.t.Fatal(err)
 	}
-}
-
-// writeFrame feeds one LSP message into the server's stdin.
-func (p *framedPipe) writeFrame(method string, id any, params any) {
-	body := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
-	}
-	if id != nil {
-		body["id"] = id
-	}
-	if params != nil {
-		body["params"] = params
-	}
-	raw, _ := json.Marshal(body)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	fmt.Fprintf(p.toServer, "Content-Length: %d\r\n\r\n", len(raw))
-	p.toServer.Write(raw)
-}
-
-// readFrame decodes the next Content-Length framed message.
-// Returns (nil, io.EOF) when the server output is drained.
-func (p *framedPipe) readFrame(t *testing.T) map[string]any {
-	t.Helper()
-	r := p.fromServer
-	// Parse headers
-	var line string
-	var contentLen int
-	for {
-		b, err := r.ReadBytes('\n')
+	for _, name := range []string{"salaries.csv", "people.csv", "events.csv"} {
+		b, err := os.ReadFile(filepath.Join("../../examples/script/data", name))
 		if err != nil {
-			return nil
+			c.t.Fatal(err)
 		}
-		line = strings.TrimRight(string(b), "\r\n")
-		if line == "" {
-			break
-		}
-		if k, v, ok := strings.Cut(line, ":"); ok {
-			if strings.EqualFold(strings.TrimSpace(k), "Content-Length") {
-				fmt.Sscanf(strings.TrimSpace(v), "%d", &contentLen)
-			}
+		if err := os.WriteFile(filepath.Join(data, name), b, 0o644); err != nil {
+			c.t.Fatal(err)
 		}
 	}
-	buf := make([]byte, contentLen)
-	io.ReadFull(r, buf)
-	var out map[string]any
-	if err := json.Unmarshal(buf, &out); err != nil {
-		t.Fatalf("unmarshal frame: %v; raw=%q", err, string(buf))
+	path := filepath.Join(dir, "s.glr")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		c.t.Fatal(err)
+	}
+	uri := fileURI(path)
+	c.notify("textDocument/didOpen", map[string]any{"textDocument": map[string]any{
+		"uri": uri, "languageId": "glr", "version": 1, "text": src}})
+	return uri
+}
+
+func pos(uri string, line, char int) map[string]any {
+	return map[string]any{"textDocument": map[string]any{"uri": uri}, "position": map[string]any{"line": line, "character": char}}
+}
+
+func labels(v any) []string {
+	var out []string
+	m, _ := v.(map[string]any)
+	items, _ := m["items"].([]any)
+	for _, it := range items {
+		out = append(out, it.(map[string]any)["label"].(string))
 	}
 	return out
 }
 
-// runServer drives the server against the pipe. Stops when the pipe
-// reader returns EOF (i.e. all queued requests consumed).
-func runServer(p *framedPipe) {
-	srv := newServer(p.toServer, p.fromServer, io.Discard)
-	srv.Run() // #nosec: errors surface as test failures via readFrame
-}
-
-func TestLSPInitialize(t *testing.T) {
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	runServer(p)
-
-	reply := p.readFrame(t)
-	if reply["id"] != float64(1) {
-		t.Fatalf("id=%v, want 1", reply["id"])
-	}
-	res, ok := reply["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("no result: %v", reply)
-	}
-	caps := res["capabilities"].(map[string]any)
-	if caps["hoverProvider"] != true {
-		t.Fatal("hoverProvider should be true")
-	}
-	if caps["textDocumentSync"] != float64(1) {
-		t.Fatalf("textDocumentSync=%v, want 1", caps["textDocumentSync"])
-	}
-}
-
-func TestLSPCompletionAtLineStart(t *testing.T) {
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri":        "file:///tmp/test.glr",
-			"languageId": "glr",
-			"version":    1,
-			"text":       "lo",
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/test.glr"},
-		"position":     map[string]any{"line": 0, "character": 2},
-	})
-	runServer(p)
-
-	// Drain initialize reply + didOpen diagnostics notification.
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	sawLoad := false
-	for _, it := range items {
-		m := it.(map[string]any)
-		if m["label"] == "load" {
-			sawLoad = true
-			break
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
 		}
 	}
-	if !sawLoad {
-		t.Fatalf("completion missing `load` entry: %v", items)
-	}
+	return false
 }
 
-func TestLSPHoverOnCommand(t *testing.T) {
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri":        "file:///tmp/t.glr",
-			"languageId": "glr",
-			"version":    1,
-			"text":       "groupby region amount:sum\n",
-		},
-	})
-	p.writeFrame("textDocument/hover", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/t.glr"},
-		"position":     map[string]any{"line": 0, "character": 3},
-	})
-	runServer(p)
-	for range 2 { // init reply + diagnostics notif
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	res, ok := reply["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("hover result missing: %v", reply)
-	}
-	contents := res["contents"].(map[string]any)
-	val := contents["value"].(string)
-	if !strings.Contains(val, "groupby") {
-		t.Fatalf("hover body missing command name: %q", val)
-	}
-}
-
-func TestLSPDefinitionOnFrameName(t *testing.T) {
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri":        "file:///tmp/t.glr",
-			"languageId": "glr",
-			"version":    1,
-			"text":       "load foo.csv as trades\nuse trades\n",
-		},
-	})
-	// Position cursor on `trades` in the `use` line (line 1, col 4).
-	p.writeFrame("textDocument/definition", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/t.glr"},
-		"position":     map[string]any{"line": 1, "character": 5},
-	})
-	runServer(p)
-	for range 2 { // init reply + diagnostics notif
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	arr, ok := reply["result"].([]any)
-	if !ok || len(arr) == 0 {
-		t.Fatalf("definition result missing: %v", reply)
-	}
-	first := arr[0].(map[string]any)
-	rng := first["range"].(map[string]any)
-	startLine := int(rng["start"].(map[string]any)["line"].(float64))
-	if startLine != 0 {
-		t.Errorf("definition line = %d, want 0", startLine)
-	}
-}
-
-func TestLSPDiagnosticsUnknownCommand(t *testing.T) {
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri":        "file:///tmp/bad.glr",
-			"languageId": "glr",
-			"version":    1,
-			"text":       "pizza toppings\n",
-		},
-	})
-	runServer(p)
-	// init reply
-	p.readFrame(t)
-	// diagnostics notification
-	n := p.readFrame(t)
-	params := n["params"].(map[string]any)
-	diags := params["diagnostics"].([]any)
-	if len(diags) != 1 {
-		t.Fatalf("want 1 diagnostic, got %d", len(diags))
-	}
-	d := diags[0].(map[string]any)
-	if !strings.Contains(d["message"].(string), "unknown command") {
-		t.Fatalf("diagnostic message: %v", d)
-	}
-}
-
-// CSV column headers from a loaded file flow through to filter /
-// select / sort completion. We drop a tiny CSV on disk, reference
-// it via `load`, and ask for completions on a subsequent `filter`.
-func TestLSPColumnCompletionFromCSV(t *testing.T) {
-	dir := t.TempDir()
-	csvPath := filepath.Join(dir, "people.csv")
-	if err := os.WriteFile(csvPath, []byte("name,age,region\nada,27,EU\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	docURI := fileURI(filepath.Join(dir, "x.glr"))
-	text := "load people.csv\nfilter "
-
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": docURI, "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": docURI},
-		"position":     map[string]any{"line": 1, "character": 7},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	seen := map[string]bool{}
-	for _, it := range items {
-		m := it.(map[string]any)
-		seen[m["label"].(string)] = true
-	}
-	for _, want := range []string{"name", "age", "region"} {
-		if !seen[want] {
-			t.Fatalf("column %q missing from completion: %v", want, items)
-		}
-	}
-}
-
-// Walk-up path resolution: a script in a subdirectory referencing a
-// file by a repo-root-relative path (not script-dir-relative) still
-// resolves. This is the multisource.glr pattern.
-func TestLSPColumnCompletionResolvesViaAncestor(t *testing.T) {
-	root := t.TempDir()
-	scriptDir := root + "/examples/script"
-	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(scriptDir+"/data.csv", []byte("alpha,beta\n1,2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	docURI := fileURI(filepath.Join(scriptDir, "foo.glr"))
-	text := "load examples/script/data.csv\nfilter "
-
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": docURI, "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": docURI},
-		"position":     map[string]any{"line": 1, "character": 7},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	seen := map[string]bool{}
-	for _, it := range items {
-		m := it.(map[string]any)
-		seen[m["label"].(string)] = true
-	}
-	if !seen["alpha"] || !seen["beta"] {
-		t.Fatalf("walk-up resolve failed: %v", items)
-	}
-}
-
-// Post-`use NAME` focus swap: columns offered on subsequent lines
-// come from the promoted frame, not whatever was focused before.
-func TestLSPColumnCompletionFollowsUseFocus(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(dir+"/a.csv", []byte("alpha,beta\n1,2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dir+"/b.csv", []byte("gamma,delta\n3,4\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	docURI := fileURI(filepath.Join(dir, "m.glr"))
-	text := "load a.csv as a\nload b.csv as b\nuse b\nfilter "
-
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": docURI, "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": docURI},
-		"position":     map[string]any{"line": 3, "character": 7},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	seen := map[string]bool{}
-	for _, it := range items {
-		m := it.(map[string]any)
-		seen[m["label"].(string)] = true
-	}
-	if !seen["gamma"] || !seen["delta"] {
-		t.Fatalf("columns of `b` missing: %v", items)
-	}
-	if seen["alpha"] || seen["beta"] {
-		t.Fatalf("columns of `a` should NOT appear after `use b`: %v", items)
-	}
-}
-
-// Command completion kind is Keyword: prevents Neovim from
-// auto-inserting parens. Regression test for the "filter becomes a
-// function call" report.
-func TestLSPCommandCompletionKindIsKeyword(t *testing.T) {
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": "file:///tmp/k.glr", "languageId": "glr", "version": 1, "text": "fi",
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/k.glr"},
-		"position":     map[string]any{"line": 0, "character": 2},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	const kindKeyword = float64(14) // LSP CompletionItemKind.Keyword
-	for _, it := range items {
-		m := it.(map[string]any)
-		if m["label"] == "filter" {
-			if m["kind"] != kindKeyword {
-				t.Fatalf("filter kind = %v, want Keyword (%v)", m["kind"], kindKeyword)
-			}
-			return
-		}
-	}
-	t.Fatal("completion list missing `filter`")
-}
-
-// Full-pipeline shape tracking: every shape-transforming statement
-// gets a hint; limit/head/tail bound the row count symbolically while
-// filter / inner-join / groupby mark rows unknown.
-func TestLSPInlayHintsThroughFullPipeline(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(dir+"/p.csv", []byte("name,age\nada,27\nben,31\ncam,42\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dir+"/s.csv", []byte("name,amount\nada,10\nben,20\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	docURI := fileURI(filepath.Join(dir, "x.glr"))
-	text := `load p.csv as people
-load s.csv as salaries
-use people
-filter age > 25
-sort age desc
-join salaries on name
-limit 2
+const script = `load data/salaries.csv
+with monthly = round(amount / 12, 1)
+filter monthly > 5000 and name.str.starts_with("a")
+stash rich
+use rich
+select name, monthly
+# ^?
 `
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": docURI, "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/inlayHint", 2, map[string]any{
-		"textDocument": map[string]any{"uri": docURI},
-		"range": map[string]any{
-			"start": map[string]any{"line": 0, "character": 0},
-			"end":   map[string]any{"line": 20, "character": 0},
-		},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	hints := reply["result"].([]any)
-	byLine := make(map[int]string, len(hints))
-	for _, h := range hints {
-		m := h.(map[string]any)
-		ln := int(m["position"].(map[string]any)["line"].(float64))
-		byLine[ln] = m["label"].(string)
-	}
-	// 0: load people as     → 3 rows × 2 cols (staged)
-	// 1: load salaries as   → 2 rows × 2 cols (staged)
-	// 2: use people         → 3 rows × 2 cols
-	// 3: filter             → ? rows × 2 cols
-	// 4: sort               → ? rows × 2 cols
-	// 5: join on name       → ? rows × 3 cols (2+2−key)
-	// 6: limit 2            → 2 rows × 3 cols
-	want := map[int][]string{
-		0: {"3 rows", "2 cols"},
-		1: {"2 rows", "2 cols"},
-		2: {"3 rows", "2 cols"},
-		3: {"? rows", "2 cols"},
-		4: {"? rows", "2 cols"},
-		5: {"? rows", "3 cols"},
-		6: {"2 rows", "3 cols"},
-	}
-	for ln, needles := range want {
-		got, ok := byLine[ln]
-		if !ok {
-			t.Fatalf("no hint for line %d; got %v", ln, byLine)
+
+func TestLSPInitializeCapabilities(t *testing.T) {
+	c := newClient(t, 0)
+	res := c.request("initialize", map[string]any{}).(map[string]any)
+	caps := res["capabilities"].(map[string]any)
+	for _, k := range []string{"completionProvider", "hoverProvider", "signatureHelpProvider", "definitionProvider",
+		"referencesProvider", "renameProvider", "documentSymbolProvider", "foldingRangeProvider",
+		"semanticTokensProvider", "documentFormattingProvider", "codeActionProvider", "inlayHintProvider"} {
+		if caps[k] == nil {
+			t.Errorf("missing capability %s", k)
 		}
-		for _, needle := range needles {
-			if !strings.Contains(got, needle) {
-				t.Fatalf("line %d label %q missing %q", ln, got, needle)
+	}
+}
+
+func TestLSPDiagnosticsOnOpenAndChange(t *testing.T) {
+	c := newClient(t, 30)
+	uri := c.open(script)
+	if d := c.diagnostics(uri); len(d) != 0 {
+		t.Fatalf("clean script has diagnostics: %v", d)
+	}
+	// Two quick changes: only the last one is analysed (debounce).
+	for v, text := range []string{"load data/salaries.csv\nfilter amout > 1\n", "load data/salaries.csv\nfilter amout > 1\nfiltet x\n"} {
+		c.notify("textDocument/didChange", map[string]any{
+			"textDocument":   map[string]any{"uri": uri, "version": v + 2},
+			"contentChanges": []any{map[string]any{"text": text}},
+		})
+	}
+	d := c.diagnostics(uri)
+	if len(d) != 2 {
+		t.Fatalf("want 2 diagnostics, got %v", d)
+	}
+	first := d[0].(map[string]any)
+	if !strings.Contains(first["message"].(string), `unknown column "amout" (did you mean "amount"?)`) {
+		t.Errorf("message %q", first["message"])
+	}
+	rg := first["range"].(map[string]any)
+	start := rg["start"].(map[string]any)
+	end := rg["end"].(map[string]any)
+	if start["line"] != 1.0 || start["character"] != 7.0 || end["character"] != 12.0 {
+		t.Errorf("range %v", rg)
+	}
+}
+
+func TestLSPCompletion(t *testing.T) {
+	c := newClient(t, 0)
+	uri := c.open(script + "filter mo\nwith x = name.str.to_up\nwith y = cut(amount, [1], la\nload data/sal\n")
+	c.diagnostics(uri)
+	for _, tc := range []struct {
+		line, char int
+		want       string
+	}{
+		{0, 2, "load"},
+		{7, 9, "monthly"},
+		{8, 23, "to_uppercase"},
+		{9, 28, "labels="},
+		{10, 13, "data/salaries.csv"},
+		{4, 4, "rich"},
+	} {
+		got := labels(c.request("textDocument/completion", pos(uri, tc.line, tc.char)))
+		if !contains(got, tc.want) {
+			t.Errorf("%d:%d: %q not in %v", tc.line, tc.char, tc.want, got)
+		}
+	}
+	// Function items carry snippets.
+	res := c.request("textDocument/completion", pos(uri, 8, 23)).(map[string]any)
+	for _, it := range res["items"].([]any) {
+		m := it.(map[string]any)
+		if m["label"] == "to_uppercase" {
+			if m["insertTextFormat"] != 2.0 || !strings.Contains(m["textEdit"].(map[string]any)["newText"].(string), "to_uppercase(") {
+				t.Errorf("item %v", m)
 			}
 		}
 	}
 }
 
-// Probe directive: a `# ^?` comment emits a dense schema peek.
-func TestLSPInlayHintProbe(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(dir+"/p.csv", []byte("name,age,city\nada,1,NYC\n"), 0o644); err != nil {
-		t.Fatal(err)
+func TestLSPHoverAndSignature(t *testing.T) {
+	c := newClient(t, 0)
+	uri := c.open(script + "with z = round(amount, \n")
+	c.diagnostics(uri)
+	hover := func(line, char int) string {
+		res := c.request("textDocument/hover", pos(uri, line, char))
+		if res == nil {
+			return ""
+		}
+		return res.(map[string]any)["contents"].(map[string]any)["value"].(string)
 	}
-	docURI := fileURI(filepath.Join(dir, "x.glr"))
-	text := "load p.csv\n# ^?\n"
-
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": docURI, "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/inlayHint", 2, map[string]any{
-		"textDocument": map[string]any{"uri": docURI},
-		"range": map[string]any{
-			"start": map[string]any{"line": 0, "character": 0},
-			"end":   map[string]any{"line": 5, "character": 0},
-		},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	hints := reply["result"].([]any)
-	var probe string
-	for _, h := range hints {
-		m := h.(map[string]any)
-		ln := int(m["position"].(map[string]any)["line"].(float64))
-		if ln == 1 {
-			probe = m["label"].(string)
+	for _, tc := range []struct {
+		line, char int
+		want       string
+	}{
+		{0, 1, "load <path>"},
+		{1, 16, "round(x, decimals: int = 0)"},
+		{1, 22, "**amount** `i64`"},
+		{2, 8, "**monthly** `f64`"},
+		{2, 40, "starts_with"},
+		{4, 5, "frame rich"},
+		{6, 2, "| monthly | f64 |"},
+	} {
+		if got := hover(tc.line, tc.char); !strings.Contains(got, tc.want) {
+			t.Errorf("hover %d:%d = %q, want %q", tc.line, tc.char, got, tc.want)
 		}
 	}
-	if probe == "" {
-		t.Fatalf("probe hint missing on line 1: %v", hints)
-	}
-	for _, col := range []string{"name", "age", "city"} {
-		if !strings.Contains(probe, col) {
-			t.Fatalf("probe missing column %q: %q", col, probe)
-		}
+	sig := c.request("textDocument/signatureHelp", pos(uri, 7, 23)).(map[string]any)
+	s0 := sig["signatures"].([]any)[0].(map[string]any)
+	if s0["label"] != "round(x, decimals: int = 0)" || sig["activeParameter"] != 1.0 {
+		t.Errorf("signature %v", sig)
 	}
 }
 
-// Inlay hints: a `load` line gets a trailing annotation showing the
-// source file's shape (rows × cols) read from disk.
-func TestLSPInlayHintsForLoad(t *testing.T) {
-	dir := t.TempDir()
-	csvPath := filepath.Join(dir, "d.csv")
-	if err := os.WriteFile(csvPath, []byte("a,b,c\n1,2,3\n4,5,6\n7,8,9\n"), 0o644); err != nil {
-		t.Fatal(err)
+func TestLSPNavigation(t *testing.T) {
+	c := newClient(t, 0)
+	uri := c.open(script)
+	c.diagnostics(uri)
+	def := c.request("textDocument/definition", pos(uri, 2, 9)).(map[string]any)
+	if r := def["range"].(map[string]any)["start"].(map[string]any); r["line"] != 1.0 || r["character"] != 5.0 {
+		t.Errorf("definition of monthly: %v", def)
 	}
-	docURI := fileURI(filepath.Join(dir, "x.glr"))
-	text := "load d.csv\n"
-
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": docURI, "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/inlayHint", 2, map[string]any{
-		"textDocument": map[string]any{"uri": docURI},
-		"range": map[string]any{
-			"start": map[string]any{"line": 0, "character": 0},
-			"end":   map[string]any{"line": 5, "character": 0},
-		},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
+	def = c.request("textDocument/definition", pos(uri, 4, 5)).(map[string]any)
+	if r := def["range"].(map[string]any)["start"].(map[string]any); r["line"] != 3.0 {
+		t.Errorf("definition of rich: %v", def)
 	}
-	reply := p.readFrame(t)
-	hints := reply["result"].([]any)
-	if len(hints) != 1 {
-		t.Fatalf("expected 1 hint, got %d: %v", len(hints), hints)
+	refs := c.request("textDocument/references", map[string]any{
+		"textDocument": map[string]any{"uri": uri}, "position": map[string]any{"line": 1, "character": 6},
+		"context": map[string]any{"includeDeclaration": true}}).([]any)
+	if len(refs) != 3 {
+		t.Errorf("references of monthly: %v", refs)
 	}
-	h := hints[0].(map[string]any)
-	label := h["label"].(string)
-	// 3 data rows × 3 cols.
-	if !strings.Contains(label, "3 rows") || !strings.Contains(label, "3 cols") {
-		t.Fatalf("hint label = %q, expected it to mention rows and cols", label)
+	edit := c.request("textDocument/rename", map[string]any{
+		"textDocument": map[string]any{"uri": uri}, "position": map[string]any{"line": 1, "character": 6},
+		"newName": "per_month"}).(map[string]any)
+	if n := len(edit["changes"].(map[string]any)[uri].([]any)); n != 3 {
+		t.Errorf("rename edits: %v", edit)
 	}
-	pos := h["position"].(map[string]any)
-	if pos["line"].(float64) != 0 {
-		t.Fatalf("hint line = %v, want 0", pos["line"])
+	// Columns read from a file cannot be renamed.
+	raw := c.requestRaw("textDocument/prepareRename", pos(uri, 1, 22))
+	if !strings.Contains(string(raw), "__error") {
+		t.Errorf("prepareRename on a file column: %s", raw)
 	}
 }
 
-// Position-aware arg completion for `join`: after the key, suggest
-// inner/left/cross. Regression for the user report that
-// "join X on Y " wasn't offering join-type keywords.
-func TestLSPJoinKeywordsAppearAfterKey(t *testing.T) {
-	p := newFramedPipe()
-	// Two staged frames so `join people on name ` is well-formed up
-	// to the cursor and we're asking for the 4th argument.
-	text := "load a.csv as people\nload b.csv as salaries\njoin people on name "
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": "file:///tmp/j.glr", "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/j.glr"},
-		"position":     map[string]any{"line": 2, "character": len("join people on name ")},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	seen := map[string]bool{}
-	for _, it := range items {
-		m := it.(map[string]any)
-		seen[m["label"].(string)] = true
-	}
-	for _, want := range []string{"inner", "left", "cross"} {
-		if !seen[want] {
-			t.Fatalf("join-type keyword %q missing: %v", want, items)
+func TestLSPSymbolsFoldingTokens(t *testing.T) {
+	c := newClient(t, 0)
+	uri := c.open("# header\n# more\n" + script)
+	c.diagnostics(uri)
+	doc := map[string]any{"textDocument": map[string]any{"uri": uri}}
+	syms := c.request("textDocument/documentSymbol", doc).([]any)
+	var names []string
+	var walk func([]any)
+	walk = func(list []any) {
+		for _, s := range list {
+			m := s.(map[string]any)
+			names = append(names, m["name"].(string))
+			if ch, ok := m["children"].([]any); ok {
+				walk(ch)
+			}
 		}
 	}
-	// And must NOT contain column names or frame names at this position.
-	if seen["people"] || seen["salaries"] {
-		t.Fatal("frame names should not appear at arg index 4 of join")
-	}
-}
-
-// Position-aware arg completion for `load`: after PATH, suggest `as`.
-func TestLSPLoadKeywordAsAfterPath(t *testing.T) {
-	p := newFramedPipe()
-	text := "load data/x.csv "
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": "file:///tmp/l.glr", "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/l.glr"},
-		"position":     map[string]any{"line": 0, "character": len(text)},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	if len(items) != 1 {
-		t.Fatalf("expected single `as` completion, got %v", items)
-	}
-	if label := items[0].(map[string]any)["label"]; label != "as" {
-		t.Fatalf("arg 2 of load: got %v, want `as`", label)
-	}
-}
-
-func TestLSPFrameCompletionFromEarlierLoad(t *testing.T) {
-	p := newFramedPipe()
-	text := "load data/trades.csv as trades\nload data/users.csv as users\nuse "
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": "file:///tmp/m.glr", "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/m.glr"},
-		"position":     map[string]any{"line": 2, "character": 4},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	want := map[string]bool{"trades": false, "users": false}
-	for _, it := range items {
-		m := it.(map[string]any)
-		lbl := m["label"].(string)
-		if _, ok := want[lbl]; ok {
-			want[lbl] = true
+	walk(syms)
+	for _, want := range []string{"monthly", "rich", "use rich"} {
+		if !contains(names, want) {
+			t.Errorf("symbols %v missing %q", names, want)
 		}
 	}
-	for n, ok := range want {
-		if !ok {
-			t.Fatalf("frame completion missing %q: %v", n, items)
-		}
+	folds := c.request("textDocument/foldingRange", doc).([]any)
+	if len(folds) < 2 {
+		t.Errorf("folding ranges %v", folds)
 	}
-}
-
-// TestLSPNewCommandsInCompletion pins that every command added to
-// script/spec.go is reachable from the LSP completion list at line
-// start. Prevents silent drift when a new command lands in the spec
-// without wiring into cmd/golars-lsp.
-func TestLSPNewCommandsInCompletion(t *testing.T) {
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": "file:///tmp/new.glr", "languageId": "glr", "version": 1, "text": "",
-		},
-	})
-	p.writeFrame("textDocument/completion", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/new.glr"},
-		"position":     map[string]any{"line": 0, "character": 0},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
+	toks := c.request("textDocument/semanticTokens/full", doc).(map[string]any)["data"].([]any)
+	if len(toks) == 0 || len(toks)%5 != 0 {
+		t.Fatalf("semantic tokens %v", toks)
 	}
-	reply := p.readFrame(t)
-	items := reply["result"].([]any)
-	// Every command in this list must be completable. Add new
-	// commands here when script/spec.go grows.
-	want := map[string]bool{
-		"explain_tree": false, "tree": false,
-		"scan_csv": false, "scan_parquet": false, "scan_ipc": false,
-		"scan_json": false, "scan_ndjson": false, "scan_auto": false,
-		"unnest": false, "explode": false, "upsample": false,
-	}
-	for _, it := range items {
-		m := it.(map[string]any)
-		if _, ok := want[m["label"].(string)]; ok {
-			want[m["label"].(string)] = true
-		}
-	}
-	for n, ok := range want {
-		if !ok {
-			t.Errorf("completion missing command %q", n)
-		}
-	}
-}
-
-// TestLSPInlayHintsAfterScan covers the shape-tracking case for
-// scan_csv. The LSP should carry schema from the scan into downstream
-// filter/select statements, matching behaviour for eager load.
-func TestLSPInlayHintsAfterScan(t *testing.T) {
-	dir := t.TempDir()
-	csv := filepath.Join(dir, "s.csv")
-	if err := os.WriteFile(csv, []byte("id,name,amount\n1,a,10\n2,b,20\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	text := "scan_csv " + csv + "\nfilter amount > 10\n"
-	p := newFramedPipe()
-	p.writeFrame("initialize", 1, map[string]any{})
-	p.writeFrame("textDocument/didOpen", nil, map[string]any{
-		"textDocument": map[string]any{
-			"uri": "file:///tmp/scan.glr", "languageId": "glr", "version": 1, "text": text,
-		},
-	})
-	p.writeFrame("textDocument/inlayHint", 2, map[string]any{
-		"textDocument": map[string]any{"uri": "file:///tmp/scan.glr"},
-		"range": map[string]any{
-			"start": map[string]any{"line": 0, "character": 0},
-			"end":   map[string]any{"line": 2, "character": 0},
-		},
-	})
-	runServer(p)
-	for range 2 {
-		p.readFrame(t)
-	}
-	reply := p.readFrame(t)
-	result, ok := reply["result"].([]any)
-	if !ok || len(result) == 0 {
-		t.Fatalf("no inlay hints returned for scan_csv pipeline: %v", reply)
-	}
-	// At least one hint should report the 3-column shape produced
-	// by the CSV scan so the user can see the schema propagated.
+	// Decode and look for the round function on line 3 (0-based).
+	line, col := 0, 0
 	found := false
-	for _, h := range result {
-		m := h.(map[string]any)
-		if lbl, ok := m["label"].(string); ok && strings.Contains(lbl, "cols") {
+	for i := 0; i < len(toks); i += 5 {
+		dl, dc := int(toks[i].(float64)), int(toks[i+1].(float64))
+		if dl > 0 {
+			line, col = line+dl, dc
+		} else {
+			col += dc
+		}
+		if line == 3 && col == 15 && semanticTypes[int(toks[i+3].(float64))] == "function" {
 			found = true
-			break
 		}
 	}
 	if !found {
-		t.Errorf("expected a col-count hint after scan_csv, got: %v", result)
+		t.Error("round is not a function token")
+	}
+}
+
+func TestLSPFormattingAndCodeActions(t *testing.T) {
+	c := newClient(t, 0)
+	uri := c.open("LOAD data/salaries.csv\nfilter amout>1\n")
+	c.diagnostics(uri)
+	doc := map[string]any{"textDocument": map[string]any{"uri": uri}, "options": map[string]any{"tabSize": 2, "insertSpaces": true}}
+	edits := c.request("textDocument/formatting", doc).([]any)
+	if len(edits) != 1 || edits[0].(map[string]any)["newText"] != "load data/salaries.csv\nfilter amout > 1\n" {
+		t.Errorf("formatting: %v", edits)
+	}
+	acts := c.request("textDocument/codeAction", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"range":        map[string]any{"start": map[string]any{"line": 1, "character": 0}, "end": map[string]any{"line": 1, "character": 0}},
+		"context":      map[string]any{"diagnostics": []any{}},
+	}).([]any)
+	if len(acts) != 1 || acts[0].(map[string]any)["title"] != "Change to amount" {
+		t.Fatalf("code actions: %v", acts)
+	}
+	uri2 := c.open("filter x > 1\n")
+	c.diagnostics(uri2)
+	acts = c.request("textDocument/codeAction", map[string]any{
+		"textDocument": map[string]any{"uri": uri2},
+		"range":        map[string]any{"start": map[string]any{"line": 0, "character": 0}, "end": map[string]any{"line": 0, "character": 0}},
+	}).([]any)
+	if len(acts) != 1 || !strings.HasPrefix(acts[0].(map[string]any)["title"].(string), "Add `load data/") {
+		t.Fatalf("missing-load action: %v", acts)
+	}
+}
+
+func TestLSPInlayHints(t *testing.T) {
+	c := newClient(t, 0)
+	uri := c.open(script)
+	c.diagnostics(uri)
+	hints := c.request("textDocument/inlayHint", map[string]any{"textDocument": map[string]any{"uri": uri},
+		"range": map[string]any{"start": map[string]any{"line": 0, "character": 0}, "end": map[string]any{"line": 7, "character": 0}}}).([]any)
+	var got []string
+	for _, h := range hints {
+		m := h.(map[string]any)
+		got = append(got, fmt.Sprintf("%v:%s", m["position"].(map[string]any)["line"], m["label"]))
+	}
+	want := []string{"0:→ 5 rows × 2 cols", "1:→ 5 rows × 3 cols", "2:→ ≤5 rows × 3 cols", "4:→ ≤5 rows × 3 cols",
+		"5:→ ≤5 rows × 2 cols", "6:cols(name: str, monthly: f64) ≤5 rows × 2 cols"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("hints\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestLSPUnknownMethodAndFraming(t *testing.T) {
+	c := newClient(t, 0)
+	raw := c.requestRaw("workspace/unknownThing", map[string]any{})
+	if !strings.Contains(string(raw), "Method not found") {
+		t.Errorf("got %s", raw)
+	}
+	for _, input := range []string{
+		"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+		fmt.Sprintf("Content-Length: %d\r\n\r\n", maxMessageBytes+1),
+		strings.Repeat("X", maxHeaderBytes+1),
+		"Content-Length: 2\r\n\r\n",
+	} {
+		s := newServer(strings.NewReader(input), io.Discard, io.Discard)
+		if err := s.Run(); err == nil {
+			t.Errorf("expected framing error for %.30q", input)
+		}
+	}
+	s := newServer(strings.NewReader("Content-Length: 58\r\n\r\n"+`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`), failedWriter{}, io.Discard)
+	if err := s.Run(); !errors.Is(err, io.ErrClosedPipe) {
+		t.Errorf("got %v, want closed pipe", err)
+	}
+}
+
+type failedWriter struct{}
+
+func (failedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// Completion and diagnostics on a 500-line script stay well inside
+// an interactive budget. Measured through the protocol.
+func TestLSPLatency500Lines(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("load data/salaries.csv\n")
+	for i := 1; i < 500; i++ {
+		switch i % 4 {
+		case 0:
+			fmt.Fprintf(&b, "with c%d = amount * %d + 1\n", i, i)
+		case 1:
+			fmt.Fprintf(&b, "filter amount > %d and name.str.len_chars() > 0\n", i)
+		case 2:
+			fmt.Fprintf(&b, "with s%d = str.to_uppercase(name)\n", i)
+		default:
+			b.WriteString("# comment\n")
+		}
+	}
+	src := b.String()
+	c := newClient(t, 0)
+	uri := c.open(src)
+	c.diagnostics(uri)
+	var diags, comps []time.Duration
+	for v := 2; v < 22; v++ {
+		text := src + fmt.Sprintf("filter c%d > 0\n", 4*v)
+		start := time.Now()
+		c.notify("textDocument/didChange", map[string]any{"textDocument": map[string]any{"uri": uri, "version": v},
+			"contentChanges": []any{map[string]any{"text": text}}})
+		if d := c.diagnostics(uri); len(d) != 0 {
+			t.Fatalf("diagnostics: %v", d[0])
+		}
+		diags = append(diags, time.Since(start))
+		start = time.Now()
+		c.request("textDocument/completion", pos(uri, 500, 8))
+		comps = append(comps, time.Since(start))
+	}
+	slices.Sort(diags)
+	slices.Sort(comps)
+	medDiag, medComp := diags[len(diags)/2], comps[len(comps)/2]
+	t.Logf("500 lines: diagnostics median %s (min %s), completion median %s (min %s)", medDiag, diags[0], medComp, comps[0])
+	// The machine may be loaded; judge the median against a generous
+	// bound and leave the precise budget to the log.
+	if !testing.Short() && !raceEnabled && (medDiag > 150*time.Millisecond || medComp > 150*time.Millisecond) {
+		t.Errorf("too slow: diagnostics %s, completion %s", medDiag, medComp)
 	}
 }

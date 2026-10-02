@@ -1,0 +1,82 @@
+{
+  "name": "date_literal_in_agg",
+  "status": "fixed",
+  "note": "a date literal in group_by.agg becomes list[date]; polars keeps a scalar per group (golars {c1: bool, c0: duration[us], o2: list[date]})",
+  "plan": {
+    "seed": 200201,
+    "ops": [
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "fn",
+                "name": "date",
+                "args": [
+                  {
+                    "k": "raw",
+                    "val": 1994
+                  },
+                  {
+                    "k": "raw",
+                    "val": 12
+                  },
+                  {
+                    "k": "raw",
+                    "val": 24
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o2"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c1",
+          "c0"
+        ]
+      }
+    ],
+    "order": {
+      "mode": "unordered"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "duration[us]",
+      "values": []
+    },
+    {
+      "name": "c1",
+      "type": "bool",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c1",
+        "type": "bool",
+        "values": []
+      },
+      {
+        "name": "c0",
+        "type": "duration[us]",
+        "values": []
+      },
+      {
+        "name": "o2",
+        "type": "date",
+        "values": []
+      }
+    ]
+  }
+}

@@ -22,7 +22,7 @@ func main() {
 	}
 	defer df1.Release()
 	lf1 := lazy.FromDataFrame(df1).
-		WithColumns(expr.Col("discount").FillNullExpr(expr.LitFloat64(0)).Alias("discount_filled")).
+		WithColumns(expr.Col("discount").FillNullExpr(expr.LitFloat64(0.0)).Alias("discount_filled")).
 		WithColumns(expr.Col("unit_price").Mul(expr.LitInt64(1).Sub(expr.Col("discount_filled"))).Alias("revenue"))
 	display(ctx, lf1.Limit(10))
 	df2, err := golars.ReadCSV("examples/script/data/orders.csv", csv.WithNullValues(""))
@@ -30,8 +30,8 @@ func main() {
 		log.Fatal(err)
 	}
 	defer df2.Release()
-	lf2 := lazy.FromDataFrame(df2).Filter(expr.Col("discount").IsNotNull())
-	display(ctx, lf2.Limit(10))
+	lf3 := lazy.FromDataFrame(df2).Filter(expr.Col("discount").IsNotNull())
+	display(ctx, lf3.Limit(10))
 }
 
 // display collects and prints lf, releasing the result on return.

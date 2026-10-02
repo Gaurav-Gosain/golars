@@ -146,6 +146,9 @@ func handleToolCall(req *rpcRequest) *rpcResponse {
 	if err != nil {
 		return reply(req, toolError(err.Error()))
 	}
+	if _, err := json.Marshal(result); err != nil {
+		return reply(req, toolError("tool result cannot be represented as JSON"))
+	}
 	return reply(req, result)
 }
 
@@ -200,7 +203,7 @@ func asString(args json.RawMessage, key string) (string, error) {
 // asInt reads the named int argument. Accepts JSON numbers and
 // string numerals alike.
 func asInt(args json.RawMessage, key string, def int) (int, error) {
-	var m map[string]any
+	var m map[string]json.RawMessage
 	if len(args) == 0 {
 		return def, nil
 	}
@@ -211,17 +214,17 @@ func asInt(args json.RawMessage, key string, def int) (int, error) {
 	if !ok {
 		return def, nil
 	}
-	switch x := v.(type) {
-	case float64:
-		return int(x), nil
-	case string:
-		n, err := strconv.Atoi(x)
-		if err != nil {
+	text := string(v)
+	if len(v) > 0 && v[0] == '"' {
+		if err := json.Unmarshal(v, &text); err != nil {
 			return 0, err
 		}
-		return n, nil
 	}
-	return 0, fmt.Errorf("argument %q must be a number", key)
+	n, err := strconv.Atoi(text)
+	if err != nil {
+		return 0, fmt.Errorf("argument %q must be an integer in range: %w", key, err)
+	}
+	return n, nil
 }
 
 // asStringSlice reads the named argument as []string. Accepts a

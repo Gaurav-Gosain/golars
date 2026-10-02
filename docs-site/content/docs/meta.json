@@ -7,10 +7,12 @@
     "scripting",
     "sql",
     "mcp",
+    "jupyter",
     "api-surface",
     "api-design",
     "architecture",
     "memory-model",
-    "parallelism"
+    "parallelism",
+    "roadmap"
   ]
 }

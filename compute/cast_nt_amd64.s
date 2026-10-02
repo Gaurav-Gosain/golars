@@ -1,10 +1,13 @@
 //go:build amd64 && !noasm
 
-// Cast int64 → float64 with AVX2 streaming stores.
+// Cast int64 → float64 with streaming stores.
 // AVX2 has no packed int64→float64 (that's AVX-512 VCVTQQ2PD), so we use
-// scalar CVTSQ2SD and pack 4 doubles into a YMM before a single VMOVNTPD
-// store. The stream store bypasses write-allocate so the output buffer
-// doesn't pull 8 MB of cacheline-ownership traffic at 1 MiB inputs.
+// scalar CVTSQ2SD and pack pairs before two MOVNTPD stores. The stream
+// stores bypass write-allocate so the output buffer doesn't pull 8 MB
+// of cacheline-ownership traffic at 1 MiB inputs. Everything stays in
+// legacy SSE encoding: mixing VEX stores with scalar converts costs an
+// SSE-AVX transition penalty per iteration on Intel (see
+// cast_i64f64_amd64.s).
 
 #include "textflag.h"
 
@@ -22,9 +25,8 @@ loop4:
 	CMPQ AX, R8
 	JGE tail_scalar
 
-	// 4 scalar int64→double converts → pack → NT store of 4 doubles.
-	// Using X registers (128-bit) with UNPCKLPD builds a pair of
-	// doubles; we do two pairs then VINSERTF128 into a YMM.
+	// 4 scalar int64→double converts → pack pairs → two NT stores
+	// of 2 doubles each. Same traffic as one 32-byte NT store.
 
 	MOVQ (SI)(AX*8), R9
 	CVTSQ2SD R9, X0
@@ -38,15 +40,14 @@ loop4:
 	CVTSQ2SD R10, X3
 	MOVLHPS X3, X2 // X2 = [double2, double3]
 
-	VINSERTF128 $1, X2, Y0, Y0 // Y0 = [d0, d1, d2, d3]
-	VMOVNTPD Y0, (DI)(AX*8)
+	MOVNTPD X0, (DI)(AX*8)
+	MOVNTPD X2, 16(DI)(AX*8)
 
 	ADDQ $4, AX
 	JMP loop4
 
 tail_scalar:
 	SFENCE
-	VZEROUPPER
 
 	CMPQ AX, CX
 	JGE done

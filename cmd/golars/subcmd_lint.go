@@ -1,140 +1,123 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
-	"github.com/Gaurav-Gosain/golars/script"
+	"github.com/Gaurav-Gosain/golars/script/analysis"
+	"github.com/Gaurav-Gosain/golars/script/syntax"
 )
 
-// newLintCmd reports likely bugs in a .glr script without running it.
-// Detects unknown commands, unused stashes, use-before-load, and
-// unbalanced quotes in filter predicates.
+// newLintCmd reports problems in a .glr script without running it:
+// syntax errors, unknown commands, columns, functions, frames and
+// files, wrong argument counts and types, type errors the engine
+// would raise, and unused stashes. Columns and dtypes are tracked
+// through the pipeline from the schemas of the loaded files.
 func newLintCmd() *cobra.Command {
+	var short, asJSON bool
 	cmd := &cobra.Command{
-		Use:     "lint FILE.glr [FILE.glr...]",
-		Short:   "report common .glr mistakes without running the script",
-		Example: "golars lint pipeline.glr",
+		Use:   "lint FILE.glr [FILE.glr...]",
+		Short: "report .glr mistakes without running the script",
+		Long: "Check scripts statically. Data files are read for their schema only, so\n" +
+			"unknown columns, bad function calls and dtype errors are caught before a run.\n" +
+			"Relative paths resolve against the script directory and its parents.",
+		Example: "golars lint pipeline.glr\ngolars lint --short examples/script/*.glr",
 		Args:    cobra.MinimumNArgs(1),
 	}
+	cmd.Flags().BoolVarP(&short, "short", "s", false, "one line per finding, without source excerpts")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print findings as JSON")
 	cmd.ValidArgsFunction = glrFileCompletion
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
-		warnings := 0
+		findings := 0
+		var all []lintJSON
 		for _, path := range args {
 			src, err := os.ReadFile(path)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, errMsgStyle.Render(err.Error()))
-				return errSubcommandFailed
+				return err
 			}
-			for _, m := range lintGlr(string(src)) {
-				fmt.Printf("%s:%d: %s\n", path, m.line, m.msg)
-				warnings++
+			r := lintGlr(string(src), filepath.Dir(path))
+			findings += len(r.Diags)
+			switch {
+			case asJSON:
+				for _, d := range r.Diags {
+					all = append(all, toLintJSON(path, r.File.Lines, d))
+				}
+			case short:
+				for _, d := range r.Diags {
+					fmt.Println(shortDiag(path, r.File.Lines, d))
+				}
+			default:
+				fmt.Print(r.Render(path))
 			}
 		}
-		if warnings > 0 {
-			fmt.Fprintf(os.Stderr, "%d lint warning(s)\n", warnings)
-			return errSubcommandFailed
+		if asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if all == nil {
+				all = []lintJSON{}
+			}
+			if err := enc.Encode(all); err != nil {
+				return err
+			}
+		}
+		if findings > 0 {
+			if !asJSON {
+				fmt.Fprintf(os.Stderr, "%d finding(s)\n", findings)
+			}
+			return errSilent
 		}
 		return nil
 	}
 	return cmd
 }
 
-type lintMsg struct {
-	line int
-	msg  string
+// lintGlr analyses a script whose relative paths resolve against dir.
+func lintGlr(src, dir string) *analysis.Result {
+	return analysis.Analyze(src, analysis.Options{Dir: dir})
 }
 
-// lintGlr walks the script and returns a slice of warnings. Line
-// numbers are 1-based.
-func lintGlr(src string) []lintMsg {
-	var out []lintMsg
-	stashed := map[string]int{} // name -> line where stashed
-	loaded := map[string]int{}
-	used := map[string]struct{}{}
-	for i, raw := range strings.Split(src, "\n") {
-		lineNo := i + 1
-		stripped := strings.TrimSpace(raw)
-		// Strip inline comment so `# comment` doesn't count.
-		if j := strings.IndexByte(stripped, '#'); j >= 0 {
-			stripped = strings.TrimSpace(stripped[:j])
-		}
-		if stripped == "" {
-			continue
-		}
-		// Accept both "cmd" and ".cmd".
-		stripped = strings.TrimPrefix(stripped, ".")
-		parts := splitKeepQuoted(stripped)
-		if len(parts) == 0 {
-			continue
-		}
-		cmd := strings.ToLower(parts[0])
-		if script.FindCommand(cmd) == nil {
-			out = append(out, lintMsg{line: lineNo, msg: fmt.Sprintf("unknown command %q", cmd)})
-			continue
-		}
-		switch cmd {
-		case "stash":
-			if len(parts) < 2 {
-				out = append(out, lintMsg{line: lineNo, msg: "stash requires a NAME"})
-				break
-			}
-			stashed[parts[1]] = lineNo
-		case "use":
-			if len(parts) < 2 {
-				out = append(out, lintMsg{line: lineNo, msg: "use requires a NAME"})
-				break
-			}
-			name := parts[1]
-			used[name] = struct{}{}
-			if _, okStash := stashed[name]; !okStash {
-				if _, okLoad := loaded[name]; !okLoad {
-					out = append(out, lintMsg{
-						line: lineNo,
-						msg:  fmt.Sprintf("use %q with no prior stash or load as", name),
-					})
-				}
-			}
-		case "load":
-			// Detect `load PATH as NAME` form.
-			if idx := findAs(parts); idx > 0 && idx+1 < len(parts) {
-				loaded[parts[idx+1]] = lineNo
-			}
-		case "filter":
-			if stripped := strings.Join(parts[1:], " "); countRune(stripped, '"')%2 != 0 {
-				out = append(out, lintMsg{line: lineNo, msg: "filter has unbalanced quotes"})
-			}
-		}
+func shortDiag(path string, lines []string, d syntax.Diag) string {
+	msg := fmt.Sprintf("%s:%d:%d: %s: %s", path, d.Line+1, column(lines, d.Line, d.Col), d.Severity, d.Msg)
+	if d.Hint != "" {
+		msg += " (" + d.Hint + ")"
 	}
-	for name, line := range stashed {
-		if _, ok := used[name]; !ok {
-			out = append(out, lintMsg{
-				line: line,
-				msg:  fmt.Sprintf("stash %q is never used", name),
-			})
-		}
+	return msg
+}
+
+// column converts a byte column to a 1-based character column.
+func column(lines []string, line, col int) int {
+	if line < 0 || line >= len(lines) {
+		return col + 1
+	}
+	return utf8.RuneCountInString(lines[line][:min(col, len(lines[line]))]) + 1
+}
+
+type lintJSON struct {
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	Column    int    `json:"column"`
+	EndLine   int    `json:"end_line"`
+	EndColumn int    `json:"end_column"`
+	Severity  string `json:"severity"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Hint      string `json:"hint,omitempty"`
+	Fix       string `json:"fix,omitempty"`
+}
+
+func toLintJSON(path string, lines []string, d syntax.Diag) lintJSON {
+	out := lintJSON{
+		File: path, Line: d.Line + 1, Column: column(lines, d.Line, d.Col),
+		EndLine: d.EndLine + 1, EndColumn: column(lines, d.EndLine, d.EndCol),
+		Severity: d.Severity.String(), Code: d.Code, Message: d.Msg, Hint: d.Hint,
+	}
+	if d.Fix != nil {
+		out.Fix = d.Fix.Text
 	}
 	return out
-}
-
-func findAs(parts []string) int {
-	for i, p := range parts {
-		if strings.EqualFold(p, "as") {
-			return i
-		}
-	}
-	return -1
-}
-
-func countRune(s string, r rune) int {
-	n := 0
-	for _, c := range s {
-		if c == r {
-			n++
-		}
-	}
-	return n
 }

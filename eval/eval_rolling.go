@@ -1,7 +1,13 @@
 package eval
 
 import (
+	"context"
 	"fmt"
+
+	"github.com/apache/arrow-go/v18/arrow"
+
+	"github.com/Gaurav-Gosain/golars/compute"
+	"github.com/Gaurav-Gosain/golars/dtype"
 
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -24,8 +30,47 @@ func rollingOptsFrom(n expr.FunctionNode) series.RollingOptions {
 	return opts
 }
 
-// dispatchRolling routes by kernel name.
+// rollingAggOp names the aggregation whose polars result dtype a
+// rolling kernel follows.
+var rollingAggOp = map[string]string{
+	"rolling_sum": "sum", "rolling_min": "min", "rolling_max": "max",
+	"rolling_mean": "mean", "rolling_std": "std", "rolling_var": "var",
+}
+
+// dispatchRolling routes by kernel name. The kernels compute in f64 on
+// i32, i64 and f64 inputs; other numeric and bool inputs are widened
+// first, and the result takes the polars dtype (rolling_sum of i32 is
+// i32, rolling_min of u8 is u8, rolling_mean of f32 is f32).
 func dispatchRolling(name string, s *series.Series, opts series.RollingOptions) (*series.Series, error) {
+	if opts.MinPeriods > 0 && opts.WindowSize > 0 && opts.MinPeriods > opts.WindowSize {
+		return nil, fmt.Errorf("`min_periods` should be <= `window_size`")
+	}
+	in := s.DType()
+	switch in.ID() {
+	case arrow.INT32, arrow.INT64, arrow.FLOAT64:
+	default:
+		if in.IsNumeric() || in.IsBool() {
+			wide, err := compute.Cast(context.Background(), s, dtype.Float64())
+			if err != nil {
+				return nil, err
+			}
+			defer wide.Release()
+			s = wide
+		}
+	}
+	out, err := dispatchRollingRaw(name, s, opts)
+	if err != nil {
+		return nil, err
+	}
+	want, ok := dtype.AggResultDType(rollingAggOp[name], in)
+	if !ok || out.DType().Equal(want) {
+		return out, nil
+	}
+	defer out.Release()
+	return compute.Cast(context.Background(), out, want)
+}
+
+func dispatchRollingRaw(name string, s *series.Series, opts series.RollingOptions) (*series.Series, error) {
 	switch name {
 	case "rolling_sum":
 		return s.RollingSum(opts)

@@ -17,6 +17,8 @@ func TestNormalize(t *testing.T) {
 		{"  load  x  ", ".load  x"},
 		{"# just a comment", ""},
 		{"load x # trailing", ".load x"},
+		{`with x = 'alpha#beta' # trailing`, `.with x = 'alpha#beta'`},
+		{`with x = 'it\'s#valid' # trailing`, `.with x = 'it\'s#valid'`},
 		{"", ""},
 		{"   ", ""},
 		{"\t.sort  col", ".sort  col"},

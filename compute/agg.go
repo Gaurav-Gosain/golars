@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 
 	"github.com/Gaurav-Gosain/golars/internal/pool"
 	"github.com/Gaurav-Gosain/golars/series"
@@ -50,13 +51,12 @@ func SumInt64(ctx context.Context, s *series.Series, opts ...Option) (int64, err
 
 	par := inferParallelism(cfg, s.Len())
 	n := arr.Len()
-	// SIMD fast path for no-null int64. Gated at n<256K: above that the
-	// scalar path runs parallel partial sums across cores, which beats the
-	// serial-SIMD path because Sum becomes memory-bandwidth-bound and
-	// parallel sums saturate multiple memory controllers.
+	// SIMD fast path for no-null int64. Below sumSerialCutoff one core
+	// runs the SIMD kernel; above it the sum is memory-bandwidth-bound
+	// and parallel partial sums saturate more of the memory system.
 	if simdAvailable && s.DType().ID() == arrow.INT64 && arr.NullN() == 0 && hasSIMDInt64() {
 		vals := int64Values(arr)
-		if n < 256*1024 {
+		if n < sumSerialCutoff {
 			return simdSumInt64(vals), nil
 		}
 		// Parallel SIMD: each worker SIMD-reduces a partition.
@@ -91,8 +91,7 @@ func SumFloat64(ctx context.Context, s *series.Series, opts ...Option) (float64,
 	n := arr.Len()
 	if simdAvailable && s.DType().ID() == arrow.FLOAT64 && arr.NullN() == 0 && hasSIMDInt64() {
 		vals := float64Values(arr)
-		if n < 256*1024 {
-			// Single-threaded SIMD reduction wins up to 256K.
+		if n < sumSerialCutoff {
 			return simdSumFloat64(vals), nil
 		}
 		// Parallel SIMD: each worker runs simdSumFloat64 on its partition.
@@ -271,22 +270,61 @@ func partialSumsWithNulls[T int32 | int64 | uint32 | uint64 | float32 | float64]
 
 	parts := make([]T, par)
 	chunk := (n + par - 1) / par
+	bits := arr.NullBitmapBytes()
+	off := arr.Data().Offset()
 	err := pool.ParallelFor(ctx, par, par, func(ctx context.Context, start, end int) error {
 		for w := start; w < end; w++ {
 			s := w * chunk
-			e := s + chunk
-			e = min(e, n)
-			var local T
-			for i := s; i < e; i++ {
-				if arr.IsValid(i) {
-					local += vals[i]
-				}
+			e := min(s+chunk, n)
+			if s < e {
+				parts[w] = maskedSum(vals, bits, off, s, e)
 			}
-			parts[w] = local
 		}
 		return nil
 	})
 	return parts, err
+}
+
+// maskedSum adds vals[i] for every i in [s, e) whose validity bit
+// (bit i+off of bits) is set, in index order. It reads the bitmap a
+// byte at a time so all-valid and all-null bytes skip the per-row
+// test, instead of calling arrow's IsValid through an interface for
+// every row.
+func maskedSum[T int32 | int64 | uint32 | uint64 | float32 | float64](vals []T, bits []byte, off, s, e int) T {
+	var total T
+	i := s
+	for ; i < e && (i+off)&7 != 0; i++ {
+		if bits[(i+off)>>3]&(1<<((i+off)&7)) != 0 {
+			total += vals[i]
+		}
+	}
+	for ; i+8 <= e; i += 8 {
+		v := vals[i : i+8 : i+8]
+		switch b := bits[(i+off)>>3]; b {
+		case 0xFF:
+			total += v[0]
+			total += v[1]
+			total += v[2]
+			total += v[3]
+			total += v[4]
+			total += v[5]
+			total += v[6]
+			total += v[7]
+		case 0:
+		default:
+			for j := range 8 {
+				if b&(1<<j) != 0 {
+					total += v[j]
+				}
+			}
+		}
+	}
+	for ; i < e; i++ {
+		if bits[(i+off)>>3]&(1<<((i+off)&7)) != 0 {
+			total += vals[i]
+		}
+	}
+	return total
 }
 
 // MeanFloat64 returns the arithmetic mean of non-null values. Returns
@@ -296,11 +334,69 @@ func MeanFloat64(ctx context.Context, s *series.Series, opts ...Option) (float64
 	if c == 0 {
 		return math.NaN(), false, nil
 	}
+	if dt := s.DType(); dt.IsInteger() || dt.IsBool() {
+		// polars averages integers in f64: summing in i64 first would
+		// wrap for large values.
+		sum, err := sumIntsAsFloat(s)
+		if err != nil {
+			return 0, false, err
+		}
+		return sum / float64(c), true, nil
+	}
 	sum, err := SumFloat64(ctx, s, opts...)
 	if err != nil {
 		return 0, false, err
 	}
 	return sum / float64(c), true, nil
+}
+
+func sumIntsAsFloat(s *series.Series) (float64, error) {
+	var total float64
+	for _, c := range s.Chunks() {
+		switch a := c.(type) {
+		case *array.Int8:
+			total += sumValsFloat(a, a.Int8Values())
+		case *array.Int16:
+			total += sumValsFloat(a, a.Int16Values())
+		case *array.Int32:
+			total += sumValsFloat(a, a.Int32Values())
+		case *array.Int64:
+			total += sumValsFloat(a, a.Int64Values())
+		case *array.Uint8:
+			total += sumValsFloat(a, a.Uint8Values())
+		case *array.Uint16:
+			total += sumValsFloat(a, a.Uint16Values())
+		case *array.Uint32:
+			total += sumValsFloat(a, a.Uint32Values())
+		case *array.Uint64:
+			total += sumValsFloat(a, a.Uint64Values())
+		case *array.Boolean:
+			for i := range a.Len() {
+				if a.IsValid(i) && a.Value(i) {
+					total++
+				}
+			}
+		default:
+			return 0, isUnsupported("MeanFloat64", s.DType())
+		}
+	}
+	return total, nil
+}
+
+func sumValsFloat[T int8 | int16 | int32 | int64 | uint8 | uint16 | uint32 | uint64](a arrow.Array, vals []T) float64 {
+	var total float64
+	if a.NullN() == 0 {
+		for _, v := range vals {
+			total += float64(v)
+		}
+		return total
+	}
+	for i, v := range vals {
+		if a.IsValid(i) {
+			total += float64(v)
+		}
+	}
+	return total
 }
 
 // MinInt64 returns the minimum non-null integer value as int64. The bool
@@ -337,9 +433,9 @@ func minMaxInt(ctx context.Context, s *series.Series, opts []Option, isMax bool)
 	return 0, false, isUnsupported("MinInt64/MaxInt64", s.DType())
 }
 
-// MinFloat64, MaxFloat64 are the float analogues. NaN values participate in
-// ordering in a deterministic way: NaN is treated as greater than all
-// non-NaN values, matching polars' default ordering.
+// MinFloat64, MaxFloat64 are the float analogues. Like polars, NaN is
+// ignored unless every non-null value is NaN, in which case the result
+// is NaN.
 func MinFloat64(ctx context.Context, s *series.Series, opts ...Option) (float64, bool, error) {
 	return minMaxFloat(ctx, s, opts, false)
 }
@@ -369,7 +465,10 @@ func minMaxFloat(ctx context.Context, s *series.Series, opts []Option, isMax boo
 		// SIMD path: no-null inputs take the AVX2/AVX-512 MINPD/MAXPD
 		// reduction per worker. Worker-local NaN scan runs in a prepass
 		// so the hot path is pure SIMD.
-		if simdAvailable && hasSIMDInt64() && arr.NullN() == 0 && n >= minParallelRows {
+		if simdAvailable && hasSIMDInt64() && arr.NullN() == 0 {
+			if n < minMaxSerialCutoff {
+				par = 1
+			}
 			return reduceFloat64SIMD(ctx, float64Values(arr), par, n, isMax)
 		}
 		return reduceFloatChunks(ctx, arr, float64Values(arr), par, n, isMax)
@@ -384,7 +483,7 @@ func reduceIntChunks[T int32 | int64](
 	ctx context.Context, arr arrow.Array, vals []T, par, n int, isMax bool,
 ) (T, bool, error) {
 	par = max(min(cappedReductionWorkers(par), n), 1)
-	if n < minParallelRows {
+	if n < minMaxSerialCutoff {
 		par = 1
 	}
 
@@ -395,6 +494,7 @@ func reduceIntChunks[T int32 | int64](
 	parts := make([]result, par)
 	chunk := (n + par - 1) / par
 	noNulls := arr.NullN() == 0
+	i64, isInt64 := any(vals).([]int64)
 
 	err := pool.ParallelFor(ctx, par, par, func(ctx context.Context, start, end int) error {
 		for w := start; w < end; w++ {
@@ -405,6 +505,12 @@ func reduceIntChunks[T int32 | int64](
 				continue
 			}
 			var r result
+			if noNulls && isInt64 {
+				r.val = T(minMaxInt64Kernel(i64[s:e], isMax))
+				r.ok = true
+				parts[w] = r
+				continue
+			}
 			if noNulls {
 				r.val = vals[s]
 				r.ok = true
@@ -475,8 +581,9 @@ func reduceIntChunks[T int32 | int64](
 }
 
 // reduceFloat64SIMD is the no-null float64 min/max kernel. Each worker
-// scans its partition for NaN, then if clean reduces with MINPD/MAXPD.
-// NaN semantics match polars: NaN wins max, loses min. All-NaN → NaN.
+// reduces with MINPD/MAXPD and falls back to a scalar pass only when its
+// partition holds a NaN. NaN semantics match polars: NaN is ignored
+// unless every value is NaN.
 func reduceFloat64SIMD(ctx context.Context, vals []float64, par, n int, isMax bool) (float64, bool, error) {
 	par = max(min(cappedReductionWorkers(par), n), 1)
 
@@ -537,9 +644,7 @@ func reduceFloat64SIMD(ctx context.Context, vals []float64, par, n int, isMax bo
 					}
 				}
 			}
-			if isMax && anyNaN {
-				parts[w] = result{val: math.NaN(), ok: true, anyNaN: true}
-			} else if !bestIsNaN {
+			if !bestIsNaN {
 				parts[w] = result{val: best, ok: true, anyNaN: anyNaN}
 			} else {
 				parts[w] = result{val: math.NaN(), ok: true, anyNaN: true}
@@ -561,14 +666,11 @@ func reduceFloat64SIMD(ctx context.Context, vals []float64, par, n int, isMax bo
 			continue
 		}
 		if isMax {
-			if p.anyNaN {
-				final.val = math.NaN()
-				final.anyNaN = true
-			} else if !final.anyNaN && p.val > final.val {
+			if greater(p.val, final.val) {
 				final.val = p.val
 			}
 		} else {
-			if p.val < final.val {
+			if less(p.val, final.val) {
 				final.val = p.val
 			}
 		}
@@ -600,10 +702,7 @@ func reduceFloatChunks[T float32 | float64](
 	chunk := (n + par - 1) / par
 	noNulls := arr.NullN() == 0
 
-	// For NaN: treat NaN as greater than any non-NaN for max, greater for min
-	// ordering. Polars places NaN at the end on default sort ascending; for
-	// aggregation we match: NaN "wins" a max and "loses" a min only against
-	// itself.
+	// NaN is ignored unless every value is NaN (polars min/max).
 	err := pool.ParallelFor(ctx, par, par, func(ctx context.Context, start, end int) error {
 		for w := start; w < end; w++ {
 			s := w * chunk
@@ -615,21 +714,17 @@ func reduceFloatChunks[T float32 | float64](
 			var r result
 			if noNulls {
 				// Single-pass tight loop. `v < best` is false for NaN, so NaN
-				// is silently skipped once best is non-NaN; if vals[s] is NaN,
-				// the loop cannot replace best, so we fix that up after. For
-				// max, NaN wins per polars semantics, which we model by
-				// tracking anyNaN and returning NaN at the end.
+				// is skipped once best is a number; a leading NaN is replaced
+				// by the first number. The result is NaN only when every
+				// value is NaN, matching polars.
 				chunk := vals[s:e]
 				best := chunk[0]
 				bestIsNaN := best != best
-				anyNaN := bestIsNaN
 				if isMax {
 					for _, v := range chunk[1:] {
 						if v > best {
 							best = v
-						} else if v != v {
-							anyNaN = true
-						} else if bestIsNaN {
+						} else if bestIsNaN && v == v {
 							best = v
 							bestIsNaN = false
 						}
@@ -638,24 +733,14 @@ func reduceFloatChunks[T float32 | float64](
 					for _, v := range chunk[1:] {
 						if v < best {
 							best = v
-						} else if v != v {
-							anyNaN = true
-						} else if bestIsNaN {
+						} else if bestIsNaN && v == v {
 							best = v
 							bestIsNaN = false
 						}
 					}
 				}
-				if isMax && anyNaN {
-					r.val = T(math.NaN())
-					r.ok = true
-				} else if !bestIsNaN {
-					r.val = best
-					r.ok = true
-				} else {
-					r.val = T(math.NaN())
-					r.ok = true
-				}
+				r.val = best
+				r.ok = true
 				parts[w] = r
 				continue
 			}
@@ -709,9 +794,14 @@ func reduceFloatChunks[T float32 | float64](
 	return final.val, final.ok, nil
 }
 
+// greater and less order floats for min/max with NaN ignored: NaN never
+// beats a number, and any number beats NaN.
 func greater[T float32 | float64](a, b T) bool {
 	if isNaN(a) {
-		return !isNaN(b)
+		return false
+	}
+	if isNaN(b) {
+		return true
 	}
 	return a > b
 }

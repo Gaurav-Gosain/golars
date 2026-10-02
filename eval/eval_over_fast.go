@@ -5,11 +5,138 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 
+	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
+
+// tryCumSumOverSingleInt64 fuses pl.col(v).cum_sum().over(k) for a
+// single int64 key: one streaming pass keeps a running total per group
+// and emits each row in input order. Null keys fall back (they form
+// their own group in the generic path); null values emit null without
+// disturbing the running total, matching series.CumSum.
+func tryCumSumOverSingleInt64(
+	ctx context.Context, ec EvalContext, n expr.OverNode, df *dataframe.DataFrame, valName string,
+) (*series.Series, bool, error) {
+	_ = ctx
+	keyCol, err := df.Column(n.Keys[0])
+	if err != nil {
+		return nil, true, err
+	}
+	if keyCol.NumChunks() != 1 {
+		return nil, false, nil
+	}
+	keyArr, ok := keyCol.Chunk(0).(*array.Int64)
+	if !ok || keyArr.NullN() > 0 {
+		return nil, false, nil
+	}
+	valCol, err := df.Column(valName)
+	if err != nil {
+		return nil, true, err
+	}
+	if valCol.NumChunks() != 1 {
+		return nil, false, nil
+	}
+	keys := keyArr.Int64Values()
+	height := df.Height()
+	outName := n.String()
+	type slot struct {
+		key   int64
+		group int32
+		used  bool
+	}
+	run := func(get func(i int) (float64, bool)) (*series.Series, bool, error) {
+		res, err := series.BuildFloat64DirectFused(outName, height, compute.PoolingMem(ec.Alloc),
+			func(out []float64, validBits []byte) int {
+				capacity := 64
+				mask := uint64(capacity - 1)
+				slots := make([]slot, capacity)
+				accs := make([]float64, 0, 64)
+				nulls := 0
+				for i := range height {
+					if len(accs)*2 >= capacity {
+						capacity *= 2
+						mask = uint64(capacity - 1)
+						newSlots := make([]slot, capacity)
+						for _, s := range slots {
+							if !s.used {
+								continue
+							}
+							h := (uint64(s.key) * goldenRatio64) & mask
+							for newSlots[h].used {
+								h = (h + 1) & mask
+							}
+							newSlots[h] = s
+						}
+						slots = newSlots
+					}
+					k := keys[i]
+					h := (uint64(k) * goldenRatio64) & mask
+					var g int32
+					for {
+						s := &slots[h]
+						if !s.used {
+							s.used = true
+							s.key = k
+							s.group = int32(len(accs))
+							accs = append(accs, 0)
+							g = s.group
+							break
+						}
+						if s.key == k {
+							g = s.group
+							break
+						}
+						h = (h + 1) & mask
+					}
+					v, ok := get(i)
+					if !ok {
+						nulls++
+						continue
+					}
+					accs[g] += v
+					out[i] = accs[g]
+					validBits[i>>3] |= 1 << uint(i&7)
+				}
+				return nulls
+			})
+		return res, true, err
+	}
+	switch v := valCol.Chunk(0).(type) {
+	case *array.Int64:
+		vals := v.Int64Values()
+		valNullN := v.NullN()
+		return run(func(i int) (float64, bool) {
+			if valNullN > 0 && !v.IsValid(i) {
+				return 0, false
+			}
+			return float64(vals[i]), true
+		})
+	case *array.Float64:
+		vals := v.Float64Values()
+		valNullN := v.NullN()
+		return run(func(i int) (float64, bool) {
+			if valNullN > 0 && !v.IsValid(i) {
+				return 0, false
+			}
+			return vals[i], true
+		})
+	case *array.Int32:
+		vals := v.Int32Values()
+		valNullN := v.NullN()
+		return run(func(i int) (float64, bool) {
+			if valNullN > 0 && !v.IsValid(i) {
+				return 0, false
+			}
+			return float64(vals[i]), true
+		})
+	}
+	return nil, false, nil
+}
 
 // tryScalarAggOver recognises the common pattern
 //
@@ -59,12 +186,6 @@ func tryScalarAggOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *
 		return nil, err
 	}
 	groupCount := grouped.Height()
-	// Hash table: string(key) -> row index into aggCol.
-	lookup := make(map[string]int, groupCount)
-	for r := range groupCount {
-		key := overKey(keyCols, r)
-		lookup[key] = r
-	}
 	// Now scan the original rows and gather the agg value.
 	rowKeyCols := make([]*series.Series, len(n.Keys))
 	for i, k := range n.Keys {
@@ -73,6 +194,23 @@ func tryScalarAggOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *
 			return nil, err
 		}
 		rowKeyCols[i] = c
+	}
+	// Binary tuple keys when every key column has a supported dtype;
+	// otherwise the decimal overKey strings. Either way the join-back
+	// keys must match how GroupBy grouped them.
+	useBinary := dataframe.SupportedKeyTuple(keyCols) && dataframe.SupportedKeyTuple(rowKeyCols)
+	var buf []byte
+	encode := func(cols []*series.Series, row int) string {
+		if useBinary {
+			buf, _ = dataframe.AppendKeyTuple(buf[:0], cols, row)
+			return string(buf)
+		}
+		return overKey(cols, row)
+	}
+	// Hash table: key -> row index into aggCol.
+	lookup := make(map[string]int, groupCount)
+	for r := range groupCount {
+		lookup[encode(keyCols, r)] = r
 	}
 	height := df.Height()
 	outName := reduction.String()
@@ -83,8 +221,7 @@ func tryScalarAggOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *
 		vals := make([]int64, height)
 		valid := make([]bool, height)
 		for i := range height {
-			key := overKey(rowKeyCols, i)
-			if r, ok := lookup[key]; ok && a.IsValid(r) {
+			if r, ok := lookup[encode(rowKeyCols, i)]; ok && a.IsValid(r) {
 				vals[i] = a.Value(r)
 				valid[i] = true
 			}
@@ -94,8 +231,7 @@ func tryScalarAggOver(ctx context.Context, ec EvalContext, n expr.OverNode, df *
 		vals := make([]float64, height)
 		valid := make([]bool, height)
 		for i := range height {
-			key := overKey(rowKeyCols, i)
-			if r, ok := lookup[key]; ok && a.IsValid(r) {
+			if r, ok := lookup[encode(rowKeyCols, i)]; ok && a.IsValid(r) {
 				vals[i] = a.Value(r)
 				valid[i] = true
 			}
@@ -317,11 +453,11 @@ func scatterInt64Over(
 		s, err := series.FromInt64(outName, out, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggCount:
-		out := make([]int64, height)
+		out := make([]uint32, height)
 		for i := range height {
-			out[i] = countPerGroup[rowToGroup[i]]
+			out[i] = uint32(countPerGroup[rowToGroup[i]])
 		}
-		s, err := series.FromInt64(outName, out, nil, seriesAlloc(ec))
+		s, err := series.FromUint32(outName, out, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggMean:
 		out := make([]float64, height)
@@ -460,47 +596,33 @@ func scatterFloat64Over(
 			}
 		}
 	}
+	// Outputs are written straight into the arrow buffer. A group whose
+	// values are all null has a null mean, min and max (its sum is 0,
+	// as in polars).
 	switch op {
 	case expr.AggSum:
-		out := make([]float64, height)
-		for i := range height {
-			out[i] = sums[rowToGroup[i]]
-		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, sums, nil, ec)
 	case expr.AggMean:
-		out := make([]float64, height)
-		for i := range height {
-			g := rowToGroup[i]
-			c := counts[g]
-			if c == 0 {
-				continue
+		means := make([]float64, len(sums))
+		valid := make([]bool, len(sums))
+		for g, c := range counts {
+			if c > 0 {
+				means[g] = sums[g] / float64(c)
+				valid[g] = true
 			}
-			out[i] = sums[g] / float64(c)
 		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, means, valid, ec)
 	case expr.AggCount:
-		outI := make([]int64, height)
+		outI := make([]uint32, height)
 		for i := range height {
-			outI[i] = counts[rowToGroup[i]]
+			outI[i] = uint32(counts[rowToGroup[i]])
 		}
-		s, err := series.FromInt64(outName, outI, nil, seriesAlloc(ec))
+		s, err := series.FromUint32(outName, outI, nil, seriesAlloc(ec))
 		return s, true, err
 	case expr.AggMin:
-		out := make([]float64, height)
-		for i := range height {
-			out[i] = mins[rowToGroup[i]]
-		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, mins, seen, ec)
 	case expr.AggMax:
-		out := make([]float64, height)
-		for i := range height {
-			out[i] = maxs[rowToGroup[i]]
-		}
-		s, err := series.FromFloat64(outName, out, nil, seriesAlloc(ec))
-		return s, true, err
+		return scatterGroupFloat64(outName, height, rowToGroup, maxs, seen, ec)
 	}
 	return nil, false, nil
 }
@@ -602,3 +724,39 @@ func scatterInt64SumOver(
 // shift/mul sequence, so this is a 12-cycle saving per hash probe.
 // Measured at ~20% faster on the SumOverGroup hot loop.
 const goldenRatio64 uint64 = 0x9E3779B97F4A7C15
+
+// scatterGroupFloat64 builds the per-row column holding each row's group
+// value. groupValid, when non-nil, marks groups whose value is null.
+func scatterGroupFloat64(name string, height int, rowToGroup []int32, groupVals []float64, groupValid []bool, ec EvalContext) (*series.Series, bool, error) {
+	fill := func(out []float64) {
+		for i, g := range rowToGroup[:height] {
+			out[i] = groupVals[g]
+		}
+	}
+	allValid := true
+	for _, v := range groupValid {
+		allValid = allValid && v
+	}
+	mem := ec.Alloc
+	if mem == nil {
+		mem = memory.DefaultAllocator
+	}
+	if allValid {
+		s, err := series.BuildFloat64Direct(name, height, mem, fill)
+		return s, true, err
+	}
+	nulls := memory.NewResizableBuffer(mem)
+	nulls.Resize(int(bitutil.BytesForBits(int64(height))))
+	bits := nulls.Bytes()
+	clear(bits)
+	nullCount := 0
+	for i, g := range rowToGroup[:height] {
+		if groupValid[g] {
+			bitutil.SetBit(bits, i)
+		} else {
+			nullCount++
+		}
+	}
+	s, err := series.BuildFloat64DirectWithValidity(name, height, mem, fill, nulls, nullCount)
+	return s, true, err
+}

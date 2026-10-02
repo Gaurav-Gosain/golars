@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/internal/fileio"
 	iocsv "github.com/Gaurav-Gosain/golars/io/csv"
-	"github.com/Gaurav-Gosain/golars/io/ipc"
-	iojson "github.com/Gaurav-Gosain/golars/io/json"
-	ioparquet "github.com/Gaurav-Gosain/golars/io/parquet"
 	"github.com/Gaurav-Gosain/golars/sql"
 )
 
@@ -46,7 +45,7 @@ func init() {
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{"type": "string", "description": "Absolute path to the data file."},
-					"n":    map[string]any{"type": "integer", "default": 10, "description": "Number of rows to return (default 10)."},
+					"n":    map[string]any{"type": "integer", "minimum": 0, "default": 10, "description": "Number of rows to return (default 10)."},
 				},
 				"required": []string{"path"},
 			},
@@ -106,6 +105,7 @@ func init() {
 			Run: runNullCounts,
 		},
 	}
+	tools = append(tools, glrTools()...)
 }
 
 func findTool(name string) *Tool {
@@ -119,28 +119,18 @@ func findTool(name string) *Tool {
 
 // --- tool implementations ----------------------------------------
 
-// loadByExt picks a reader based on the file extension. Mirrors
-// cmd/golars/subcmd_inspect.go but kept self-contained so the MCP
-// binary doesn't import the main-package.
+// loadByExt reads a data file, choosing the reader from the extension.
+// Only regular files are accepted so a client cannot point the server
+// at a device or FIFO and hang it.
 func loadByExt(ctx context.Context, path string) (*dataframe.DataFrame, error) {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".csv", ".tsv":
-		opts := []iocsv.Option{}
-		if ext == ".tsv" {
-			opts = append(opts, iocsv.WithDelimiter('\t'))
-		}
-		return iocsv.ReadFile(ctx, path, opts...)
-	case ".parquet", ".pq":
-		return ioparquet.ReadFile(ctx, path)
-	case ".arrow", ".ipc":
-		return ipc.ReadFile(ctx, path)
-	case ".json":
-		return iojson.ReadFile(ctx, path)
-	case ".ndjson", ".jsonl":
-		return iojson.ReadNDJSONFile(ctx, path)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("unsupported file extension %q", ext)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
+	}
+	return fileio.Read(ctx, path)
 }
 
 func runSchema(args json.RawMessage) (any, error) {
@@ -200,6 +190,9 @@ func runHead(args json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if n < 0 {
+		return nil, fmt.Errorf("argument %q must be non-negative", "n")
+	}
 	df, err := loadByExt(context.Background(), path)
 	if err != nil {
 		return nil, err
@@ -257,6 +250,17 @@ func runSQL(args json.RawMessage) (any, error) {
 	files, err := asStringSlice(args, "files")
 	if err != nil {
 		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("argument %q must contain at least one file", "files")
+	}
+	names := make(map[string]bool, len(files))
+	for _, f := range files {
+		name := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+		if names[name] {
+			return nil, fmt.Errorf("duplicate table name %q", name)
+		}
+		names[name] = true
 	}
 	ctx := context.Background()
 	session := sql.NewSession()

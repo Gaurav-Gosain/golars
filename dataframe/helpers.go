@@ -44,7 +44,7 @@ func chunkValueAt(chunk arrow.Array, i int) any {
 			return v.ValueStr(i)
 		}
 	}
-	return nil
+	return cellValue(chunk, i)
 }
 
 // IsEmpty reports whether the DataFrame has zero rows (regardless of
@@ -115,14 +115,9 @@ func (df *DataFrame) WithColumns(cols ...*series.Series) (*DataFrame, error) {
 
 // NullCount returns a new DataFrame with one row: for every column,
 // the count of nulls. The result schema preserves names; dtypes become
-// int64. Mirrors polars' DataFrame.null_count.
+// u32. Mirrors polars' DataFrame.null_count.
 func (df *DataFrame) NullCount() *DataFrame {
-	cols := make([]*series.Series, len(df.cols))
-	for i, c := range df.cols {
-		s, _ := series.FromInt64(c.Name(), []int64{int64(c.NullCount())}, nil)
-		cols[i] = s
-	}
-	out, _ := New(cols...)
+	out, _ := df.reduceFrame(context.Background(), reduceNullCount, reduceArgs{})
 	return out
 }
 

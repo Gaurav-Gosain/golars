@@ -63,6 +63,27 @@ func TestSelectAndFilter(t *testing.T) {
 	}
 }
 
+func TestSelectParallelErrorReleases(t *testing.T) {
+	t.Parallel()
+	mem := testutil.NewCheckedAllocator(t)
+	ctx := context.Background()
+
+	df := buildDF(t, mem)
+	defer df.Release()
+
+	// Eight expressions force the parallel projection path; the
+	// missing column fails it. The checked allocator fails the test
+	// if any completed column leaks.
+	exprs := []expr.Expr{
+		expr.Col("a"), expr.Col("b"), expr.Col("c"),
+		expr.Col("a"), expr.Col("b"), expr.Col("c"),
+		expr.Col("a"), expr.Col("nope"),
+	}
+	if _, err := lazy.FromDataFrame(df).Select(exprs...).Collect(ctx, lazy.WithExecAllocator(mem)); err == nil {
+		t.Fatal("expected projection error for missing column")
+	}
+}
+
 func TestWithColumnsAndSort(t *testing.T) {
 	t.Parallel()
 	mem := testutil.NewCheckedAllocator(t)

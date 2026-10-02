@@ -39,11 +39,11 @@ func (s *Series) Abs(opts ...Option) (*Series, error) {
 		return FromInt32(s.Name(), out, validFromChunk(chunk), WithAllocator(cfg.alloc))
 	case *array.Float64:
 		raw := a.Float64Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
+		return BuildFloat64DirectNullable(s.Name(), n, cfg.alloc, func(out []float64) {
 			for i, v := range raw {
 				out[i] = math.Abs(v)
 			}
-		})
+		}, validFromChunk(chunk))
 	case *array.Float32:
 		raw := a.Float32Values()
 		out := make([]float32, n)
@@ -112,7 +112,7 @@ func (s *Series) Sign(opts ...Option) (*Series, error) {
 		return FromInt64(s.Name(), out, valid, WithAllocator(cfg.alloc))
 	case *array.Float64:
 		raw := a.Float64Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
+		return BuildFloat64DirectNullable(s.Name(), n, cfg.alloc, func(out []float64) {
 			for i, v := range raw {
 				switch {
 				case math.IsNaN(v):
@@ -123,44 +123,55 @@ func (s *Series) Sign(opts ...Option) (*Series, error) {
 					out[i] = 1
 				}
 			}
-		})
+		}, valid)
 	}
 	return nil, fmt.Errorf("series: Sign unsupported for dtype %s", s.DType())
 }
 
-// Round rounds each value to the given number of decimal places.
-// decimals=0 rounds to integer. Integers are a no-op clone.
-// NaN stays NaN; ±Inf stays unchanged.
+// Round rounds each value to the given number of decimal places with
+// ties to even, polars' default mode: 25.65 is 25.6 (25.65 * 10 is
+// exactly 256.5 in f64). f32 values are rounded in f64 and cast back.
+// decimals=0 rounds to integer. Integers are a no-op clone. A
+// non-finite result (NaN, Inf, overflow) keeps the input value.
 func (s *Series) Round(decimals int, opts ...Option) (*Series, error) {
 	cfg := resolve(opts)
 	chunk := s.Chunk(0)
 	n := chunk.Len()
+	round := func(v float64) float64 {
+		if decimals == 0 {
+			return math.RoundToEven(v)
+		}
+		if decimals >= 326 {
+			return v
+		}
+		scale := math.Pow10(decimals)
+		r := math.RoundToEven(v*scale) / scale
+		if math.IsNaN(r) || math.IsInf(r, 0) {
+			return v
+		}
+		return r
+	}
 	switch a := chunk.(type) {
 	case *array.Float64:
 		raw := a.Float64Values()
-		scale := math.Pow10(decimals)
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
+		return BuildFloat64DirectNullable(s.Name(), n, cfg.alloc, func(out []float64) {
 			for i, v := range raw {
-				if math.IsNaN(v) || math.IsInf(v, 0) {
-					out[i] = v
-					continue
-				}
-				out[i] = math.Round(v*scale) / scale
+				out[i] = round(v)
 			}
-		})
+		}, validFromChunk(chunk))
 	case *array.Float32:
 		raw := a.Float32Values()
 		out := make([]float32, n)
-		scale := float32(math.Pow10(decimals))
 		for i, v := range raw {
-			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-				out[i] = v
-				continue
+			r := float32(round(float64(v)))
+			if math.IsInf(float64(r), 0) {
+				r = v
 			}
-			out[i] = float32(math.Round(float64(v*scale))) / scale
+			out[i] = r
 		}
 		return FromFloat32(s.Name(), out, validFromChunk(chunk), WithAllocator(cfg.alloc))
-	case *array.Int64, *array.Int32, *array.Uint32, *array.Uint64:
+	case *array.Int64, *array.Int32, *array.Uint32, *array.Uint64,
+		*array.Int8, *array.Int16, *array.Uint8, *array.Uint16:
 		return s.Clone(), nil
 	}
 	return nil, fmt.Errorf("series: Round unsupported for dtype %s", s.DType())
@@ -187,7 +198,7 @@ func (s *Series) Clip(lo, hi float64, opts ...Option) (*Series, error) {
 	switch a := chunk.(type) {
 	case *array.Float64:
 		raw := a.Float64Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
+		return BuildFloat64DirectNullable(s.Name(), n, cfg.alloc, func(out []float64) {
 			for i, v := range raw {
 				if v < lo {
 					out[i] = lo
@@ -197,7 +208,7 @@ func (s *Series) Clip(lo, hi float64, opts ...Option) (*Series, error) {
 					out[i] = v
 				}
 			}
-		})
+		}, validFromChunk(chunk))
 	case *array.Int64:
 		raw := a.Int64Values()
 		out := make([]int64, n)
@@ -222,69 +233,17 @@ func (s *Series) Clip(lo, hi float64, opts ...Option) (*Series, error) {
 	return nil, fmt.Errorf("series: Clip unsupported for dtype %s", s.DType())
 }
 
-// Pow raises each element to an integer power. Integer output for
-// integer input, float for float.
+// Pow raises each element to exponent. The result is float (f32 stays
+// f32, other numeric inputs become f64) and nulls are kept.
 func (s *Series) Pow(exponent float64, opts ...Option) (*Series, error) {
-	cfg := resolve(opts)
-	chunk := s.Chunk(0)
-	n := chunk.Len()
-	switch a := chunk.(type) {
-	case *array.Float64:
-		raw := a.Float64Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
-			for i, v := range raw {
-				out[i] = math.Pow(v, exponent)
-			}
-		})
-	case *array.Int64:
-		raw := a.Int64Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
-			for i, v := range raw {
-				out[i] = math.Pow(float64(v), exponent)
-			}
-		})
-	}
-	return nil, fmt.Errorf("series: Pow unsupported for dtype %s", s.DType())
+	return s.floatUnary("Pow", func(v float64) float64 { return math.Pow(v, exponent) }, opts)
 }
 
-// mathUnary applies fn to each element, producing a float64 output.
-// Integer inputs are promoted to float64. NaN handling is fn's
-// responsibility (stdlib math fns all propagate NaN correctly).
+// mathUnary applies fn to each element. Integer inputs are promoted to
+// float64, f32 stays f32 and nulls are preserved, as in polars. NaN
+// handling is fn's responsibility (stdlib math fns propagate NaN).
 func (s *Series) mathUnary(name string, fn func(float64) float64, opts []Option) (*Series, error) {
-	cfg := resolve(opts)
-	chunk := s.Chunk(0)
-	n := chunk.Len()
-	switch a := chunk.(type) {
-	case *array.Float64:
-		raw := a.Float64Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
-			for i, v := range raw {
-				out[i] = fn(v)
-			}
-		})
-	case *array.Float32:
-		raw := a.Float32Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
-			for i, v := range raw {
-				out[i] = fn(float64(v))
-			}
-		})
-	case *array.Int64:
-		raw := a.Int64Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
-			for i, v := range raw {
-				out[i] = fn(float64(v))
-			}
-		})
-	case *array.Int32:
-		raw := a.Int32Values()
-		return BuildFloat64Direct(s.Name(), n, cfg.alloc, func(out []float64) {
-			for i, v := range raw {
-				out[i] = fn(float64(v))
-			}
-		})
-	}
-	return nil, fmt.Errorf("series: %s unsupported for dtype %s", name, s.DType())
+	return s.floatUnary(name, fn, opts)
 }
 
 // validFromChunk extracts a []bool validity slice from a chunk, or

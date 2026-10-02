@@ -3,15 +3,13 @@
 // API driven by the polars scenario catalog; no code copied.
 //
 // Polars' join test suite is enormous (~30 files worth of edge
-// cases); this file ports the subset that exercises semantics
-// golars implements today.
+// cases); this file ports a hand-written subset. The option matrix
+// (every join type with coalesce, nulls_equal, maintain_order,
+// validate, suffixes and multi-key or mixed-dtype keys) is covered by
+// join_general_parity_test.go, generated from polars.
 //
 // Scenarios NOT ported:
-//   - semi/anti joins           (not yet implemented)
-//   - asof / merge-sorted       (not yet implemented)
-//   - full outer join           (not yet implemented)
 //   - join on expressions       (no expression-keyed join)
-//   - Categorical / Struct keys (no such dtypes)
 
 package dataframe_test
 

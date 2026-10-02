@@ -1,0 +1,67 @@
+{
+  "name": "arg_max_over_str_null",
+  "status": "known",
+  "note": "arg_max().over() on a string key with a null returns the wrong index (golars 1 rows, polars 0 rows)",
+  "plan": {
+    "seed": 200087,
+    "ops": [
+      {
+        "op": "filter",
+        "pred": {
+          "k": "bin",
+          "name": "<=",
+          "args": [
+            {
+              "k": "call",
+              "name": "over",
+              "args": [
+                {
+                  "k": "call",
+                  "name": "arg_max",
+                  "args": [
+                    {
+                      "k": "col",
+                      "name": "c0"
+                    }
+                  ]
+                },
+                {
+                  "k": "raw",
+                  "val": "c0"
+                }
+              ]
+            },
+            {
+              "k": "lit",
+              "val": 0.25,
+              "f": true
+            }
+          ]
+        }
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "str",
+      "values": [
+        null,
+        "a"
+      ]
+    }
+  ],
+  "want": {
+    "ok": true,
+    "cols": [
+      {
+        "name": "c0",
+        "type": "str",
+        "values": []
+      }
+    ]
+  }
+}

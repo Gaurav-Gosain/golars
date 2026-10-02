@@ -1,7 +1,7 @@
-# Multi-stage build: compile the CLI + MCP server in a full Go image,
-# then copy them into a tiny distroless base. The result is a 40 MiB
-# image with the two binaries on $PATH and no shell: exactly what
-# you want for `docker run ghcr.io/gaurav-gosain/golars sql '...'`.
+# Multi-stage build: compile the CLI, the MCP server and the LSP in a
+# full Go image, then copy them into a tiny distroless base. The result
+# is a small image with the three binaries on $PATH and no shell:
+# exactly what you want for `docker run ghcr.io/gaurav-gosain/golars sql '...'`.
 
 FROM golang:1.27.1 AS build
 WORKDIR /src

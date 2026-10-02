@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 
 	"github.com/Gaurav-Gosain/golars/compute"
 	"github.com/Gaurav-Gosain/golars/dataframe"
+	"github.com/Gaurav-Gosain/golars/dtype"
 	"github.com/Gaurav-Gosain/golars/expr"
 	"github.com/Gaurav-Gosain/golars/series"
 )
@@ -19,7 +21,13 @@ func isNaN(v float64) bool { return v != v }
 // the first Arg via recursive evalNode, then calls the corresponding
 // series kernel. Multi-arg functions (fill_null with another Expr)
 // evaluate each arg first.
-func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *dataframe.DataFrame) (*series.Series, error) {
+func evalFunctionRaw(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *dataframe.DataFrame) (*series.Series, error) {
+	if isTemporalFunction(n.Name) {
+		return evalTemporalFunction(ctx, ec, n, df)
+	}
+	if fn, ok := coreFuncs[n.Name]; ok {
+		return fn(ctx, ec, n, df)
+	}
 	// Argless constructors: int_range, ones, zeros don't reference a
 	// column. Handle before the len==0 guard below.
 	switch n.Name {
@@ -33,6 +41,8 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		return evalCoalesce(ctx, ec, n, df)
 	case "concat_str":
 		return evalConcatStr(ctx, ec, n, df)
+	case "struct.field_ref":
+		return evalFieldRef(ctx, n)
 	}
 	if len(n.Args) == 0 {
 		return nil, fmt.Errorf("eval: function %q requires at least one argument", n.Name)
@@ -47,6 +57,9 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 	}
 	if len(n.Name) > 7 && n.Name[:7] == "struct." {
 		return evalStructFunction(ctx, ec, n, df)
+	}
+	if out, ok, err := evalNamespaceFunction(ctx, ec, n, df); ok {
+		return out, err
 	}
 	arg0, err := evalNode(ctx, ec, n.Args[0], df)
 	if err != nil {
@@ -196,6 +209,7 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 				length = x
 			}
 		}
+		off, length = series.ClampSlice(off, length, arg0.Len())
 		out, err := arg0.Slice(off, length)
 		releaseOnErr = nil
 		arg0.Release()
@@ -220,13 +234,59 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		if err != nil {
 			return nil, err
 		}
+		// An untyped literal fill takes the input's dtype (polars:
+		// col(i8).fill_null(5) stays i8).
+		pair := []*series.Series{arg0.Clone(), fillArg}
+		if err := adoptDynLiterals(ctx, ec, n.Args[:2], pair); err != nil {
+			releaseAll(pair)
+			return nil, err
+		}
+		pair[0].Release()
+		fillArg = pair[1]
 		defer fillArg.Release()
+		if arg0.Len() == 1 && fillArg.Len() > 1 {
+			// A unit input (a literal) broadcasts to the fill column.
+			b, err := arg0.Broadcast(fillArg.Len(), opt)
+			if err != nil {
+				return nil, err
+			}
+			arg0.Release()
+			arg0 = b
+			releaseOnErr = arg0
+		}
+		// A column-valued fill (fill_null(col("b"))) fills row by row. On
+		// an empty or one-row frame the column has no usable first value
+		// (it is empty or null), so it also takes the row-wise path.
+		if fillArg.Len() == arg0.Len() && (fillArg.Len() != 1 || fillArg.NullCount() == 1) {
+			releaseOnErr = nil
+			defer arg0.Release()
+			return fillNullFrom(ctx, ec, arg0, fillArg)
+		}
 		// Extract the first element of fillArg as the fill scalar.
-		v := scalarOf(fillArg)
-		out, err := arg0.FillNull(v, opt)
+		if fillArg.Len() == 0 || fillArg.NullCount() == fillArg.Len() {
+			// A null fill value, or a literal broadcast over a zero-row
+			// frame, leaves the input unchanged.
+			releaseOnErr = nil
+			return arg0, nil
+		}
+		if v := scalarOf(fillArg); v != nil && fillArg.DType().Equal(arg0.DType()) &&
+			(arg0.DType().ID() == arrow.INT64 || arg0.DType().ID() == arrow.FLOAT64) {
+			// Scalar kernels for the common dtypes.
+			out, err := arg0.FillNull(v, opt)
+			releaseOnErr = nil
+			arg0.Release()
+			return out, err
+		}
+		// Every other dtype pair: broadcast the scalar and fill row by
+		// row in the common supertype.
 		releaseOnErr = nil
-		arg0.Release()
-		return out, err
+		defer arg0.Release()
+		wide, err := fillArg.Broadcast(arg0.Len(), seriesAlloc(ec))
+		if err != nil {
+			return nil, err
+		}
+		defer wide.Release()
+		return fillNullFrom(ctx, ec, arg0, wide)
 	case "fill_nan":
 		v := 0.0
 		if len(n.Params) >= 1 {
@@ -294,7 +354,7 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		arg0.Release()
 		return out, err
 	case "cum_sum":
-		out, err := arg0.CumSum(opt)
+		out, err := cumTyped(arg0, "sum", func(s *series.Series) (*series.Series, error) { return s.CumSum(opt) })
 		releaseOnErr = nil
 		arg0.Release()
 		return out, err
@@ -309,12 +369,12 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 		arg0.Release()
 		return out, err
 	case "cum_prod":
-		out, err := arg0.CumProd(opt)
+		out, err := cumTyped(arg0, "product", func(s *series.Series) (*series.Series, error) { return s.CumProd(opt) })
 		releaseOnErr = nil
 		arg0.Release()
 		return out, err
 	case "cum_count":
-		out, err := arg0.CumCount(opt)
+		out, err := toUint32(arg0.CumCount(opt))
 		releaseOnErr = nil
 		arg0.Release()
 		return out, err
@@ -390,19 +450,19 @@ func evalFunction(ctx context.Context, ec EvalContext, n expr.FunctionNode, df *
 	case "skew":
 		defer func() { releaseOnErr = nil }()
 		defer arg0.Release()
-		v, err := arg0.Skew()
+		v, ok, err := arg0.SkewNullable(paramBool(n, 0, true))
 		if err != nil {
 			return nil, err
 		}
-		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{!isNaN(v)})
+		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{ok})
 	case "kurtosis":
 		defer func() { releaseOnErr = nil }()
 		defer arg0.Release()
-		v, err := arg0.Kurtosis()
+		v, ok, err := arg0.KurtosisNullable(paramBool(n, 0, true), paramBool(n, 1, true))
 		if err != nil {
 			return nil, err
 		}
-		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{!isNaN(v)})
+		return series.FromFloat64(arg0.Name(), []float64{v}, []bool{ok})
 	case "entropy":
 		defer func() { releaseOnErr = nil }()
 		defer arg0.Release()
@@ -568,9 +628,33 @@ func evalScalarAgg(n expr.FunctionNode, s *series.Series) (*series.Series, error
 		}
 		return series.FromBool(s.Name(), []bool{v}, nil)
 	case "product":
+		// polars: integer and bool products are i64 (u64 stays u64),
+		// f32 stays f32.
+		if s.DType().IsBool() {
+			wide, err := compute.Cast(context.Background(), s, dtype.Int64())
+			if err != nil {
+				return nil, err
+			}
+			// The deferred release above still frees the input.
+			defer wide.Release()
+			s = wide
+		}
+		if s.DType().IsInteger() {
+			v, err := s.ProductInt64()
+			if err != nil {
+				return nil, err
+			}
+			if s.DType().Equal(dtype.Uint64()) {
+				return series.FromUint64(s.Name(), []uint64{uint64(v)}, nil)
+			}
+			return series.FromInt64(s.Name(), []int64{v}, nil)
+		}
 		v, err := s.Product()
 		if err != nil {
 			return nil, err
+		}
+		if s.DType().Equal(dtype.Float32()) {
+			return series.FromFloat32(s.Name(), []float32{float32(v)}, nil)
 		}
 		return series.FromFloat64(s.Name(), []float64{v}, nil)
 	case "quantile":

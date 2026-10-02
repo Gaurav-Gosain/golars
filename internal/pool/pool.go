@@ -29,9 +29,10 @@ func DefaultParallelism() int { return runtime.GOMAXPROCS(0) }
 
 // ParallelFor runs fn over the half-open index range [0, n) using up to
 // parallelism goroutines. The range is split into approximately equal chunks;
-// fn is called once per chunk with (ctx, start, end). If fn returns an error
-// or ctx is cancelled, ParallelFor stops scheduling new chunks and returns
-// the first non-nil error.
+// fn is called once per chunk with (ctx, start, end), with chunk 0 on the
+// calling goroutine. A chunk that has not started when ctx is cancelled is
+// skipped. ParallelFor returns the error of the lowest-indexed chunk that
+// failed, or nil.
 //
 // If parallelism <= 0 it is replaced by DefaultParallelism.
 // If n <= 0 the function returns nil without calling fn.
@@ -48,21 +49,42 @@ func ParallelFor(ctx context.Context, n, parallelism int, fn func(ctx context.Co
 		return fn(ctx, 0, n)
 	}
 
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(parallelism)
-
-	chunk := (n + parallelism - 1) / parallelism
-	for start := 0; start < n; start += chunk {
-		end := min(start+chunk, n)
-		s, e := start, end
-		g.Go(func() error {
-			if gctx.Err() != nil {
-				return gctx.Err()
-			}
-			return fn(gctx, s, e)
-		})
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return g.Wait()
+	// One goroutine per chunk beyond the first; the caller runs chunk 0
+	// itself instead of parking in Wait. Kernels call this on every
+	// batch at mid sizes (64K to 1M rows) where the spawn and wake-up
+	// cost is a visible share of the run, so this path avoids errgroup's
+	// derived context, semaphore channel and extra goroutine. Chunks run
+	// to completion once started; the reported error is the one from
+	// the lowest-indexed failing chunk, so it does not depend on
+	// scheduling.
+	chunk := (n + parallelism - 1) / parallelism
+	nChunks := (n + chunk - 1) / chunk
+	errs := make([]error, nChunks)
+	var wg sync.WaitGroup
+	for c := 1; c < nChunks; c++ {
+		s := c * chunk
+		e := min(s+chunk, n)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := ctx.Err(); err != nil {
+				errs[c] = err
+				return
+			}
+			errs[c] = fn(ctx, s, e)
+		}()
+	}
+	errs[0] = fn(ctx, 0, min(chunk, n))
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // MapChunks runs fn once per element of a slice of chunks concurrently. The
@@ -108,9 +130,8 @@ func MapChunks[In, Out any](ctx context.Context, chunks []In, parallelism int, f
 // limit. It exists so callers can construct their own named pool sites
 // without re-deriving the context contract.
 type Group struct {
-	g    *errgroup.Group
-	ctx  context.Context
-	once sync.Once
+	g   *errgroup.Group
+	ctx context.Context
 }
 
 // NewGroup returns a Group that caps concurrent goroutines at parallelism.

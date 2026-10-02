@@ -1,0 +1,58 @@
+{
+  "name": "quantile_bool_error",
+  "status": "fixed",
+  "note": "quantile on bool: polars raises, golars returns a value (polars raised InvalidOperationError: `quantile` operation not supported for dtype `bool`)",
+  "plan": {
+    "seed": 200157,
+    "ops": [
+      {
+        "op": "group_by",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "call",
+                "name": "quantile",
+                "args": [
+                  {
+                    "k": "lit",
+                    "val": false
+                  },
+                  {
+                    "k": "raw",
+                    "val": 0.5,
+                    "f": true
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ],
+        "keys": [
+          "c2"
+        ],
+        "maintain_order": true
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c2",
+      "type": "i8",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": false,
+    "error": "InvalidOperationError: `quantile` operation not supported for dtype `bool`"
+  }
+}

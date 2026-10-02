@@ -1,0 +1,75 @@
+{
+  "name": "neg_unsigned",
+  "status": "fixed",
+  "note": "negation of an unsigned column: polars raises, golars returns i64 (polars raised InvalidOperationError: `neg` operation not supported for dtype `u32`)",
+  "plan": {
+    "seed": 212378,
+    "ops": [
+      {
+        "op": "pivot",
+        "on": [
+          "c5"
+        ],
+        "index": [
+          "c4"
+        ],
+        "values": "c0",
+        "agg": "len",
+        "on_values": [
+          "é",
+          "abc",
+          "a",
+          "123"
+        ]
+      },
+      {
+        "op": "select",
+        "exprs": [
+          {
+            "k": "call",
+            "name": "alias",
+            "args": [
+              {
+                "k": "neg",
+                "args": [
+                  {
+                    "k": "col",
+                    "name": "abc"
+                  }
+                ]
+              },
+              {
+                "k": "raw",
+                "val": "o1"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "order": {
+      "mode": "exact"
+    }
+  },
+  "left": [
+    {
+      "name": "c0",
+      "type": "f64",
+      "values": []
+    },
+    {
+      "name": "c4",
+      "type": "i32",
+      "values": []
+    },
+    {
+      "name": "c5",
+      "type": "str",
+      "values": []
+    }
+  ],
+  "want": {
+    "ok": false,
+    "error": "InvalidOperationError: `neg` operation not supported for dtype `u32`"
+  }
+}
